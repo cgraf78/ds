@@ -15,8 +15,16 @@
 # Share:       ~/.config/ds/share-<backend>.sh   (define _share_start, _share_stop, etc.)
 # Hosts:       ~/.config/ds/connect*.conf          (hostname → connect method)
 
-# Resolve bundled plugin directory (relative to this script)
-DS_LIB_DIR="$(cd "$(dirname "$0")/../lib/plugins" 2>/dev/null && pwd)"
+# Resolve bundled plugin directory (follows symlinks to find real install location)
+_ds_self="$0"
+if [[ -L "$_ds_self" ]]; then
+    # readlink -f isn't portable (macOS); resolve one level which is enough
+    _ds_self="$(cd "$(dirname "$_ds_self")" && readlink "$(basename "$_ds_self")")"
+    # Handle relative symlink targets
+    [[ "$_ds_self" != /* ]] && _ds_self="$(cd "$(dirname "$0")" && cd "$(dirname "$_ds_self")" && pwd)/$(basename "$_ds_self")"
+fi
+DS_LIB_DIR="$(cd "$(dirname "$_ds_self")/../lib/plugins" 2>/dev/null && pwd)"
+unset _ds_self
 CONF_DIR="${HOME}/.config/ds"
 ACTION="session"
 PROFILE=""
