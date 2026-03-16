@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # ds profile: chat — single window running a chatbot (DS_CHAT_CHATBOT)
 _profile_chat() {
     local session="$1"

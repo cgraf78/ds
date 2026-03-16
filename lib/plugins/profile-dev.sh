@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # ds profile: dev — chatbot in top pane (if DS_DEV_CHATBOT set), bash below, separate bash window
 _profile_dev() {
     local session="$1"

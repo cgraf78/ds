@@ -18,7 +18,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # ---------------------------------------------------------------------------
 
 TEST_HOME=$(_tmpdir)
-HOME_ORIG="$HOME"
 export HOME="$TEST_HOME"
 export CONF_DIR="$TEST_HOME/.config/ds"
 mkdir -p "$CONF_DIR"
@@ -46,6 +45,7 @@ printf 'dummy' > "$DS_UPTERM_PRIVATE_KEY"
 . "$SCRIPT_DIR/../bin/ds"
 # Install and load the upterm share backend for sharing tests
 cp "$SCRIPT_DIR/../lib/plugins/share-upterm.sh" "$CONF_DIR/"
+# shellcheck source=/dev/null
 . "$CONF_DIR/share-upterm.sh"
 
 # Create a mock tmux in a temp bin dir and prepend to PATH
@@ -310,10 +310,12 @@ result=$( (SESSION="" HOST="myhost"; _resolve_session_target) 2>&1 || true)
 _assert_contains "remote without session errors" "session name required for remote" "$result"
 
 # No session, no host, no tmux → error
+# shellcheck disable=SC2030  # intentional — TMUX set in subshell for isolation
 result=$( (SESSION="" HOST="" TMUX=""; _resolve_session_target) 2>&1 || true)
 _assert_contains "no session, no tmux errors" "not inside tmux" "$result"
 
 # Inside tmux, no session → defaults to current session
+# shellcheck disable=SC2031  # intentional — TMUX set independently of subshell above
 export TMUX="/tmp/tmux-test/default,12345,0"
 export MOCK_CURRENT_SESSION="dev-work"
 SESSION="" HOST=""
@@ -373,7 +375,7 @@ _assert_contains "share action: error for nonexistent session" "no session" "$re
 _pid_f=$(_upterm_pid_file)
 if [[ -f "$_pid_f" ]]; then
     _pid=$(cat "$_pid_f" 2>/dev/null || true)
-    [[ "$_pid" =~ ^[0-9]+$ ]] && kill "$_pid" 2>/dev/null || true
+    if [[ "$_pid" =~ ^[0-9]+$ ]]; then kill "$_pid" 2>/dev/null || true; fi
     rm -f "$_pid_f"
 fi
 rm -f "$DS_SHARE_INFO_FILE" "$(_upterm_admin_file)" "$(_upterm_session_file)" "$(_upterm_log_file)"
@@ -801,6 +803,7 @@ echo ""
 echo "=== Remote command building ==="
 
 # Install connection plugins for testing
+# shellcheck disable=SC2016  # intentional — writing literal $1/$2 to file
 cp "$SCRIPT_DIR/../lib/plugins/connect-autossh.sh" "$CONF_DIR/" 2>/dev/null || \
     printf '_connect_autossh() { exec autossh -M0 "$1" -t "$2"; }\n' > "$CONF_DIR/connect-autossh.sh"
 
@@ -865,6 +868,7 @@ result=$(_run_remote "HOST=server1 ACTION=session SESSION=dev \
     CONNECT_OVERRIDE=")
 remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
 _assert_contains "ssh remote: host" "SSH_HOST=server1" "$remote_log"
+# shellcheck disable=SC2088  # intentional — matching literal tilde in remote command
 _assert_contains "ssh remote: runs ds" "~/.local/bin/ds" "$remote_log"
 _assert_contains "ssh remote: passes session name" "dev" "$remote_log"
 
@@ -872,6 +876,7 @@ _assert_contains "ssh remote: passes session name" "dev" "$remote_log"
 result=$(_run_remote "HOST=server1 ACTION=session SESSION=ds \
     CONNECT_OVERRIDE=")
 remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+# shellcheck disable=SC2088  # intentional — matching literal tilde in remote command
 _assert_contains "ssh remote default: runs ds" "~/.local/bin/ds" "$remote_log"
 
 # Test autossh connection method
