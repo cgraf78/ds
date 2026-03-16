@@ -14,11 +14,11 @@ jobs:
       - name: Install shellcheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Run shellcheck on ds
-        run: shellcheck bin/ds
+        run: shellcheck -x bin/ds
       - name: Run shellcheck on plugins
         run: shellcheck -x lib/plugins/*.sh
       - name: Run shellcheck on tests
-        run: shellcheck -x tests/ds-test tests/test-helpers.sh
+        run: shellcheck -x -P SCRIPTDIR tests/ds-test tests/test-helpers.sh
 
   test:
     strategy:
@@ -27,5 +27,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Install Bash (macOS)
+        if: runner.os == 'macOS'
+        run: brew install bash
       - name: Run tests
         run: bash tests/ds-test
