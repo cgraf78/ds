@@ -1,0 +1,31 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run tests
+        run: bash tests/ds-test
+
+      - name: Create tarball
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+          tar czf "ds-${VERSION}.tar.gz" \
+            --transform "s,^,ds-${VERSION}/," \
+            bin/ lib/ examples/ install.sh README.md LICENSE
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ds-*.tar.gz
+          generate_release_notes: true

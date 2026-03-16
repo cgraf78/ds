@@ -1,0 +1,951 @@
+#!/usr/bin/env bash
+# ds-test — unit tests for the ds dev-session launcher.
+#
+# Creates temp directories to simulate $HOME and tests internal functions
+# in isolation. Mocks tmux to avoid real session management.
+#
+# Usage: ds-test
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# shellcheck source=test-helpers.sh
+. "$SCRIPT_DIR/test-helpers.sh"
+
+# ---------------------------------------------------------------------------
+# Setup: override HOME, source ds for internal functions
+# ---------------------------------------------------------------------------
+
+TEST_HOME=$(_tmpdir)
+HOME_ORIG="$HOME"
+export HOME="$TEST_HOME"
+export CONF_DIR="$TEST_HOME/.config/ds"
+mkdir -p "$CONF_DIR"
+
+# Create a minimal profile for testing
+cat > "$CONF_DIR/profile-dev.sh" <<'PROFILE'
+_profile_dev() {
+    local session="$1"
+    : # no-op for testing
+}
+PROFILE
+
+cat > "$CONF_DIR/profile-web.sh" <<'PROFILE'
+_profile_web() {
+    local session="$1"
+    : # no-op for testing
+}
+PROFILE
+
+export DS_SOURCED=1
+export DS_UPTERM_PRIVATE_KEY="$TEST_HOME/.ssh/test_upterm_key"
+mkdir -p "$TEST_HOME/.ssh"
+printf 'dummy' > "$DS_UPTERM_PRIVATE_KEY"
+# shellcheck source=../bin/ds
+. "$SCRIPT_DIR/../bin/ds"
+# Install and load the upterm share backend for sharing tests
+cp "$SCRIPT_DIR/../lib/plugins/share-upterm.sh" "$CONF_DIR/"
+. "$CONF_DIR/share-upterm.sh"
+
+# Create a mock tmux in a temp bin dir and prepend to PATH
+MOCK_BIN=$(_tmpdir)
+TMUX_LOG="$MOCK_BIN/tmux.log"
+
+cat > "$MOCK_BIN/tmux" <<'MOCK'
+#!/usr/bin/env bash
+# Mock tmux that logs calls and simulates responses
+echo "tmux $*" >> "${TMUX_LOG:-/dev/null}"
+args=("$@")
+case "${args[0]:-}" in
+    has-session)
+        # Check MOCK_SESSIONS for existence
+        session="${args[2]#=}"  # strip = prefix
+        if [[ " ${MOCK_SESSIONS:-} " == *" $session "* ]]; then
+            exit 0
+        else
+            exit 1
+        fi
+        ;;
+    ls)
+        echo "${MOCK_TMUX_LS:-}" | grep -v '^$' || true
+        ;;
+    set-environment)
+        # Track DS_MANAGED sessions: set-environment -t <session> DS_MANAGED 1
+        if [[ "${args[3]:-}" == "DS_MANAGED" ]]; then
+            export MOCK_DS_MANAGED="${MOCK_DS_MANAGED:-} ${args[2]}"
+        fi
+        exit 0
+        ;;
+    show-environment)
+        # show-environment -t =<session> DS_MANAGED
+        _se_name="${args[2]#=}"
+        if [[ " ${MOCK_DS_MANAGED:-} " == *" $_se_name "* ]]; then
+            echo "DS_MANAGED=1"
+            exit 0
+        else
+            exit 1
+        fi
+        ;;
+    display-message)
+        # Support session name query and info format
+        for _a in "${args[@]}"; do
+            if [[ "$_a" == *'#{session_name}'* ]]; then
+                echo "${MOCK_CURRENT_SESSION:-ds}"
+                exit 0
+            fi
+        done
+        echo "1 windows (detached)"
+        exit 0
+        ;;
+    new-session|attach|switch-client|kill-session|rename-window|split-window|new-window|select-window|send-keys)
+        exit 0
+        ;;
+esac
+MOCK
+chmod +x "$MOCK_BIN/tmux"
+
+cat > "$MOCK_BIN/upterm" <<'MOCK'
+#!/usr/bin/env bash
+echo "upterm $*" >> "${TMUX_LOG:-/dev/null}"
+if [[ "$1" == "host" ]]; then
+  # Execute the hosted command (bash -c "...") that writes the admin socket file.
+  # Find args after "--" and run them so _share_start's admin socket polling works.
+  found_dashdash=0
+  hosted_args=()
+  for arg; do
+    if [[ "$found_dashdash" -eq 1 ]]; then
+      hosted_args+=("$arg")
+    elif [[ "$arg" == "--" ]]; then
+      found_dashdash=1
+    fi
+  done
+  if [[ ${#hosted_args[@]} -gt 0 ]]; then
+    # Run hosted command in background (it sleeps forever, so we'll kill it on exit)
+    export UPTERM_ADMIN_SOCKET="/tmp/mock-upterm-admin.sock"
+    "${hosted_args[@]}" &
+    hosted_pid=$!
+    trap "kill $hosted_pid 2>/dev/null" EXIT
+  fi
+  # Write share info to stdout (goes to log file)
+  printf '%s\n' "ssh session: ssh test@upterm.example"
+  # Keep background process alive briefly if launched with & so kill -0 works.
+  sleep "${MOCK_UPTERM_SLEEP:-1}"
+  exit 0
+fi
+if [[ "$1" == "session" && "$2" == "current" ]]; then
+  printf '%s\n' "ssh session: ssh test@upterm.example"
+  exit 0
+fi
+exit 0
+MOCK
+chmod +x "$MOCK_BIN/upterm"
+
+export PATH="$MOCK_BIN:$PATH"
+export TMUX_LOG
+
+_reset_tmux_log() {
+    : > "$TMUX_LOG"
+}
+
+_tmux_log() {
+    cat "$TMUX_LOG" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# Tests: Host config lookup
+# ---------------------------------------------------------------------------
+
+echo "=== Host config lookup ==="
+
+cat > "$CONF_DIR/connect.conf" <<'EOF'
+# hostname    connect
+desktop        -
+fileserver           autossh
+EOF
+
+# Reset globals before each lookup test
+_reset_lookup() {
+    CONNECT="ssh"
+}
+
+_reset_lookup
+lookup_host "desktop"
+_assert_eq "desktop: connect method" "-" "$CONNECT"
+
+_reset_lookup
+lookup_host "fileserver"
+_assert_eq "fileserver: connect method" "autossh" "$CONNECT"
+
+# Unknown host returns failure, doesn't change globals
+_reset_lookup
+if lookup_host "unknown-host"; then
+    _fail "unknown host should return 1"
+else
+    _pass "unknown host returns 1"
+fi
+_assert_eq "unknown host: connect unchanged" "ssh" "$CONNECT"
+
+# Glob pattern matching in connect config
+cat > "$CONF_DIR/connect-work.conf" <<'EOF'
+dev*          et
+mydevbox      autossh
+EOF
+
+_reset_lookup
+lookup_host "dev2"
+_assert_eq "glob dev*: connect" "et" "$CONNECT"
+
+# First match wins (dev* before mydevbox in file order, but mydevbox is
+# in a separate file — connect.conf is searched before connect-work.conf)
+_reset_lookup
+lookup_host "mydevbox"
+_assert_eq "mydevbox: connect (connect-work.conf)" "autossh" "$CONNECT"
+
+# Multiple connect.conf files are searched (additive)
+_reset_lookup
+lookup_host "desktop"
+_assert_eq "desktop still found with connect-work.conf present" "-" "$CONNECT"
+
+rm -f "$CONF_DIR/connect-work.conf"
+
+# No connect.conf files at all
+rm -f "$CONF_DIR/connect.conf"
+_reset_lookup
+if lookup_host "anyhost"; then
+    _fail "no connect.conf files should return 1"
+else
+    _pass "no connect.conf files returns 1"
+fi
+
+# Restore connect.conf for remaining tests
+cat > "$CONF_DIR/connect.conf" <<'EOF'
+# hostname    connect
+desktop        -
+fileserver           autossh
+server1       ssh
+EOF
+
+# ---------------------------------------------------------------------------
+# Tests: Profile discovery
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== Profile discovery ==="
+
+result=$(_profiles)
+_assert_contains "discovers bare profile" "bare" "$result"
+_assert_contains "discovers dev profile" "dev" "$result"
+_assert_contains "discovers web profile" "web" "$result"
+
+# ---------------------------------------------------------------------------
+# Tests: Profile resolution
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== Profile resolution ==="
+
+# Empty SESSION defaults to "ds" with bare profile
+SESSION="" PROFILE=""
+_resolve_profile
+_assert_eq "empty SESSION → SESSION=ds" "ds" "$SESSION"
+_assert_eq "empty SESSION → PROFILE=bare" "bare" "$PROFILE"
+
+# Exact profile match
+SESSION="dev" PROFILE=""
+_resolve_profile
+_assert_eq "SESSION=dev → PROFILE=dev" "dev" "$PROFILE"
+_assert_eq "SESSION=dev unchanged" "dev" "$SESSION"
+
+SESSION="web" PROFILE=""
+_resolve_profile
+_assert_eq "SESSION=web → PROFILE=web" "web" "$PROFILE"
+
+SESSION="bare" PROFILE=""
+_resolve_profile
+_assert_eq "SESSION=bare → PROFILE=bare" "bare" "$PROFILE"
+
+# Profile-instance (dash-separated)
+SESSION="dev-work" PROFILE=""
+_resolve_profile
+_assert_eq "dev-work → PROFILE=dev" "dev" "$PROFILE"
+_assert_eq "dev-work SESSION preserved" "dev-work" "$SESSION"
+
+SESSION="dev-frontend" PROFILE=""
+_resolve_profile
+_assert_eq "dev-frontend → PROFILE=dev" "dev" "$PROFILE"
+
+SESSION="web-2" PROFILE=""
+_resolve_profile
+_assert_eq "web-2 → PROFILE=web" "web" "$PROFILE"
+
+# Multiple dashes — split on first
+SESSION="dev-my-project" PROFILE=""
+_resolve_profile
+_assert_eq "dev-my-project → PROFILE=dev" "dev" "$PROFILE"
+_assert_eq "dev-my-project SESSION preserved" "dev-my-project" "$SESSION"
+
+# Unknown profile → error
+result=$( (SESSION="foo" PROFILE=""; _resolve_profile) 2>&1 || true)
+_assert_contains "unknown profile errors" "unknown profile" "$result"
+_assert_contains "unknown profile lists options" "bare" "$result"
+
+result=$( (SESSION="foo-bar" PROFILE=""; _resolve_profile) 2>&1 || true)
+_assert_contains "unknown profile-instance errors" "unknown profile" "$result"
+
+# ---------------------------------------------------------------------------
+# Tests: Session target resolution
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== Session target resolution ==="
+
+# Explicit session — passes through
+SESSION="dev" HOST=""
+_resolve_session_target
+_assert_eq "explicit SESSION preserved" "dev" "$SESSION"
+
+# Remote without session → error
+result=$( (SESSION="" HOST="myhost"; _resolve_session_target) 2>&1 || true)
+_assert_contains "remote without session errors" "session name required for remote" "$result"
+
+# No session, no host, no tmux → error
+result=$( (SESSION="" HOST="" TMUX=""; _resolve_session_target) 2>&1 || true)
+_assert_contains "no session, no tmux errors" "not inside tmux" "$result"
+
+# Inside tmux, no session → defaults to current session
+export TMUX="/tmp/tmux-test/default,12345,0"
+export MOCK_CURRENT_SESSION="dev-work"
+SESSION="" HOST=""
+_resolve_session_target
+_assert_eq "tmux default: resolves to current session" "dev-work" "$SESSION"
+unset TMUX MOCK_CURRENT_SESSION
+
+# ---------------------------------------------------------------------------
+# Tests: Upterm sharing backend
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== Upterm sharing backend ==="
+
+# _share_start launches upterm host in the background and polls for an admin
+# socket. The mock upterm executes the hosted command to create it, and
+# responds to "session current" with share info. Here we verify core behavior.
+
+_reset_tmux_log
+export MOCK_SESSIONS=""
+export MOCK_DS_MANAGED=""
+SESSION="ds"
+PROFILE="bare"
+DS_SHARE_VIA=""
+DS_NO_ATTACH=1
+DS_SHARE_INFO_FILE="$(_default_share_info_file)"
+DS_UPTERM_PID_FILE="$(_upterm_pid_file)"
+result=$(_do_session 2>&1)
+log=$(_tmux_log)
+_assert_contains "no-attach: creates tmux session" "tmux new-session -d -s ds" "$log"
+if echo "$log" | grep -qx 'tmux attach -t =ds'; then
+    _fail "no-attach: skips local attach"
+else
+    _pass "no-attach: skips local attach"
+fi
+
+# Test --share action with existing session
+_reset_tmux_log
+export MOCK_SESSIONS="ds"
+DS_SHARE_VIA="upterm"
+DS_UPTERM_GITHUB_USER="testuser"
+SESSION="ds"
+HOST=""
+# _do_share calls _share_start, which runs the full share flow with mock upterm
+result=$(_do_share 2>&1) || true
+_assert_not_contains "share action: no 'no session' error for existing session" "no session" "$result"
+
+# Test --share action with nonexistent session
+_reset_tmux_log
+export MOCK_SESSIONS=""
+SESSION="nonexistent"
+HOST=""
+result=$(_do_share 2>&1) || true
+_assert_contains "share action: error for nonexistent session" "no session" "$result"
+
+# Clean up state from share test (kill mock upterm, remove PID/state files)
+_pid_f=$(_upterm_pid_file)
+if [[ -f "$_pid_f" ]]; then
+    _pid=$(cat "$_pid_f" 2>/dev/null || true)
+    [[ "$_pid" =~ ^[0-9]+$ ]] && kill "$_pid" 2>/dev/null || true
+    rm -f "$_pid_f"
+fi
+rm -f "$DS_SHARE_INFO_FILE" "$(_upterm_admin_file)" "$(_upterm_session_file)" "$(_upterm_log_file)"
+
+# Test --unshare action (no daemon running)
+SESSION="ds"
+HOST=""
+result=$(_do_unshare 2>&1)
+_assert_contains "unshare: reports not sharing" "not currently sharing" "$result"
+
+# Test normalization of upterm host output variants (e.g., WSL fallback log parse)
+result=$(_upterm_normalize_info $'Command: ssh token123@uptermd.upterm.dev')
+_assert_contains "normalize upterm: command format" "ssh: ssh token123@uptermd.upterm.dev" "$result"
+
+# Test reading share info directly from upterm log fallback
+log_file="$(_tmpdir)/upterm.log"
+printf '%s\n' 'Some startup text' 'Command: ssh abc123@uptermd.upterm.dev' > "$log_file"
+result=$(_upterm_read_info_from_log "$log_file")
+_assert_contains "log fallback: extracts ssh command" "ssh: ssh abc123@uptermd.upterm.dev" "$result"
+
+# Test PID validation — _share_running rejects non-numeric PID files
+pid_dir=$(_tmpdir)
+DS_UPTERM_PID_FILE="$pid_dir/test.pid"
+
+echo "not-a-pid" > "$DS_UPTERM_PID_FILE"
+if _share_running; then
+    _fail "share_running: rejects non-numeric PID"
+else
+    _pass "share_running: rejects non-numeric PID"
+fi
+
+echo "12345; rm -rf /" > "$DS_UPTERM_PID_FILE"
+if _share_running; then
+    _fail "share_running: rejects PID with injection"
+else
+    _pass "share_running: rejects PID with injection"
+fi
+
+echo "" > "$DS_UPTERM_PID_FILE"
+if _share_running; then
+    _fail "share_running: rejects empty PID"
+else
+    _pass "share_running: rejects empty PID"
+fi
+
+rm -f "$DS_UPTERM_PID_FILE"
+if _share_running; then
+    _fail "share_running: rejects missing PID file"
+else
+    _pass "share_running: rejects missing PID file"
+fi
+
+# Test _share_load_config reads share-upterm.conf
+cat > "$CONF_DIR/share-upterm.conf" <<'EOF'
+# test config
+server=myupterm.internal:2222
+known-hosts=/path/to/known_hosts
+private-key=/path/to/key
+github-user=testghuser
+authorized-keys=/path/to/authorized_keys
+push=user@remotehost
+EOF
+
+# Clear env vars so config values take effect
+DS_UPTERM_HOST=""
+DS_UPTERM_KNOWN_HOSTS=""
+DS_UPTERM_PRIVATE_KEY=""
+DS_UPTERM_GITHUB_USER=""
+DS_UPTERM_AUTHORIZED_KEYS=""
+DS_UPTERM_PUSH=""
+_share_load_config
+_assert_eq "config: server" "myupterm.internal:2222" "$DS_UPTERM_HOST"
+_assert_eq "config: known-hosts" "/path/to/known_hosts" "$DS_UPTERM_KNOWN_HOSTS"
+_assert_eq "config: private-key" "/path/to/key" "$DS_UPTERM_PRIVATE_KEY"
+_assert_eq "config: github-user" "testghuser" "$DS_UPTERM_GITHUB_USER"
+_assert_eq "config: authorized-keys" "/path/to/authorized_keys" "$DS_UPTERM_AUTHORIZED_KEYS"
+_assert_eq "config: push" "user@remotehost" "$DS_UPTERM_PUSH"
+
+# Env vars override config values
+DS_UPTERM_HOST="envhost:3333"
+DS_UPTERM_KNOWN_HOSTS="/env/known_hosts"
+DS_UPTERM_PRIVATE_KEY="/env/key"
+DS_UPTERM_GITHUB_USER="envuser"
+DS_UPTERM_AUTHORIZED_KEYS="/env/authorized_keys"
+DS_UPTERM_PUSH="envuser@envhost"
+_share_load_config
+_assert_eq "env override: server" "envhost:3333" "$DS_UPTERM_HOST"
+_assert_eq "env override: known-hosts" "/env/known_hosts" "$DS_UPTERM_KNOWN_HOSTS"
+_assert_eq "env override: private-key" "/env/key" "$DS_UPTERM_PRIVATE_KEY"
+_assert_eq "env override: github-user" "envuser" "$DS_UPTERM_GITHUB_USER"
+_assert_eq "env override: authorized-keys" "/env/authorized_keys" "$DS_UPTERM_AUTHORIZED_KEYS"
+_assert_eq "env override: push" "envuser@envhost" "$DS_UPTERM_PUSH"
+
+# Missing config file is silently ignored
+rm -f "$CONF_DIR/share-upterm.conf"
+DS_UPTERM_HOST=""
+DS_UPTERM_PUSH=""
+_share_load_config
+_assert_eq "missing config: server empty" "" "$DS_UPTERM_HOST"
+_assert_eq "missing config: push empty" "" "$DS_UPTERM_PUSH"
+
+# Reset sharing vars for remaining tmux tests
+DS_SHARE_VIA=""
+DS_NO_ATTACH=0
+DS_SHARE_INFO_FILE=""
+DS_UPTERM_PID_FILE=""
+DS_UPTERM_GITHUB_USER=""
+DS_UPTERM_AUTHORIZED_KEYS=""
+DS_UPTERM_PUSH=""
+SESSION=""
+HOST=""
+
+# ---------------------------------------------------------------------------
+# Tests: Session naming
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== Session naming ==="
+
+# Session name is derived from profile or profile-instance.
+# Default (no session) → "ds" with bare profile.
+
+_reset_tmux_log
+export MOCK_SESSIONS=""
+export MOCK_DS_MANAGED=""
+SESSION="ds"
+PROFILE="bare"
+_do_session
+log=$(_tmux_log)
+_assert_contains "default → session 'ds'" "new-session -d -s ds" "$log"
+_assert_contains "tags session with DS_MANAGED" "set-environment -t ds DS_MANAGED 1" "$log"
+
+_reset_tmux_log
+export MOCK_DS_MANAGED=""
+SESSION="dev"
+PROFILE="dev"
+_do_session
+log=$(_tmux_log)
+_assert_contains "dev → session 'dev'" "new-session -d -s dev" "$log"
+
+_reset_tmux_log
+export MOCK_DS_MANAGED=""
+SESSION="dev-work"
+PROFILE="dev"
+_do_session
+log=$(_tmux_log)
+_assert_contains "dev-work → session 'dev-work'" "new-session -d -s dev-work" "$log"
+
+_reset_tmux_log
+export MOCK_DS_MANAGED=""
+SESSION="web-2"
+PROFILE="web"
+_do_session
+log=$(_tmux_log)
+_assert_contains "web-2 → session 'web-2'" "new-session -d -s web-2" "$log"
+
+# ---------------------------------------------------------------------------
+# Tests: Existing session attachment
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== Session attachment ==="
+
+# When session exists, _do_session should attach instead of creating
+_reset_tmux_log
+export MOCK_SESSIONS="ds"
+SESSION="ds"
+PROFILE="bare"
+unset TMUX 2>/dev/null || true
+_do_session
+log=$(_tmux_log)
+_assert_contains "existing session: attaches" "attach -t =ds" "$log"
+_assert_not_contains "existing session: no new-session" "new-session" "$log"
+
+# Inside tmux: switch-client instead of attach
+_reset_tmux_log
+export TMUX="/tmp/tmux-test/default,12345,0"
+_do_session
+log=$(_tmux_log)
+_assert_contains "inside tmux: switch-client" "switch-client -t =ds" "$log"
+_assert_not_contains "inside tmux: no attach" "attach -t" "$log"
+unset TMUX
+
+# ---------------------------------------------------------------------------
+# Tests: List sessions
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== List sessions ==="
+
+export MOCK_TMUX_LS="myproject
+work
+other-session"
+export MOCK_DS_MANAGED=" myproject work"
+
+result=$(_do_list)
+_assert_contains "list shows managed session myproject" "myproject:" "$result"
+_assert_contains "list shows managed session work" "work:" "$result"
+_assert_not_contains "list excludes unmanaged session" "other-session" "$result"
+
+export MOCK_TMUX_LS="only-unmanaged"
+export MOCK_DS_MANAGED=""
+result=$(_do_list)
+_assert_contains "no managed sessions shows message" "no active ds sessions" "$result"
+
+export MOCK_TMUX_LS=""
+export MOCK_DS_MANAGED=""
+result=$(_do_list)
+_assert_contains "empty list shows message" "no active ds sessions" "$result"
+
+# ---------------------------------------------------------------------------
+# Tests: Kill session
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== Kill session ==="
+
+# Kill with explicit session
+_reset_tmux_log
+export MOCK_SESSIONS="myproject"
+SESSION="myproject"
+result=$(_do_kill)
+log=$(_tmux_log)
+_assert_contains "kill explicit: kills target" "kill-session -t =myproject" "$log"
+_assert_contains "kill explicit: reports killed" "killed myproject" "$result"
+
+# Kill nonexistent session
+export MOCK_SESSIONS=""
+export MOCK_TMUX_LS=""
+SESSION="nosuch"
+result=$( (_do_kill) 2>&1 || true)
+_assert_contains "kill nonexistent: error message" "no session 'nosuch' — active sessions:" "$result"
+
+# ---------------------------------------------------------------------------
+# Tests: Kill all sessions
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== Kill all sessions ==="
+
+export MOCK_TMUX_LS="myproject
+work
+other-session"
+export MOCK_DS_MANAGED=" myproject work"
+_reset_tmux_log
+result=$(_do_killall)
+log=$(_tmux_log)
+_assert_contains "killall: kills myproject" "kill-session -t =myproject" "$log"
+_assert_contains "killall: kills work" "kill-session -t =work" "$log"
+_assert_not_contains "killall: skips unmanaged" "kill-session -t =other-session" "$log"
+
+export MOCK_TMUX_LS="unmanaged-only"
+export MOCK_DS_MANAGED=""
+_reset_tmux_log
+result=$(_do_killall)
+_assert_contains "killall no managed: shows message" "no active ds sessions" "$result"
+
+export MOCK_TMUX_LS=""
+export MOCK_DS_MANAGED=""
+result=$(_do_killall)
+_assert_contains "killall empty: shows message" "no active ds sessions" "$result"
+
+# ---------------------------------------------------------------------------
+# Tests: Usage
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== Usage ==="
+
+result=$(_usage)
+_assert_contains "usage shows session syntax" "[session]" "$result"
+_assert_contains "usage shows @host syntax" "[@host]" "$result"
+_assert_contains "usage shows -l" "-l" "$result"
+_assert_contains "usage shows -k" "-k" "$result"
+_assert_contains "usage shows --share" "--share" "$result"
+_assert_contains "usage shows --unshare" "--unshare" "$result"
+_assert_contains "usage shows profile-instance" "profile-instance" "$result"
+
+# ---------------------------------------------------------------------------
+# Tests: Argument parsing (via subprocess)
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== Argument parsing ==="
+
+# Run ds as a subprocess with mock tmux. We test that the right tmux
+# commands are invoked based on CLI args.
+
+# Reset state for subprocess tests
+export HOME="$TEST_HOME"
+export MOCK_SESSIONS=""
+export MOCK_TMUX_LS=""
+unset DS_SOURCED
+
+# -l flag → list action
+export MOCK_TMUX_LS="ds"
+export MOCK_DS_MANAGED=" ds"
+result=$("$SCRIPT_DIR/../bin/ds" -l 2>&1)
+_assert_contains "ds -l: lists sessions" "ds:" "$result"
+export MOCK_TMUX_LS=""
+export MOCK_DS_MANAGED=""
+
+# --help flag → usage
+result=$("$SCRIPT_DIR/../bin/ds" -h 2>&1)
+_assert_contains "ds -h: shows usage" "[session]" "$result"
+
+# Invalid flag → error + usage
+result=$("$SCRIPT_DIR/../bin/ds" --invalid 2>&1 || true)
+_assert_contains "ds --invalid: shows usage" "[session]" "$result"
+
+# -l with no sessions
+result=$("$SCRIPT_DIR/../bin/ds" -l 2>&1)
+_assert_contains "ds -l empty: shows message" "no active ds sessions" "$result"
+
+# Unknown profile → error
+result=$("$SCRIPT_DIR/../bin/ds" foobar 2>&1 || true)
+_assert_contains "ds foobar: unknown profile" "unknown profile" "$result"
+
+# -k with nonexistent session
+result=$("$SCRIPT_DIR/../bin/ds" -k nosuch 2>&1 || true)
+_assert_contains "ds -k nosuch: error" "no session" "$result"
+
+# -k without session name requires a target (not inside tmux)
+result=$("$SCRIPT_DIR/../bin/ds" -k 2>&1 || true)
+_assert_contains "ds -k (no target): requires session name" "not inside tmux" "$result"
+
+# --killall with no sessions
+result=$("$SCRIPT_DIR/../bin/ds" --killall 2>&1)
+_assert_contains "ds --killall empty: shows message" "no active ds sessions" "$result"
+
+# -c without argument → error
+result=$("$SCRIPT_DIR/../bin/ds" -c 2>&1 || true)
+_assert_contains "ds -c (no arg): requires argument" "requires an argument" "$result"
+
+# --share-via without argument → error
+result=$("$SCRIPT_DIR/../bin/ds" --share-via 2>&1 || true)
+_assert_contains "ds --share-via (no arg): requires argument" "requires an argument" "$result"
+
+# --killall with session name → error
+result=$("$SCRIPT_DIR/../bin/ds" --killall dev 2>&1 || true)
+_assert_contains "ds --killall dev: rejects session name" "does not take a session name" "$result"
+
+# -c without @host → error
+result=$("$SCRIPT_DIR/../bin/ds" -c autossh dev 2>&1 || true)
+_assert_contains "ds -c without @host: requires remote host" "requires a remote host" "$result"
+
+# -l with session name → error
+result=$("$SCRIPT_DIR/../bin/ds" -l dev 2>&1 || true)
+_assert_contains "ds -l dev: rejects session name" "does not take a session name" "$result"
+
+# init without shell arg → clear error
+result=$("$SCRIPT_DIR/../bin/ds" init 2>&1 || true)
+_assert_contains "ds init (no shell): requires shell name" "requires a shell name" "$result"
+
+# init with @host → error
+result=$("$SCRIPT_DIR/../bin/ds" init bash @myhost 2>&1 || true)
+_assert_contains "ds init @host: rejects remote host" "does not support remote" "$result"
+
+# Restore DS_SOURCED for remaining in-process tests
+export DS_SOURCED=1
+
+# ---------------------------------------------------------------------------
+# Tests: Profile function invocation
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== Profile function invocation ==="
+
+# _do_session calls _profile_<PROFILE> after creating the session.
+# Verify the profile function is actually invoked by checking tmux log
+# for calls that only the profile function would make.
+
+# Define a test profile that makes a distinctive tmux call
+_profile_testprofile() {
+    local session="$1"
+    tmux rename-window -t "$session:1" "TEST_MARKER_${DS_TEST_VAR:-default}"
+}
+
+_reset_tmux_log
+export MOCK_SESSIONS=""
+export MOCK_DS_MANAGED=""
+export DS_TEST_VAR="testval"
+SESSION="testprofile"
+PROFILE="testprofile"
+_do_session
+log=$(_tmux_log)
+_assert_contains "profile function invoked" "TEST_MARKER_testval" "$log"
+unset DS_TEST_VAR
+
+# ---------------------------------------------------------------------------
+# Tests: _attach behavior
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== Attach behavior ==="
+
+# Outside tmux: uses attach
+_reset_tmux_log
+unset TMUX 2>/dev/null || true
+_attach "test-session"
+log=$(_tmux_log)
+_assert_contains "outside tmux: attach" "attach -t =test-session" "$log"
+
+# Inside tmux: uses switch-client
+_reset_tmux_log
+export TMUX="/tmp/tmux-test/default,12345,0"
+_attach "test-session"
+log=$(_tmux_log)
+_assert_contains "inside tmux: switch-client" "switch-client -t =test-session" "$log"
+unset TMUX
+
+# Restore connect.conf
+cat > "$CONF_DIR/connect.conf" <<'EOF'
+# hostname    connect
+desktop        -
+fileserver           autossh
+server1       ssh
+EOF
+
+# ---------------------------------------------------------------------------
+# Tests: Remote command building
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== Remote command building ==="
+
+# Install connection plugins for testing
+cp "$SCRIPT_DIR/../lib/plugins/connect-autossh.sh" "$CONF_DIR/" 2>/dev/null || \
+    printf '_connect_autossh() { exec autossh -M0 "$1" -t "$2"; }\n' > "$CONF_DIR/connect-autossh.sh"
+
+# Mock ssh/autossh to capture args instead of connecting
+cat > "$MOCK_BIN/ssh" <<'MOCK'
+#!/usr/bin/env bash
+# ssh is called as: ssh -t -- HOST CMD
+# Skip flags/-- to find the host positional arg
+_host=""
+for _a in "$@"; do
+    [[ "$_a" == --  ]] && continue
+    [[ "$_a" == -* ]] && continue
+    if [[ -z "$_host" ]]; then _host="$_a"; continue; fi
+done
+echo "SSH_HOST=$_host" > "${REMOTE_LOG:-/dev/null}"
+echo "SSH_ARGS=$*" >> "${REMOTE_LOG:-/dev/null}"
+MOCK
+chmod +x "$MOCK_BIN/ssh"
+
+cat > "$MOCK_BIN/autossh" <<'MOCK'
+#!/usr/bin/env bash
+echo "AUTOSSH_ARGS=$*" > "${REMOTE_LOG:-/dev/null}"
+MOCK
+chmod +x "$MOCK_BIN/autossh"
+
+REMOTE_LOG="$MOCK_BIN/remote.log"
+export REMOTE_LOG
+
+# _remote calls exec, which doesn't play well with $() subshells.
+# Run each test in a fresh bash process that sources ds.
+# Uses timeout (Linux) or gtimeout (macOS/Homebrew) with bash fallback.
+_timeout() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "$@"
+    else
+        # bash-native fallback: run in background, kill after $1 seconds
+        local secs="$1"; shift
+        "$@" &
+        local pid=$!
+        ( sleep "$secs"; kill "$pid" 2>/dev/null ) &
+        local watchdog=$!
+        wait "$pid" 2>/dev/null
+        kill "$watchdog" 2>/dev/null
+        wait "$watchdog" 2>/dev/null
+    fi
+}
+
+_run_remote() {
+    : > "$REMOTE_LOG"
+    local env_args="$1"
+    _timeout 3 bash -c "
+        export DS_SOURCED=1
+        . '$SCRIPT_DIR/../bin/ds'
+        $env_args _remote
+    " 2>&1 || true
+}
+
+# Test SSH remote dispatch (dev profile session)
+result=$(_run_remote "HOST=server1 ACTION=session SESSION=dev \
+    CONNECT_OVERRIDE=")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "ssh remote: host" "SSH_HOST=server1" "$remote_log"
+_assert_contains "ssh remote: runs ds" "~/.local/bin/ds" "$remote_log"
+_assert_contains "ssh remote: passes session name" "dev" "$remote_log"
+
+# Test default session omits session name in remote args
+result=$(_run_remote "HOST=server1 ACTION=session SESSION=ds \
+    CONNECT_OVERRIDE=")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "ssh remote default: runs ds" "~/.local/bin/ds" "$remote_log"
+
+# Test autossh connection method
+result=$(_run_remote "HOST=fileserver ACTION=session SESSION=ds \
+    CONNECT_OVERRIDE=")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "autossh remote: uses autossh" "AUTOSSH_ARGS=" "$remote_log"
+
+# Test local-only host (connect = "-")
+result=$(_run_remote "HOST=desktop ACTION=session SESSION=ds \
+    CONNECT_OVERRIDE=")
+_assert_contains "local-only host: error" "local-only" "$result"
+
+# Test list action on remote
+result=$(_run_remote "HOST=server1 ACTION=list CONNECT_OVERRIDE=")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "remote list: passes -l" "-l" "$remote_log"
+
+# Test kill action on remote
+result=$(_run_remote "HOST=server1 ACTION=kill SESSION=dev-myproject \
+    CONNECT_OVERRIDE=")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "remote kill: passes -k" "-k" "$remote_log"
+_assert_contains "remote kill: passes target" "dev-myproject" "$remote_log"
+
+# Test killall action on remote
+result=$(_run_remote "HOST=server1 ACTION=killall CONNECT_OVERRIDE=")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "remote killall: passes --killall" "--killall" "$remote_log"
+
+# Test instance session name passed to remote
+result=$(_run_remote "HOST=server1 ACTION=session SESSION=dev-work \
+    CONNECT_OVERRIDE=")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "remote instance: passes session name" "dev-work" "$remote_log"
+
+# Test share backend/no-attach passed to remote
+result=$(_run_remote "HOST=server1 ACTION=session SESSION=dev \
+    CONNECT_OVERRIDE= DS_SHARE_VIA=upterm DS_NO_ATTACH=1")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "remote share backend: passes --share-via" "--share-via" "$remote_log"
+_assert_contains "remote share backend: passes upterm" "upterm" "$remote_log"
+_assert_contains "remote share backend: passes --no-attach" "--no-attach" "$remote_log"
+
+# ---------------------------------------------------------------------------
+# Tests: Connect config comments and blank lines
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== Edge cases ==="
+
+cat > "$CONF_DIR/connect.conf" <<'EOF'
+# This is a comment
+
+  # Indented comment
+host1       ssh
+
+host2       et
+EOF
+
+_reset_lookup
+lookup_host "host1"
+_assert_eq "host1 found (blank lines ignored)" "ssh" "$CONNECT"
+
+_reset_lookup
+lookup_host "host2"
+_assert_eq "host2 found (blank lines ignored)" "et" "$CONNECT"
+
+# Restore connect.conf
+cat > "$CONF_DIR/connect.conf" <<'EOF'
+# hostname    connect
+desktop        -
+fileserver           autossh
+server1       ssh
+EOF
+
+_test_summary
