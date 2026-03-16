@@ -1,5 +1,10 @@
 # ds — Dev Session Launcher
 
+![CI](https://github.com/cgraf78/ds/actions/workflows/ci.yml/badge.svg)
+![Release](https://img.shields.io/github/v/release/cgraf78/ds)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+![Bash](https://img.shields.io/badge/bash-4%2B-blue)
+
 `ds` creates tmux dev sessions locally or on remote hosts. Profiles, connection methods, and share backends are all pluggable.
 
 ## Install
