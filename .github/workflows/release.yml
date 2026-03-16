@@ -22,7 +22,15 @@ jobs:
           VERSION="${GITHUB_REF#refs/tags/}"
           tar czf "ds-${VERSION}.tar.gz" \
             --transform "s,^,ds-${VERSION}/," \
-            bin/ lib/ examples/ install.sh README.md LICENSE
+            bin/ lib/ tests/ examples/ install.sh README.md LICENSE
+
+      - name: Verify tarball
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/}"
+          tmpdir=$(mktemp -d)
+          tar xzf "ds-${VERSION}.tar.gz" -C "$tmpdir"
+          bash "$tmpdir/ds-${VERSION}/tests/ds-test"
+          rm -rf "$tmpdir"
 
       - name: Create release
         uses: softprops/action-gh-release@v2
