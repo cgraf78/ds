@@ -9,13 +9,18 @@
 
 ## Install
 
+### From release tarball
+
 ```bash
-# From source
+curl -sL https://github.com/cgraf78/ds/releases/latest/download/ds.tar.gz | tar xz
+cd ds && bash install.sh
+```
+
+### From source
+
+```bash
 git clone https://github.com/cgraf78/ds.git
 cd ds && bash install.sh
-
-# Or manually: copy bin/ds to somewhere on your PATH
-cp bin/ds ~/.local/bin/ds
 ```
 
 ## Usage
