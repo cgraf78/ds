@@ -12,8 +12,9 @@
 ### From release tarball
 
 ```bash
-curl -sL https://github.com/cgraf78/ds/releases/latest/download/ds.tar.gz | tar xz
-cd ds && bash install.sh
+tag=$(curl -s https://api.github.com/repos/cgraf78/ds/releases/latest | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)
+curl -sL "https://github.com/cgraf78/ds/releases/download/${tag}/ds-${tag}.tar.gz" | tar xz
+cd "ds-${tag}" && bash install.sh
 ```
 
 ### From source
