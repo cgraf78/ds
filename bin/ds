@@ -411,6 +411,7 @@ _ds() {
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
     COMPREPLY=()
+
     case "$prev" in
         init)
             COMPREPLY=($(compgen -W "bash" -- "$cur"))
@@ -425,6 +426,7 @@ _ds() {
         -c|--connect|--share-via)
             return ;;
     esac
+
     if [[ "$cur" == @* ]]; then
         local conf_dir="${HOME}/.config/ds" hosts="" name _conn f
         for f in "$conf_dir"/connect*.conf; do
@@ -438,12 +440,14 @@ _ds() {
         COMPREPLY=($(compgen -W "$hosts" -- "$cur"))
         return
     fi
+
     local profiles="" f pname
     for f in "${HOME}/.config/ds/profile-"*.sh; do
         [[ -f "$f" ]] || continue
         pname="${f##*/profile-}"; pname="${pname%.sh}"
         profiles+=" $pname"
     done
+
     # shellcheck disable=SC2086
     COMPREPLY=($(compgen -W \
         "-l --list -k --kill --killall --share --unshare --no-attach -c --connect --share-via init -h --help$profiles" \
