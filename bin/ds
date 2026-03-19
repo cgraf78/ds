@@ -438,26 +438,12 @@ _ds() {
         COMPREPLY=($(compgen -W "$hosts" -- "$cur"))
         return
     fi
-    local profiles="" f pname ds_bin ds_link lib_dir
-    ds_bin=$(command -v ds 2>/dev/null)
-    if [[ -n "$ds_bin" && -L "$ds_bin" ]]; then
-        ds_link=$(readlink "$ds_bin")
-        [[ "$ds_link" != /* ]] && ds_link="$(dirname "$ds_bin")/$ds_link"
-        ds_bin="$ds_link"
-    fi
-    [[ -n "$ds_bin" ]] && lib_dir="$(cd "$(dirname "$ds_bin")/../lib/plugins" 2>/dev/null && pwd)"
+    local profiles="" f pname
     for f in "${HOME}/.config/ds/profile-"*.sh; do
         [[ -f "$f" ]] || continue
         pname="${f##*/profile-}"; pname="${pname%.sh}"
         profiles+=" $pname"
     done
-    if [[ -n "$lib_dir" ]]; then
-        for f in "$lib_dir/profile-"*.sh; do
-            [[ -f "$f" ]] || continue
-            pname="${f##*/profile-}"; pname="${pname%.sh}"
-            profiles+=" $pname"
-        done
-    fi
     # shellcheck disable=SC2086
     COMPREPLY=($(compgen -W \
         "-l --list -k --kill --killall --share --unshare --no-attach -c --connect --share-via init -h --help$profiles" \
