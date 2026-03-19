@@ -405,6 +405,65 @@ unset _ds_f _ds_args
 if [[ -z "$TMUX" && $- == *i* && -n "$SSH_CONNECTION" && -z "$NO_TMUX" ]] && command -v tmux &>/dev/null; then
     exec ds
 fi
+
+_ds() {
+    local cur prev
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    COMPREPLY=()
+    case "$prev" in
+        init)
+            COMPREPLY=($(compgen -W "bash" -- "$cur"))
+            return ;;
+        -k|--kill|--share|--unshare)
+            local sessions
+            sessions=$(tmux ls -F '#{session_name}' 2>/dev/null | while IFS= read -r s; do
+                tmux show-environment -t "=$s" DS_MANAGED 2>/dev/null | grep -q '^DS_MANAGED=' && echo "$s"
+            done 2>/dev/null)
+            COMPREPLY=($(compgen -W "$sessions" -- "$cur"))
+            return ;;
+        -c|--connect|--share-via)
+            return ;;
+    esac
+    if [[ "$cur" == @* ]]; then
+        local conf_dir="${HOME}/.config/ds" hosts="" name _conn f
+        for f in "$conf_dir"/connect*.conf; do
+            [[ -f "$f" ]] || continue
+            while read -r name _conn; do
+                [[ -z "$name" || "$name" == '#'* ]] && continue
+                [[ "$name" == *'*'* || "$name" == *'?'* ]] && continue
+                hosts+=" @$name"
+            done < "$f"
+        done
+        COMPREPLY=($(compgen -W "$hosts" -- "$cur"))
+        return
+    fi
+    local profiles="" f pname ds_bin ds_link lib_dir
+    ds_bin=$(command -v ds 2>/dev/null)
+    if [[ -n "$ds_bin" && -L "$ds_bin" ]]; then
+        ds_link=$(readlink "$ds_bin")
+        [[ "$ds_link" != /* ]] && ds_link="$(dirname "$ds_bin")/$ds_link"
+        ds_bin="$ds_link"
+    fi
+    [[ -n "$ds_bin" ]] && lib_dir="$(cd "$(dirname "$ds_bin")/../lib/plugins" 2>/dev/null && pwd)"
+    for f in "${HOME}/.config/ds/profile-"*.sh; do
+        [[ -f "$f" ]] || continue
+        pname="${f##*/profile-}"; pname="${pname%.sh}"
+        profiles+=" $pname"
+    done
+    if [[ -n "$lib_dir" ]]; then
+        for f in "$lib_dir/profile-"*.sh; do
+            [[ -f "$f" ]] || continue
+            pname="${f##*/profile-}"; pname="${pname%.sh}"
+            profiles+=" $pname"
+        done
+    fi
+    # shellcheck disable=SC2086
+    COMPREPLY=($(compgen -W \
+        "-l --list -k --kill --killall --share --unshare --no-attach -c --connect --share-via init -h --help$profiles" \
+        -- "$cur"))
+}
+complete -F _ds ds
 INIT_EOF
 }
 
