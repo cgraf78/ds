@@ -396,9 +396,9 @@ _do_init() {
 
     cat <<'INIT_EOF'
 
-# ET connect: read attach-next target (runs before $TMUX guard)
+# Connect handoff: attach-next lets connect plugins request a session
 _ds_f="$HOME/.local/state/ds/attach-next"
-if [[ $- == *i* && -n "$SSH_CONNECTION" && -f "$_ds_f" ]]; then
+if [[ $- == *i* && -f "$_ds_f" ]]; then
     read -r _ds_args < "$_ds_f"
     rm -f "$_ds_f"
     # shellcheck disable=SC2086
