@@ -52,6 +52,11 @@ _usage() {
     echo "       ds --unshare [session]        stop sharing (defaults to current)"
     echo "       ds init bash                  print shell integration snippet"
     echo ""
+    echo "Options:"
+    echo "  -c, --connect METHOD   override connect method (ssh, autossh, et, ...)"
+    echo "  --share-via BACKEND    share backend to use (e.g. upterm)"
+    echo "  --no-attach            create session without attaching"
+    echo ""
     echo "Sessions are named after profiles (dev) or profile-instance (dev-work)."
     echo "Default session is 'ds' (plain tmux session)."
 }
