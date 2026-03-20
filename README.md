@@ -116,6 +116,7 @@ See `examples/connect.conf` for a template.
 | `-` | Local-only, no remote connections |
 | `ssh` | Standard SSH (built-in) |
 | `autossh` | Auto-reconnecting SSH |
+| `et` | Eternal Terminal (persistent connection) |
 
 ## Sharing
 
