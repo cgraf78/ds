@@ -14,6 +14,11 @@
 # Connections: ~/.config/ds/connect-<method>.sh  (define _connect_<method>)
 # Share:       ~/.config/ds/share-<backend>.sh   (define _share_start, _share_stop, etc.)
 # Hosts:       ~/.config/ds/connect*.conf          (hostname → connect method)
+#
+# Auto-attach: set DS_SSH_AUTO_ATTACH before eval "$(ds init bash)" in .bashrc
+#              DS_SSH_AUTO_ATTACH=ds      → auto-attach to default "ds" session
+#              DS_SSH_AUTO_ATTACH=dev     → auto-attach to "dev" session
+#              NO_TMUX=1                  → skip for one login
 
 # Resolve bundled plugin directory (follows symlinks to find real install location)
 _ds_self="$0"
@@ -89,7 +94,7 @@ _glob_plugins() {
 
 # --- Profile layouts ---
 
-_profile_bare() {
+_profile_ds() {
     : # default tmux window is already what we want
 }
 
@@ -237,11 +242,11 @@ _resolve_session_target() {
 
 # Resolve PROFILE from SESSION for session creation.
 # SESSION is a profile name (dev), a profile-instance (dev-work), or empty
-# (defaults to the "ds" session with bare profile).
+# (defaults to the "ds" session with ds profile).
 _resolve_profile() {
     if [[ -z "$SESSION" ]]; then
         SESSION="ds"
-        PROFILE="bare"
+        PROFILE="ds"
         return
     fi
     # Check if SESSION itself is a profile name
@@ -401,9 +406,12 @@ if [[ $- == *i* && -n "$SSH_CONNECTION" && -f "$_ds_f" ]]; then
 fi
 unset _ds_f _ds_args
 
-# Auto-attach to ds on SSH login (skip with NO_TMUX=1)
-if [[ -z "$TMUX" && $- == *i* && -n "$SSH_CONNECTION" && -z "$NO_TMUX" ]] && command -v tmux &>/dev/null; then
-    exec ds
+# Auto-attach on SSH login (opt-in via DS_SSH_AUTO_ATTACH, skip with NO_TMUX=1)
+# DS_SSH_AUTO_ATTACH=ds      → attach to default "ds" session
+# DS_SSH_AUTO_ATTACH=dev     → attach to "dev" session
+# NO_TMUX=1                  → skip auto-attach for this login
+if [[ -n "${DS_SSH_AUTO_ATTACH:-}" && -z "$TMUX" && $- == *i* && -n "$SSH_CONNECTION" && -z "$NO_TMUX" ]] && command -v tmux &>/dev/null; then
+    exec ds "$DS_SSH_AUTO_ATTACH"
 fi
 
 _ds() {

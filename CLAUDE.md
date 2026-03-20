@@ -27,11 +27,11 @@ Single-file CLI (`bin/ds`) with a plugin system. Everything is pure bash (4+).
 
 **Plugin discovery** (`_find_plugin`, `_glob_plugins`): searches `~/.config/ds/` first (user override), then `lib/plugins/` (bundled). Three plugin types:
 
-- **Profiles** (`profile-<name>.sh`): define `_profile_<name>()` to set up tmux window/pane layouts. Bundled: `dev`, `chat`. Built-in: `bare`.
+- **Profiles** (`profile-<name>.sh`): define `_profile_<name>()` to set up tmux window/pane layouts. Bundled: `dev`, `chat`. Built-in: `ds` (plain tmux, used as default).
 - **Connect methods** (`connect-<method>.sh`): define `_connect_<method>()` for remote transport. `ssh` is built-in. Bundled: `autossh`.
 - **Share backends** (`share-<backend>.sh`): define `_share_start`, `_share_stop`, `_share_info`, `_share_running`, `_share_current_session`, `_share_load_config`. Bundled: `upterm`.
 
-**Session naming**: session name = profile name or `profile-instance` (split on first `-`). Default session is `ds` with `bare` profile.
+**Session naming**: session name = profile name or `profile-instance` (split on first `-`). Default session is `ds` with `ds` profile.
 
 **Host resolution**: `~/.config/ds/connect*.conf` files map hostname globs to connect methods. First match wins.
 
@@ -45,3 +45,4 @@ Single-file CLI (`bin/ds`) with a plugin system. Everything is pure bash (4+).
 - Tmux session names use `=` prefix for exact matching (`tmux has-session -t "=$session"`).
 - `DS_MANAGED` env var is set on tmux sessions created by ds, distinguishing them from user-created sessions.
 - Config files use `key=value` format (share backends) or two-column whitespace-separated format (connect configs).
+- `DS_SSH_AUTO_ATTACH` env var opts into auto-create/attach on SSH login. Value is passed directly as the session arg to `ds` (e.g., `DS_SSH_AUTO_ATTACH=ds` runs `ds ds`). `NO_TMUX=1` skips it for one login.

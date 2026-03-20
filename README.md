@@ -56,7 +56,8 @@ Sessions are named after their profile, with an optional dash-separated instance
 
 | Command | Session | Profile |
 |---------|---------|---------|
-| `ds` | `ds` | bare (default) |
+| `ds` | `ds` | ds (default) |
+| `ds ds` | `ds` | ds (default) |
 | `ds dev` | `dev` | dev |
 | `ds dev-work` | `dev-work` | dev |
 | `ds chat` | `chat` | chat |
@@ -145,7 +146,19 @@ Add to `~/.bashrc`:
 eval "$(ds init bash)"
 ```
 
-This provides auto-attach on SSH login (skip with `NO_TMUX=1`).
+This provides tab completion and ET connect support.
+
+### Auto-attach on SSH login
+
+Set `DS_SSH_AUTO_ATTACH` **before** the `eval` line to auto-create/attach a tmux session on SSH login:
+
+```bash
+DS_SSH_AUTO_ATTACH=ds         # attach to default "ds" session
+# DS_SSH_AUTO_ATTACH=dev      # attach to "dev" session instead
+eval "$(ds init bash)"
+```
+
+Skip auto-attach for a single login with `NO_TMUX=1`.
 
 ## State
 

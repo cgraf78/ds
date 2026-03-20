@@ -234,7 +234,7 @@ echo ""
 echo "=== Profile discovery ==="
 
 result=$(_profiles)
-_assert_contains "discovers bare profile" "bare" "$result"
+_assert_contains "discovers ds profile" "ds" "$result"
 _assert_contains "discovers dev profile" "dev" "$result"
 _assert_contains "discovers web profile" "web" "$result"
 
@@ -245,11 +245,11 @@ _assert_contains "discovers web profile" "web" "$result"
 echo ""
 echo "=== Profile resolution ==="
 
-# Empty SESSION defaults to "ds" with bare profile
+# Empty SESSION defaults to "ds" with ds profile
 SESSION="" PROFILE=""
 _resolve_profile
 _assert_eq "empty SESSION → SESSION=ds" "ds" "$SESSION"
-_assert_eq "empty SESSION → PROFILE=bare" "bare" "$PROFILE"
+_assert_eq "empty SESSION → PROFILE=ds" "ds" "$PROFILE"
 
 # Exact profile match
 SESSION="dev" PROFILE=""
@@ -261,9 +261,9 @@ SESSION="web" PROFILE=""
 _resolve_profile
 _assert_eq "SESSION=web → PROFILE=web" "web" "$PROFILE"
 
-SESSION="bare" PROFILE=""
+SESSION="ds" PROFILE=""
 _resolve_profile
-_assert_eq "SESSION=bare → PROFILE=bare" "bare" "$PROFILE"
+_assert_eq "SESSION=ds → PROFILE=ds" "ds" "$PROFILE"
 
 # Profile-instance (dash-separated)
 SESSION="dev-work" PROFILE=""
@@ -288,7 +288,7 @@ _assert_eq "dev-my-project SESSION preserved" "dev-my-project" "$SESSION"
 # Unknown profile → error
 result=$( (SESSION="foo" PROFILE=""; _resolve_profile) 2>&1 || true)
 _assert_contains "unknown profile errors" "unknown profile" "$result"
-_assert_contains "unknown profile lists options" "bare" "$result"
+_assert_contains "unknown profile lists options" "ds" "$result"
 
 result=$( (SESSION="foo-bar" PROFILE=""; _resolve_profile) 2>&1 || true)
 _assert_contains "unknown profile-instance errors" "unknown profile" "$result"
@@ -338,7 +338,7 @@ _reset_tmux_log
 export MOCK_SESSIONS=""
 export MOCK_DS_MANAGED=""
 SESSION="ds"
-PROFILE="bare"
+PROFILE="ds"
 DS_SHARE_VIA=""
 DS_NO_ATTACH=1
 DS_SHARE_INFO_FILE="$(_default_share_info_file)"
@@ -496,13 +496,13 @@ echo ""
 echo "=== Session naming ==="
 
 # Session name is derived from profile or profile-instance.
-# Default (no session) → "ds" with bare profile.
+# Default (no session) → "ds" with ds profile.
 
 _reset_tmux_log
 export MOCK_SESSIONS=""
 export MOCK_DS_MANAGED=""
 SESSION="ds"
-PROFILE="bare"
+PROFILE="ds"
 _do_session
 log=$(_tmux_log)
 _assert_contains "default → session 'ds'" "new-session -d -s ds" "$log"
@@ -543,7 +543,7 @@ echo "=== Session attachment ==="
 _reset_tmux_log
 export MOCK_SESSIONS="ds"
 SESSION="ds"
-PROFILE="bare"
+PROFILE="ds"
 unset TMUX 2>/dev/null || true
 _do_session
 log=$(_tmux_log)
