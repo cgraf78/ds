@@ -9,15 +9,11 @@
 
 ## Install
 
-### From release tarball
-
 ```bash
-tag=$(curl -s https://api.github.com/repos/cgraf78/ds/releases/latest | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)
-curl -sL "https://github.com/cgraf78/ds/releases/download/${tag}/ds-${tag}.tar.gz" | tar xz
-cd "ds-${tag}" && bash install.sh
+curl -sL https://raw.githubusercontent.com/cgraf78/ds/main/install.sh | bash
 ```
 
-### From source
+Or from source:
 
 ```bash
 git clone https://github.com/cgraf78/ds.git
