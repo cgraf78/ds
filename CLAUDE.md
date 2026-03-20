@@ -46,3 +46,10 @@ Single-file CLI (`bin/ds`) with a plugin system. Everything is pure bash (4+).
 - `DS_MANAGED` env var is set on tmux sessions created by ds, distinguishing them from user-created sessions.
 - Config files use `key=value` format (share backends) or two-column whitespace-separated format (connect configs).
 - `DS_SSH_AUTO_ATTACH` env var opts into auto-create/attach on SSH login. Value is passed directly as the session arg to `ds` (e.g., `DS_SSH_AUTO_ATTACH=ds` runs `ds ds`). `NO_TMUX=1` skips it for one login.
+
+## Releasing
+
+1. Bump `VERSION` file, commit, push to main.
+2. Tag and push: `git tag v<version> && git push origin v<version>`
+3. The release workflow (`.github/workflows/release.yml`) runs tests, creates a tarball, and publishes the GitHub release automatically.
+4. Optionally edit the release notes via `gh release edit v<version> --notes-file <file>`.
