@@ -617,7 +617,12 @@ fi
 # Resolve session/profile depending on the action
 case "$ACTION" in
     session)
-        _resolve_profile
+        # If session already exists in tmux, attach directly (no profile needed)
+        if [[ -n "$SESSION" ]] && tmux has-session -t "=$SESSION" 2>/dev/null; then
+            PROFILE=""
+        else
+            _resolve_profile
+        fi
         ;;
     kill|share|unshare)
         _resolve_session_target
