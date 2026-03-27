@@ -428,7 +428,7 @@ _share_start() {
     # Force-command attaches to the proxy session, keeping the user's real
     # session untouched. The proxy session is a plain background shell.
     # Fall back to bash -l if the proxy session has been killed externally.
-    force_cmd="tmux attach -t =$escaped_proxy || bash -l"
+    force_cmd="bash -c 'tmux attach -t =$escaped_proxy || bash -l'"
 
     local upterm_pid
     if command -v setsid >/dev/null 2>&1 && ! _upterm_is_wsl; then
