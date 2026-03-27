@@ -213,6 +213,11 @@ _load_share_backend() {
 _share_running()         { return 1; }
 _share_current_session() { :; }
 _share_load_config()     { :; }
+_share_reset_stubs() {
+    _share_running()         { return 1; }
+    _share_current_session() { :; }
+    _share_load_config()     { :; }
+}
 
 # --- Tmux helpers ---
 
@@ -585,9 +590,7 @@ elif [[ "$ACTION" == "share" || "$ACTION" == "unshare" || "$ACTION" == "list" \
             break
         fi
         # Reset stubs if this backend isn't active
-        _share_running()         { return 1; }
-        _share_current_session() { :; }
-        _share_load_config()     { :; }
+        _share_reset_stubs
     done < <(_glob_plugins 'share-*.sh')
     unset _sb _sbn
 fi
