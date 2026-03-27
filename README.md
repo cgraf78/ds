@@ -133,6 +133,7 @@ Config file: `~/.config/ds/share-upterm.conf` (env vars `DS_UPTERM_*` override):
 | `authorized-keys` | `DS_UPTERM_AUTHORIZED_KEYS` | Restrict access via authorized_keys |
 | `push` | `DS_UPTERM_PUSH` | `user@host` — push share info via SCP |
 | `proxy-session` | `DS_UPTERM_PROXY_SESSION` | tmux session name for the share proxy (default: `_share`) |
+| `share-ttl` | `DS_UPTERM_SHARE_TTL` | seconds before share auto-expires (default: `3600`, set to `0` to disable) |
 
 See `examples/share-upterm.conf` for a template.
 
@@ -143,6 +144,10 @@ When sharing, connecting clients are placed into a dedicated proxy tmux session 
 - Your real session's pane layout and resolution are **never affected** by a connecting client
 - Clients can interact with your sessions non-destructively via `tmux capture-pane` (read) and `tmux send-keys` (write)
 - The proxy session is created automatically on `--share` and destroyed on `--unshare`
+
+#### Share TTL
+
+Shares expire automatically after `share-ttl` seconds (default: 1 hour). When the timer fires, `ds --unshare` is called automatically. Running `ds --share` on an already-shared session resets the timer. Set `share-ttl = 0` to disable auto-expiry.
 
 ## Shell Integration
 

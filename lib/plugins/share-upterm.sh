@@ -20,6 +20,9 @@
 #                      (default: _share). A dedicated background session is
 #                      created and shared so connecting clients get a shell
 #                      without mirroring into the user's active session.
+#   share-ttl          seconds before the share automatically expires (default:
+#                      3600). Set to 0 to disable auto-expiry. Calling
+#                      `ds --share` resets the timer.
 #
 # Env vars (all optional, override config):
 #   DS_UPTERM_HOST           maps to server
@@ -30,6 +33,7 @@
 #   DS_UPTERM_PUSH           maps to push
 #   DS_UPTERM_PID_FILE       override PID file path
 #   DS_UPTERM_PROXY_SESSION  maps to proxy-session
+#   DS_UPTERM_SHARE_TTL      maps to share-ttl
 
 DS_UPTERM_HOST="${DS_UPTERM_HOST:-}"
 DS_UPTERM_PRIVATE_KEY="${DS_UPTERM_PRIVATE_KEY:-}"
@@ -39,6 +43,7 @@ DS_UPTERM_AUTHORIZED_KEYS="${DS_UPTERM_AUTHORIZED_KEYS:-}"
 DS_UPTERM_PID_FILE="${DS_UPTERM_PID_FILE:-}"
 DS_UPTERM_PUSH="${DS_UPTERM_PUSH:-}"
 DS_UPTERM_PROXY_SESSION="${DS_UPTERM_PROXY_SESSION:-}"
+DS_UPTERM_SHARE_TTL="${DS_UPTERM_SHARE_TTL:-}"
 
 _UPTERM_REMOTE_STATE_DIR=".local/state/ds"
 
@@ -62,6 +67,10 @@ _upterm_admin_file() {
 
 _upterm_log_file() {
     echo "$(_state_file_prefix).upterm.log"
+}
+
+_upterm_ttl_pid_file() {
+    echo "$(_state_file_prefix).upterm.ttl.pid"
 }
 
 # --- Internal helpers ---
@@ -172,8 +181,69 @@ _share_load_config() {
             authorized-keys) [[ -z "$DS_UPTERM_AUTHORIZED_KEYS" ]] && DS_UPTERM_AUTHORIZED_KEYS="${val/#\~/$HOME}" ;;
             push)            [[ -z "$DS_UPTERM_PUSH" ]]            && DS_UPTERM_PUSH="$val" ;;
             proxy-session)   [[ -z "$DS_UPTERM_PROXY_SESSION" ]]   && DS_UPTERM_PROXY_SESSION="$val" ;;
+            share-ttl)       [[ -z "$DS_UPTERM_SHARE_TTL" ]]       && DS_UPTERM_SHARE_TTL="$val" ;;
         esac
     done < "$conf" || true
+}
+
+# Cancel any running TTL expiry watcher.
+_upterm_cancel_ttl_watcher() {
+    local ttl_pid_file
+    ttl_pid_file=$(_upterm_ttl_pid_file)
+    if [[ -f "$ttl_pid_file" ]]; then
+        local pid
+        pid=$(cat "$ttl_pid_file" 2>/dev/null || true)
+        if [[ "$pid" =~ ^[0-9]+$ ]]; then
+            # SIGTERM the process group (kills sleep child too); fall back to
+            # killing just the PID if the group signal fails.
+            kill -- -"$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+        fi
+        rm -f "$ttl_pid_file"
+    fi
+}
+
+# Spawn a background watcher that calls `ds --unshare` after $ttl seconds.
+# Stores the watcher's PID in the TTL pid file for later cancellation.
+_upterm_start_ttl_watcher() {
+    local ttl="$1"
+    local session="$2"
+    local ttl_pid_file
+    ttl_pid_file=$(_upterm_ttl_pid_file)
+
+    _upterm_cancel_ttl_watcher
+
+    # Resolve the ds binary path before forking.
+    local ds_bin
+    ds_bin=$(command -v ds 2>/dev/null || true)
+    [[ -z "$ds_bin" ]] && ds_bin="ds"
+
+    local esc_bin esc_session
+    esc_bin=$(printf '%q' "$ds_bin")
+    esc_session=$(printf '%q' "$session")
+
+    # setsid gives the subshell its own process group so killing the group
+    # also kills the sleep child. Fall back to a plain subshell if unavailable.
+    if command -v setsid >/dev/null 2>&1; then
+        setsid bash -c "sleep ${ttl} && ${esc_bin} --unshare ${esc_session}" >/dev/null 2>&1 &
+    else
+        ( sleep "$ttl" && "$ds_bin" --unshare "$session" ) >/dev/null 2>&1 &
+    fi
+    local watcher_pid=$!
+    local old_umask
+    old_umask=$(umask)
+    umask 077
+    echo "$watcher_pid" > "$ttl_pid_file"
+    umask "$old_umask"
+}
+
+# Start TTL watcher if share-ttl > 0; print expiry message. No-op if TTL=0.
+_upterm_maybe_start_ttl_watcher() {
+    local session="$1"
+    local ttl="${DS_UPTERM_SHARE_TTL:-3600}"
+    if [[ "$ttl" =~ ^[0-9]+$ && "$ttl" -gt 0 ]]; then
+        _upterm_start_ttl_watcher "$ttl" "$session"
+        echo "ds: share will auto-expire in ${ttl}s (run 'ds --share' to reset)"
+    fi
 }
 
 _share_running() {
@@ -203,7 +273,14 @@ _share_start() {
         local current_session
         current_session=$(_share_current_session)
         if [[ "$current_session" == "$session" ]]; then
-            echo "ds: already sharing session '$session'"
+            # Reset the TTL timer if configured.
+            local ttl="${DS_UPTERM_SHARE_TTL:-3600}"
+            if [[ "$ttl" =~ ^[0-9]+$ && "$ttl" -gt 0 ]]; then
+                _upterm_start_ttl_watcher "$ttl" "$session"
+                echo "ds: already sharing session '$session' (TTL reset to ${ttl}s)"
+            else
+                echo "ds: already sharing session '$session'"
+            fi
             _share_info
             return 0
         else
@@ -391,6 +468,7 @@ _share_start() {
             _write_share_info "$content"
             printf '%s\n' "$content"
             _upterm_push_share_info "$session"
+            _upterm_maybe_start_ttl_watcher "$session"
             return 0
         fi
         echo "ds: timed out waiting for upterm share info (admin socket unavailable; log: $log_file)" >&2
@@ -404,6 +482,7 @@ _share_start() {
             _write_share_info "$content"
             printf '%s\n' "$content"
             _upterm_push_share_info "$session"
+            _upterm_maybe_start_ttl_watcher "$session"
             return 0
         fi
         sleep 0.5
@@ -413,6 +492,7 @@ _share_start() {
         _write_share_info "$content"
         printf '%s\n' "$content"
         _upterm_push_share_info "$session"
+        _upterm_maybe_start_ttl_watcher "$session"
         return 0
     fi
 
@@ -439,6 +519,7 @@ _share_stop() {
     fi
     rm -f "$pid_file" "$DS_SHARE_INFO_FILE" \
         "$(_upterm_admin_file)" "$(_upterm_session_file)" "$(_upterm_log_file)"
+    _upterm_cancel_ttl_watcher
     _upterm_unpush_share_info "$session"
     # Kill the proxy session if it exists.
     local proxy_session="${DS_UPTERM_PROXY_SESSION:-_share}"
