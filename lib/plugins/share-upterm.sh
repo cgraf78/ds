@@ -16,10 +16,9 @@
 #   github-user        GitHub user for ACL
 #   authorized-keys    authorized_keys file for SSH-key-based ACL
 #   push               user@host target for pushing share info via SCP
-#   proxy-session      tmux session name to share instead of the real session
-#                      (default: _share). A dedicated background session is
-#                      created and shared so connecting clients get a shell
-#                      without mirroring into the user's active session.
+#   proxy-session      (deprecated, ignored) previously used to create a proxy
+#                      tmux session for connecting clients. Connecting clients
+#                      now get a plain bash -l shell directly.
 #   share-ttl          seconds before the share automatically expires (default:
 #                      3600). Set to 0 to disable auto-expiry. Calling
 #                      `ds --share` resets the timer.
@@ -410,25 +409,14 @@ _share_start() {
     echo "$session" > "$session_file"
     umask "$old_umask"
 
-    # Create (or reuse) a dedicated proxy tmux session to share instead of the
-    # user's real session. Connecting clients land in this background session
-    # and can use tmux commands (capture-pane, send-keys) to interact with the
-    # real session without mirroring into it or shrinking its pane.
-    local proxy_session="${DS_UPTERM_PROXY_SESSION:-_share}"
-    if ! tmux has-session -t "=$proxy_session" 2>/dev/null; then
-        tmux new-session -d -s "$proxy_session"
-    fi
-
     # Fully detach upterm from the controlling terminal.
     local hosted_cmd force_cmd
-    local escaped_admin_file escaped_proxy
+    local escaped_admin_file
     escaped_admin_file=$(printf '%q' "$admin_file")
-    escaped_proxy=$(printf '%q' "$proxy_session")
     hosted_cmd="umask 077; echo \"\$UPTERM_ADMIN_SOCKET\" > $escaped_admin_file; while true; do sleep 86400; done"
-    # Force-command attaches to the proxy session, keeping the user's real
-    # session untouched. The proxy session is a plain background shell.
-    # Fall back to bash -l if the proxy session has been killed externally.
-    force_cmd="bash -c 'tmux attach -t =$escaped_proxy || bash -l'"
+    # Connecting clients get a plain login shell. They can interact with the
+    # host's tmux sessions non-destructively via tmux send-keys/capture-pane.
+    force_cmd="bash -l"
 
     local upterm_pid
     if command -v setsid >/dev/null 2>&1 && ! _upterm_is_wsl; then
@@ -521,9 +509,4 @@ _share_stop() {
         "$(_upterm_admin_file)" "$(_upterm_session_file)" "$(_upterm_log_file)"
     _upterm_cancel_ttl_watcher
     _upterm_unpush_share_info "$session"
-    # Kill the proxy session if it exists.
-    local proxy_session="${DS_UPTERM_PROXY_SESSION:-_share}"
-    if tmux has-session -t "=$proxy_session" 2>/dev/null; then
-        tmux kill-session -t "=$proxy_session"
-    fi
 }

@@ -132,18 +132,14 @@ Config file: `~/.config/ds/share-upterm.conf` (env vars `DS_UPTERM_*` override):
 | `github-user` | `DS_UPTERM_GITHUB_USER` | Restrict access to a GitHub user |
 | `authorized-keys` | `DS_UPTERM_AUTHORIZED_KEYS` | Restrict access via authorized_keys |
 | `push` | `DS_UPTERM_PUSH` | `user@host` — push share info via SCP |
-| `proxy-session` | `DS_UPTERM_PROXY_SESSION` | tmux session name for the share proxy (default: `_share`) |
+| `proxy-session` | `DS_UPTERM_PROXY_SESSION` | (deprecated, ignored) |
 | `share-ttl` | `DS_UPTERM_SHARE_TTL` | seconds before share auto-expires (default: `3600`, set to `0` to disable) |
 
 See `examples/share-upterm.conf` for a template.
 
 #### Proxy session
 
-When sharing, connecting clients are placed into a dedicated proxy tmux session (default: `_share`) rather than mirrored directly into your active session. This means:
-
-- Your real session's pane layout and resolution are **never affected** by a connecting client
-- Clients can interact with your sessions non-destructively via `tmux capture-pane` (read) and `tmux send-keys` (write)
-- The proxy session is created automatically on `--share` and destroyed on `--unshare`
+When sharing, connecting clients get a plain login shell (`bash -l`) on the host. From there they can interact with your tmux sessions non-destructively via `tmux capture-pane` (read) and `tmux send-keys` (write) without mirroring into or resizing your active session.
 
 #### Share TTL
 
