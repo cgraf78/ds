@@ -224,9 +224,9 @@ _upterm_start_ttl_watcher() {
     # setsid gives the subshell its own process group so killing the group
     # also kills the sleep child. Fall back to a plain subshell if unavailable.
     if command -v setsid >/dev/null 2>&1; then
-        setsid bash -c "sleep ${ttl} && ${esc_bin} --unshare ${esc_session}" &
+        setsid bash -c "sleep ${ttl} && ${esc_bin} --unshare ${esc_session}" >/dev/null 2>&1 &
     else
-        ( sleep "$ttl" && "$ds_bin" --unshare "$session" ) &
+        ( sleep "$ttl" && "$ds_bin" --unshare "$session" ) >/dev/null 2>&1 &
     fi
     local watcher_pid=$!
     umask 077
