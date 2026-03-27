@@ -229,8 +229,11 @@ _upterm_start_ttl_watcher() {
         ( sleep "$ttl" && "$ds_bin" --unshare "$session" ) >/dev/null 2>&1 &
     fi
     local watcher_pid=$!
+    local old_umask
+    old_umask=$(umask)
     umask 077
     echo "$watcher_pid" > "$ttl_pid_file"
+    umask "$old_umask"
 }
 
 # Start TTL watcher if share-ttl > 0; print expiry message. No-op if TTL=0.
