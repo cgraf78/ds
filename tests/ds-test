@@ -357,6 +357,7 @@ _reset_tmux_log
 export MOCK_SESSIONS="ds"
 DS_SHARE_VIA="upterm"
 DS_UPTERM_GITHUB_USER="testuser"
+DS_UPTERM_SHARE_TTL="0"  # disable TTL for this test to avoid background watchers
 SESSION="ds"
 HOST=""
 # _do_share calls _share_start, which runs the full share flow with mock upterm
@@ -469,13 +470,161 @@ _assert_eq "env override: github-user" "envuser" "$DS_UPTERM_GITHUB_USER"
 _assert_eq "env override: authorized-keys" "/env/authorized_keys" "$DS_UPTERM_AUTHORIZED_KEYS"
 _assert_eq "env override: push" "envuser@envhost" "$DS_UPTERM_PUSH"
 
+# share-ttl config key loaded
+cat > "$CONF_DIR/share-upterm.conf" <<'EOF'
+server=myupterm.internal:2222
+share-ttl=1800
+EOF
+DS_UPTERM_HOST=""
+DS_UPTERM_SHARE_TTL=""
+_share_load_config
+_assert_eq "config: share-ttl" "1800" "$DS_UPTERM_SHARE_TTL"
+
+# Env var overrides share-ttl from config
+DS_UPTERM_SHARE_TTL="600"
+_share_load_config
+_assert_eq "env override: share-ttl" "600" "$DS_UPTERM_SHARE_TTL"
+
 # Missing config file is silently ignored
 rm -f "$CONF_DIR/share-upterm.conf"
 DS_UPTERM_HOST=""
 DS_UPTERM_PUSH=""
+DS_UPTERM_SHARE_TTL=""
 _share_load_config
 _assert_eq "missing config: server empty" "" "$DS_UPTERM_HOST"
 _assert_eq "missing config: push empty" "" "$DS_UPTERM_PUSH"
+_assert_eq "missing config: share-ttl empty" "" "$DS_UPTERM_SHARE_TTL"
+
+# ---------------------------------------------------------------------------
+# Tests: Share TTL watcher
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== Share TTL watcher ==="
+
+# Add a mock setsid that just runs its args directly (no new process group
+# needed in tests — we just need to verify the watcher pid file is created
+# and the watcher can be cancelled).
+cat > "$MOCK_BIN/setsid" <<'MOCK'
+#!/usr/bin/env bash
+# Run in background so sleep doesn't block the test process.
+"$@" &
+MOCK
+chmod +x "$MOCK_BIN/setsid"
+
+# Add a mock ds that records --unshare calls
+DS_UNSHARE_LOG="$MOCK_BIN/ds-unshare.log"
+cat > "$MOCK_BIN/ds" <<MOCK
+#!/usr/bin/env bash
+echo "ds \$*" >> "${DS_UNSHARE_LOG}"
+MOCK
+chmod +x "$MOCK_BIN/ds"
+
+# --- _upterm_start_ttl_watcher creates a pid file ---
+_reset_tmux_log
+DS_UPTERM_PID_FILE="$(_upterm_pid_file)"
+DS_UPTERM_SHARE_TTL=""
+: > "$DS_UNSHARE_LOG"
+_upterm_start_ttl_watcher 60 "ds"
+ttl_pid_file=$(_upterm_ttl_pid_file)
+_assert_file_exists "watcher: ttl pid file created" "$ttl_pid_file"
+watcher_pid=$(cat "$ttl_pid_file" 2>/dev/null || true)
+if [[ "$watcher_pid" =~ ^[0-9]+$ ]]; then
+    _pass "watcher: pid file contains numeric PID"
+else
+    _fail "watcher: pid file contains non-numeric value: '$watcher_pid'"
+fi
+# Clean up — kill the watcher (it's sleeping for 60s)
+_upterm_cancel_ttl_watcher
+_assert_file_missing "watcher: cancel removes pid file" "$ttl_pid_file"
+# Watcher process should be gone
+if [[ "$watcher_pid" =~ ^[0-9]+$ ]] && kill -0 "$watcher_pid" 2>/dev/null; then
+    _fail "watcher: cancel killed process"
+else
+    _pass "watcher: cancel killed process"
+fi
+
+# --- _upterm_cancel_ttl_watcher is idempotent (no pid file) ---
+_upterm_cancel_ttl_watcher
+_assert_file_missing "cancel: idempotent when no pid file" "$(_upterm_ttl_pid_file)"
+_pass "cancel: no error when pid file absent"
+
+# --- re-starting watcher cancels previous one ---
+_upterm_start_ttl_watcher 60 "ds"
+first_pid=$(cat "$(_upterm_ttl_pid_file)" 2>/dev/null || true)
+_upterm_start_ttl_watcher 60 "ds"
+second_pid=$(cat "$(_upterm_ttl_pid_file)" 2>/dev/null || true)
+if [[ "$first_pid" != "$second_pid" ]]; then
+    _pass "watcher: re-start spawns new watcher"
+else
+    _fail "watcher: re-start should spawn a new watcher PID"
+fi
+if [[ "$first_pid" =~ ^[0-9]+$ ]] && kill -0 "$first_pid" 2>/dev/null; then
+    _fail "watcher: re-start killed previous watcher"
+else
+    _pass "watcher: re-start killed previous watcher"
+fi
+_upterm_cancel_ttl_watcher
+
+# --- TTL=0 disables the watcher ---
+DS_UPTERM_SHARE_TTL="0"
+export MOCK_SESSIONS="ds"
+DS_UPTERM_GITHUB_USER="testuser"
+DS_SHARE_INFO_FILE="$(_default_share_info_file)"
+DS_UPTERM_PID_FILE="$(_upterm_pid_file)"
+SESSION="ds" HOST=""
+result=$(_do_share 2>&1) || true
+_assert_file_missing "ttl=0: no ttl pid file created" "$(_upterm_ttl_pid_file)"
+_assert_not_contains "ttl=0: no auto-expire message" "auto-expire" "$result"
+# Clean up share state
+_pid_f=$(_upterm_pid_file)
+if [[ -f "$_pid_f" ]]; then
+    _pid=$(cat "$_pid_f" 2>/dev/null || true)
+    [[ "$_pid" =~ ^[0-9]+$ ]] && kill "$_pid" 2>/dev/null || true
+    rm -f "$_pid_f"
+fi
+rm -f "$DS_SHARE_INFO_FILE" "$(_upterm_admin_file)" "$(_upterm_session_file)" "$(_upterm_log_file)"
+
+# --- TTL>0 creates watcher on successful share ---
+# Note: _do_share must NOT be captured in $() because the mock upterm starts
+# background jobs (the hosted_cmd loop) that would make the subshell hang.
+# Use a temp file to capture output instead.
+_share_out=$(_tmpdir)/share.out
+DS_UPTERM_SHARE_TTL="3600"
+DS_UPTERM_PRIVATE_KEY="$TEST_HOME/.ssh/test_upterm_key"
+DS_UPTERM_KNOWN_HOSTS=""
+DS_UPTERM_HOST=""
+DS_UPTERM_AUTHORIZED_KEYS=""
+DS_UPTERM_PUSH=""
+export MOCK_SESSIONS="ds"
+DS_UPTERM_GITHUB_USER="testuser"
+DS_SHARE_INFO_FILE="$(_default_share_info_file)"
+DS_UPTERM_PID_FILE="$(_upterm_pid_file)"
+SESSION="ds" HOST=""
+_do_share > "$_share_out" 2>&1 || true
+result=$(cat "$_share_out")
+_assert_file_exists "ttl>0: ttl pid file created on share" "$(_upterm_ttl_pid_file)"
+_assert_contains "ttl>0: auto-expire message shown" "auto-expire" "$result"
+share_watcher_pid=$(cat "$(_upterm_ttl_pid_file)" 2>/dev/null || true)
+
+# --- _share_stop cancels the watcher ---
+SESSION="ds" HOST=""
+_do_unshare 2>&1 || true
+_assert_file_missing "unshare: ttl pid file removed" "$(_upterm_ttl_pid_file)"
+if [[ "$share_watcher_pid" =~ ^[0-9]+$ ]] && kill -0 "$share_watcher_pid" 2>/dev/null; then
+    _fail "unshare: watcher process killed"
+else
+    _pass "unshare: watcher process killed"
+fi
+
+# --- TTL fires and calls ds --unshare ---
+DS_UPTERM_SHARE_TTL=""
+: > "$DS_UNSHARE_LOG"
+_upterm_start_ttl_watcher 1 "myses"
+sleep 2
+unshare_calls=$(cat "$DS_UNSHARE_LOG" 2>/dev/null || true)
+_assert_contains "ttl fire: ds --unshare called after TTL" "--unshare myses" "$unshare_calls"
+rm -f "$(_upterm_ttl_pid_file)"
 
 # Reset sharing vars for remaining tmux tests
 DS_SHARE_VIA=""
@@ -485,6 +634,7 @@ DS_UPTERM_PID_FILE=""
 DS_UPTERM_GITHUB_USER=""
 DS_UPTERM_AUTHORIZED_KEYS=""
 DS_UPTERM_PUSH=""
+DS_UPTERM_SHARE_TTL=""
 SESSION=""
 HOST=""
 
