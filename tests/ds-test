@@ -580,7 +580,7 @@ _assert_not_contains "ttl=0: no auto-expire message" "auto-expire" "$result"
 _pid_f=$(_upterm_pid_file)
 if [[ -f "$_pid_f" ]]; then
     _pid=$(cat "$_pid_f" 2>/dev/null || true)
-    [[ "$_pid" =~ ^[0-9]+$ ]] && kill "$_pid" 2>/dev/null || true
+    if [[ "$_pid" =~ ^[0-9]+$ ]]; then kill "$_pid" 2>/dev/null || true; fi
     rm -f "$_pid_f"
 fi
 rm -f "$DS_SHARE_INFO_FILE" "$(_upterm_admin_file)" "$(_upterm_session_file)" "$(_upterm_log_file)"
