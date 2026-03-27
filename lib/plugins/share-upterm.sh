@@ -16,6 +16,10 @@
 #   github-user        GitHub user for ACL
 #   authorized-keys    authorized_keys file for SSH-key-based ACL
 #   push               user@host target for pushing share info via SCP
+#   proxy-session      tmux session name to share instead of the real session
+#                      (default: _share). A dedicated background session is
+#                      created and shared so connecting clients get a shell
+#                      without mirroring into the user's active session.
 #
 # Env vars (all optional, override config):
 #   DS_UPTERM_HOST           maps to server
@@ -25,6 +29,7 @@
 #   DS_UPTERM_AUTHORIZED_KEYS maps to authorized-keys
 #   DS_UPTERM_PUSH           maps to push
 #   DS_UPTERM_PID_FILE       override PID file path
+#   DS_UPTERM_PROXY_SESSION  maps to proxy-session
 
 DS_UPTERM_HOST="${DS_UPTERM_HOST:-}"
 DS_UPTERM_PRIVATE_KEY="${DS_UPTERM_PRIVATE_KEY:-}"
@@ -33,6 +38,7 @@ DS_UPTERM_GITHUB_USER="${DS_UPTERM_GITHUB_USER:-}"
 DS_UPTERM_AUTHORIZED_KEYS="${DS_UPTERM_AUTHORIZED_KEYS:-}"
 DS_UPTERM_PID_FILE="${DS_UPTERM_PID_FILE:-}"
 DS_UPTERM_PUSH="${DS_UPTERM_PUSH:-}"
+DS_UPTERM_PROXY_SESSION="${DS_UPTERM_PROXY_SESSION:-}"
 
 _UPTERM_REMOTE_STATE_DIR=".local/state/ds"
 
@@ -165,6 +171,7 @@ _share_load_config() {
             github-user)     [[ -z "$DS_UPTERM_GITHUB_USER" ]]     && DS_UPTERM_GITHUB_USER="$val" ;;
             authorized-keys) [[ -z "$DS_UPTERM_AUTHORIZED_KEYS" ]] && DS_UPTERM_AUTHORIZED_KEYS="${val/#\~/$HOME}" ;;
             push)            [[ -z "$DS_UPTERM_PUSH" ]]            && DS_UPTERM_PUSH="$val" ;;
+            proxy-session)   [[ -z "$DS_UPTERM_PROXY_SESSION" ]]   && DS_UPTERM_PROXY_SESSION="$val" ;;
         esac
     done < "$conf" || true
 }
@@ -226,6 +233,69 @@ _share_start() {
     # Apply default server after config has been loaded
     : "${DS_UPTERM_HOST:=uptermd.upterm.dev:22}"
 
+    # Pre-flight host key check while we still have a TTY. upterm is launched
+    # fully detached (</dev/null), so any SSH host-key prompt sent there hangs
+    # forever with no way for the user to respond. Catch mismatches now.
+    #
+    # Uses ssh-keyscan to compare fingerprints rather than an SSH login attempt,
+    # since uptermd may present a host certificate (@cert-authority trust model)
+    # which OpenSSH BatchMode probes cannot validate.
+    if [[ -n "${DS_UPTERM_KNOWN_HOSTS:-}" ]]; then
+        local _pf_host _pf_port
+        _pf_host="${DS_UPTERM_HOST%%:*}"
+        _pf_port="${DS_UPTERM_HOST##*:}"
+        [[ "$_pf_port" == "$_pf_host" ]] && _pf_port=22
+
+        # Fetch the server's current key fingerprint.
+        local _live_fp
+        _live_fp=$(ssh-keyscan -p "$_pf_port" "$_pf_host" 2>/dev/null \
+            | grep -v '^#' | ssh-keygen -lf - 2>/dev/null | awk '{print $2}' | head -1)
+
+        # Extract stored key fingerprint (strip @cert-authority and host field).
+        local _stored_fp
+        _stored_fp=$(grep -v '^#' "$DS_UPTERM_KNOWN_HOSTS" 2>/dev/null \
+            | sed 's/^@cert-authority[[:space:]]*//' \
+            | awk '{print $2, $3}' \
+            | ssh-keygen -lf - 2>/dev/null | awk '{print $2}' | head -1)
+
+        if [[ -z "$_live_fp" ]]; then
+            echo "ds: warning: could not reach $_pf_host:$_pf_port to verify host key" >&2
+        elif [[ "$_live_fp" != "$_stored_fp" ]]; then
+            echo "" >&2
+            echo "  The upterm server host key has changed or is not in known-hosts." >&2
+            echo "  known-hosts file: $DS_UPTERM_KNOWN_HOSTS" >&2
+            echo "  current fingerprint:  $_live_fp" >&2
+            echo "  stored fingerprint:   ${_stored_fp:-(none)}" >&2
+            echo "" >&2
+            read -r -p "  Update known-hosts automatically and continue? [y/N] " answer </dev/tty
+            if [[ "$answer" == [yY] ]]; then
+                local new_keys
+                new_keys=$(ssh-keyscan -p "$_pf_port" "$_pf_host" 2>/dev/null | grep -v '^#')
+                if [[ -z "$new_keys" ]]; then
+                    echo "ds: failed to scan host keys from $_pf_host:$_pf_port" >&2
+                    return 1
+                fi
+                # Strip old entries for this host:port (escape brackets for grep).
+                local _esc_host
+                _esc_host=$(printf '%s' "$_pf_host" | sed 's/[.[\*^$]/\\&/g')
+                local tmp_kh
+                tmp_kh=$(mktemp)
+                grep -Ev "(^|[[:space:]])\[?${_esc_host}\]?(:${_pf_port})?" \
+                    "$DS_UPTERM_KNOWN_HOSTS" > "$tmp_kh" 2>/dev/null || true
+                # Append new entries with @cert-authority prefix.
+                while IFS= read -r line; do
+                    [[ -z "$line" ]] && continue
+                    printf '@cert-authority %s\n' "$line"
+                done <<< "$new_keys" >> "$tmp_kh"
+                mv "$tmp_kh" "$DS_UPTERM_KNOWN_HOSTS"
+                echo "ds: known-hosts updated for $_pf_host:$_pf_port"
+            else
+                echo "ds: aborted — update $DS_UPTERM_KNOWN_HOSTS manually" >&2
+                return 1
+            fi
+        fi
+    fi
+
     local host_args=(--accept --server "ssh://$DS_UPTERM_HOST" --private-key "$key")
     if [[ -n "${DS_UPTERM_KNOWN_HOSTS:-}" ]]; then
         host_args+=(--known-hosts "$DS_UPTERM_KNOWN_HOSTS")
@@ -263,14 +333,25 @@ _share_start() {
     echo "$session" > "$session_file"
     umask "$old_umask"
 
+    # Create (or reuse) a dedicated proxy tmux session to share instead of the
+    # user's real session. Connecting clients land in this background session
+    # and can use tmux commands (capture-pane, send-keys) to interact with the
+    # real session without mirroring into it or shrinking its pane.
+    local proxy_session="${DS_UPTERM_PROXY_SESSION:-_share}"
+    if ! tmux has-session -t "=$proxy_session" 2>/dev/null; then
+        tmux new-session -d -s "$proxy_session"
+    fi
+
     # Fully detach upterm from the controlling terminal.
     local hosted_cmd force_cmd
-    local escaped_admin_file
+    local escaped_admin_file escaped_proxy
     escaped_admin_file=$(printf '%q' "$admin_file")
+    escaped_proxy=$(printf '%q' "$proxy_session")
     hosted_cmd="umask 077; echo \"\$UPTERM_ADMIN_SOCKET\" > $escaped_admin_file; while true; do sleep 86400; done"
-    local escaped_session
-    escaped_session=$(printf '%q' "$session")
-    force_cmd="bash -lc \"tmux attach -t =$escaped_session || tmux attach -t $escaped_session\""
+    # Force-command attaches to the proxy session, keeping the user's real
+    # session untouched. The proxy session is a plain background shell.
+    # Fall back to bash -l if the proxy session has been killed externally.
+    force_cmd="tmux attach -t =$escaped_proxy || bash -l"
 
     local upterm_pid
     if command -v setsid >/dev/null 2>&1 && ! _upterm_is_wsl; then
@@ -341,6 +422,7 @@ _share_start() {
 
 _share_stop() {
     local session="$1"
+    _share_load_config
     local pid_file
     pid_file=$(_upterm_pid_file)
 
@@ -358,4 +440,9 @@ _share_stop() {
     rm -f "$pid_file" "$DS_SHARE_INFO_FILE" \
         "$(_upterm_admin_file)" "$(_upterm_session_file)" "$(_upterm_log_file)"
     _upterm_unpush_share_info "$session"
+    # Kill the proxy session if it exists.
+    local proxy_session="${DS_UPTERM_PROXY_SESSION:-_share}"
+    if tmux has-session -t "=$proxy_session" 2>/dev/null; then
+        tmux kill-session -t "=$proxy_session"
+    fi
 }
