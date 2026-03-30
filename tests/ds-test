@@ -884,6 +884,10 @@ _assert_contains "ds init (no shell): requires shell name" "requires a shell nam
 result=$("$SCRIPT_DIR/../bin/ds" init bash @myhost 2>&1 || true)
 _assert_contains "ds init @host: rejects remote host" "does not support remote" "$result"
 
+# Non-profile session name with @host → should reach remote dispatch, not "unknown profile"
+result=$("$SCRIPT_DIR/../bin/ds" myarbitrarysession @server1 2>&1 || true)
+_assert_not_contains "ds nonexistent-profile @host: no profile error" "unknown profile" "$result"
+
 # Restore DS_SOURCED for remaining in-process tests
 export DS_SOURCED=1
 

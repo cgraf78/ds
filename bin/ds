@@ -620,8 +620,11 @@ fi
 # Resolve session/profile depending on the action
 case "$ACTION" in
     session)
-        # If session already exists in tmux, attach directly (no profile needed)
-        if [[ -n "$SESSION" ]] && tmux has-session -t "=$SESSION" 2>/dev/null; then
+        if [[ -n "$HOST" ]]; then
+            # Remote: skip local profile resolution — the remote ds handles it
+            :
+        elif [[ -n "$SESSION" ]] && tmux has-session -t "=$SESSION" 2>/dev/null; then
+            # Existing local session: attach directly (no profile needed)
             PROFILE=""
         else
             _resolve_profile
