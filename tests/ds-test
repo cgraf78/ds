@@ -285,13 +285,21 @@ _resolve_profile
 _assert_eq "dev-my-project → PROFILE=dev" "dev" "$PROFILE"
 _assert_eq "dev-my-project SESSION preserved" "dev-my-project" "$SESSION"
 
-# Unknown profile → error
-result=$( (SESSION="foo" PROFILE=""; _resolve_profile) 2>&1 || true)
-_assert_contains "unknown profile errors" "unknown profile" "$result"
-_assert_contains "unknown profile lists options" "ds" "$result"
+# Arbitrary name → ds profile
+SESSION="foo" PROFILE=""
+_resolve_profile
+_assert_eq "foo → PROFILE=ds" "ds" "$PROFILE"
+_assert_eq "foo SESSION preserved" "foo" "$SESSION"
 
-result=$( (SESSION="foo-bar" PROFILE=""; _resolve_profile) 2>&1 || true)
-_assert_contains "unknown profile-instance errors" "unknown profile" "$result"
+SESSION="foo-bar" PROFILE=""
+_resolve_profile
+_assert_eq "foo-bar (no profile match) → PROFILE=ds" "ds" "$PROFILE"
+_assert_eq "foo-bar SESSION preserved" "foo-bar" "$SESSION"
+
+SESSION="myproject" PROFILE=""
+_resolve_profile
+_assert_eq "myproject → PROFILE=ds" "ds" "$PROFILE"
+_assert_eq "myproject SESSION preserved" "myproject" "$SESSION"
 
 # ---------------------------------------------------------------------------
 # Tests: Session target resolution
@@ -682,6 +690,16 @@ _do_session
 log=$(_tmux_log)
 _assert_contains "web-2 → session 'web-2'" "new-session -d -s web-2" "$log"
 
+# Arbitrary name uses ds profile
+_reset_tmux_log
+export MOCK_DS_MANAGED=""
+SESSION="myproject"
+PROFILE="ds"
+_do_session
+log=$(_tmux_log)
+_assert_contains "myproject → session 'myproject'" "new-session -d -s myproject" "$log"
+_assert_contains "myproject tags with DS_MANAGED" "set-environment -t myproject DS_MANAGED 1" "$log"
+
 # ---------------------------------------------------------------------------
 # Tests: Existing session attachment
 # ---------------------------------------------------------------------------
@@ -840,9 +858,10 @@ _assert_contains "ds --invalid: shows usage" "[session]" "$result"
 result=$("$SCRIPT_DIR/../bin/ds" -l 2>&1)
 _assert_contains "ds -l empty: shows message" "no active ds sessions" "$result"
 
-# Unknown profile → error
+# Arbitrary name → creates session with ds profile (no error)
+_reset_tmux_log
 result=$("$SCRIPT_DIR/../bin/ds" foobar 2>&1 || true)
-_assert_contains "ds foobar: unknown profile" "unknown profile" "$result"
+_assert_not_contains "ds foobar: no profile error" "unknown profile" "$result"
 
 # -k with nonexistent session
 result=$("$SCRIPT_DIR/../bin/ds" -k nosuch 2>&1 || true)

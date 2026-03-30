@@ -31,7 +31,7 @@ Single-file CLI (`bin/ds`) with a plugin system. Everything is pure bash (4+).
 - **Connect methods** (`connect-<method>.sh`): define `_connect_<method>()` for remote transport. `ssh` is built-in. Bundled: `autossh`.
 - **Share backends** (`share-<backend>.sh`): define `_share_start`, `_share_stop`, `_share_info`, `_share_running`, `_share_current_session`, `_share_load_config`. Bundled: `upterm`.
 
-**Session naming**: session name = profile name or `profile-instance` (split on first `-`). Default session is `ds` with `ds` profile.
+**Session naming**: session name = profile name, `profile-instance` (split on first `-`), or any arbitrary name (uses `ds` profile). Default session is `ds` with `ds` profile.
 
 **Host resolution**: `~/.config/ds/connect*.conf` files map hostname globs to connect methods. First match wins.
 
