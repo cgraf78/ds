@@ -43,7 +43,8 @@ ds --share dev                  # share session "dev"
 ds --unshare                    # stop sharing
 ds --share-via upterm           # create/attach and share in one step
 
-ds init bash                    # print shell integration snippet
+ds init bash                    # print Bash shell integration snippet
+ds init zsh                     # print Zsh shell integration snippet
 ```
 
 ## Session Naming
@@ -154,6 +155,14 @@ eval "$(ds init bash)"
 ```
 
 This provides tab completion and ET connect support.
+
+For Zsh, add this after `compinit` in `~/.zshrc`:
+
+```zsh
+eval "$(ds init zsh)"
+```
+
+This provides Zsh completion plus the same SSH auto-attach behavior.
 
 ### Auto-attach on SSH login
 

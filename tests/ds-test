@@ -899,6 +899,19 @@ _assert_contains "ds -l dev: rejects session name" "does not take a session name
 result=$("$SCRIPT_DIR/../bin/ds" init 2>&1 || true)
 _assert_contains "ds init (no shell): requires shell name" "requires a shell name" "$result"
 
+# init bash advertises bash and zsh completions
+result=$("$SCRIPT_DIR/../bin/ds" init bash 2>&1)
+_assert_contains "ds init bash: includes bash shell names" 'compgen -W "bash zsh"' "$result"
+
+# init zsh emits zsh completion wiring
+result=$("$SCRIPT_DIR/../bin/ds" init zsh 2>&1)
+_assert_contains "ds init zsh: defines zsh completion" 'compdef _ds ds' "$result"
+_assert_contains "ds init zsh: offers both shells" 'shells=(bash zsh)' "$result"
+
+# init rejects unknown shells
+result=$("$SCRIPT_DIR/../bin/ds" init fish 2>&1 || true)
+_assert_contains "ds init fish: unsupported shell" "supported: bash, zsh" "$result"
+
 # init with @host → error
 result=$("$SCRIPT_DIR/../bin/ds" init bash @myhost 2>&1 || true)
 _assert_contains "ds init @host: rejects remote host" "does not support remote" "$result"

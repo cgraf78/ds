@@ -7,7 +7,7 @@
 #        ds --killall [@host]          kill all ds sessions
 #        ds --share [session]          share a session (defaults to current)
 #        ds --unshare [session]        stop sharing (defaults to current)
-#        ds init bash                  print shell integration snippet
+#        ds init <bash|zsh>            print shell integration snippet
 #
 # Sessions:    profile name, profile-instance, or any name (e.g., dev, dev-work, myproject)
 # Profiles:    ~/.config/ds/profile-<name>.sh   (define _profile_<name>)
@@ -15,7 +15,7 @@
 # Share:       ~/.config/ds/share-<backend>.sh   (define _share_start, _share_stop, etc.)
 # Hosts:       ~/.config/ds/connect*.conf          (hostname → connect method)
 #
-# Auto-attach: set DS_SSH_AUTO_ATTACH before eval "$(ds init bash)" in .bashrc
+# Auto-attach: set DS_SSH_AUTO_ATTACH before eval "$(ds init <bash|zsh>)"
 #              DS_SSH_AUTO_ATTACH=ds      → auto-attach to default "ds" session
 #              DS_SSH_AUTO_ATTACH=dev     → auto-attach to "dev" session
 #              NO_TMUX=1                  → skip for one login
@@ -50,7 +50,7 @@ _usage() {
     echo "       ds --killall [@host]          kill all ds sessions"
     echo "       ds --share [session]          share a session (defaults to current)"
     echo "       ds --unshare [session]        stop sharing (defaults to current)"
-    echo "       ds init bash                  print shell integration snippet"
+    echo "       ds init <bash|zsh>            print shell integration snippet"
     echo ""
     echo "Options:"
     echo "  -c, --connect METHOD   override connect method (ssh, autossh, et, ...)"
@@ -409,12 +409,9 @@ _do_init() {
         echo "ds: init requires a shell name (e.g., ds init bash)" >&2
         exit 1
     fi
-    if [[ "$shell" != "bash" ]]; then
-        echo "ds: unsupported shell '$shell' (supported: bash)" >&2
-        exit 1
-    fi
-
-    cat <<'INIT_EOF'
+    case "$shell" in
+        bash)
+            cat <<'INIT_EOF'
 
 # Connect handoff: attach-next lets connect plugins request a session
 _ds_f="$HOME/.local/state/ds/attach-next"
@@ -442,7 +439,7 @@ _ds() {
 
     case "$prev" in
         init)
-            COMPREPLY=($(compgen -W "bash" -- "$cur"))
+            COMPREPLY=($(compgen -W "bash zsh" -- "$cur"))
             return ;;
         -k|--kill|--share|--unshare)
             local sessions
@@ -483,6 +480,103 @@ _ds() {
 }
 complete -F _ds ds
 INIT_EOF
+            ;;
+        zsh)
+            cat <<'INIT_EOF'
+
+# Connect handoff: attach-next lets connect plugins request a session
+_ds_f="$HOME/.local/state/ds/attach-next"
+if [[ -o interactive && -f "$_ds_f" ]]; then
+    read -r _ds_args < "$_ds_f"
+    rm -f "$_ds_f"
+    [[ -n "$_ds_args" ]] && exec ds ${(z)_ds_args}
+fi
+unset _ds_f _ds_args
+
+# Auto-attach on SSH login (opt-in via DS_SSH_AUTO_ATTACH, skip with NO_TMUX=1)
+# DS_SSH_AUTO_ATTACH=ds      → attach to default "ds" session
+# DS_SSH_AUTO_ATTACH=dev     → attach to "dev" session
+# NO_TMUX=1                  → skip auto-attach for this login
+if [[ -n "${DS_SSH_AUTO_ATTACH:-}" && -z "$TMUX" && -o interactive && -n "$SSH_CONNECTION" && -z "$NO_TMUX" ]] && command -v tmux >/dev/null 2>&1; then
+    exec ds "$DS_SSH_AUTO_ATTACH"
+fi
+
+_ds() {
+    local prev="${words[CURRENT-1]:-}"
+    local cur="${words[CURRENT]:-}"
+    local -a sessions hosts profiles options shells
+    local conf_dir="${HOME}/.config/ds"
+    local f name _conn pname
+
+    shells=(bash zsh)
+    options=(
+        -l
+        --list
+        -k
+        --kill
+        --killall
+        --share
+        --unshare
+        --no-attach
+        -c
+        --connect
+        --share-via
+        init
+        -h
+        --help
+    )
+
+    case "$prev" in
+        init)
+            compadd -- "${shells[@]}"
+            return
+            ;;
+        -k|--kill|--share|--unshare)
+            sessions=(${(f)"$(tmux ls -F '#{session_name}' 2>/dev/null | while IFS= read -r s; do
+                tmux show-environment -t "=$s" DS_MANAGED 2>/dev/null | grep -q '^DS_MANAGED=' && echo "$s"
+            done 2>/dev/null)"})
+            (( ${#sessions[@]} > 0 )) && compadd -- "${sessions[@]}"
+            return
+            ;;
+        -c|--connect|--share-via)
+            return
+            ;;
+    esac
+
+    if [[ "${words[2]:-}" == init ]]; then
+        compadd -- "${shells[@]}"
+        return
+    fi
+
+    if [[ "$cur" == @* ]]; then
+        for f in "$conf_dir"/connect*.conf; do
+            [[ -f "$f" ]] || continue
+            while read -r name _conn; do
+                [[ -z "$name" || "$name" == '#'* ]] && continue
+                [[ "$name" == *'*'* || "$name" == *'?'* ]] && continue
+                hosts+=("@$name")
+            done < "$f"
+        done
+        (( ${#hosts[@]} > 0 )) && compadd -- "${hosts[@]}"
+        return
+    fi
+
+    for f in "$conf_dir"/profile-*.sh; do
+        [[ -f "$f" ]] || continue
+        pname="${f##*/profile-}"
+        profiles+=("${pname%.sh}")
+    done
+
+    compadd -- "${options[@]}" "${profiles[@]}"
+}
+(( $+functions[compdef] )) && compdef _ds ds
+INIT_EOF
+            ;;
+        *)
+            echo "ds: unsupported shell '$shell' (supported: bash, zsh)" >&2
+            exit 1
+            ;;
+    esac
 }
 
 # --- Remote dispatch ---
