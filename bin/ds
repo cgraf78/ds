@@ -82,26 +82,18 @@ _shell_name() {
         parent="$(ps -p "$PPID" -o comm= 2>/dev/null || true)"
         parent="${parent##*/}"
         parent="${parent#-}"
-
-        case "$parent" in
-            bash|zsh)
-                shell="$parent"
-                ;;
-        esac
+        [[ -n "$parent" ]] && shell="$parent"
     fi
 
     if [[ -z "$shell" && -n "${SHELL:-}" ]]; then
         shell="${SHELL##*/}"
     fi
 
-    case "$shell" in
-        bash|zsh)
-            printf '%s\n' "$shell"
-            ;;
-        *)
-            printf 'bash\n'
-            ;;
-    esac
+    if [[ -n "$shell" ]]; then
+        printf '%s\n' "$shell"
+    else
+        printf 'bash\n'
+    fi
 }
 
 _shell_path() {
