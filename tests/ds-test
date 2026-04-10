@@ -141,6 +141,12 @@ exit 0
 MOCK
 chmod +x "$MOCK_BIN/upterm"
 
+cat > "$MOCK_BIN/zsh" <<'MOCK'
+#!/usr/bin/env bash
+exit 0
+MOCK
+chmod +x "$MOCK_BIN/zsh"
+
 export PATH="$MOCK_BIN:$PATH"
 export TMUX_LOG
 
@@ -901,10 +907,12 @@ _assert_contains "ds init (no shell): requires shell name" "requires a shell nam
 
 # init bash advertises bash and zsh completions
 result=$("$SCRIPT_DIR/../bin/ds" init bash 2>&1)
+_assert_contains "ds init bash: wraps ds invocation" 'DS_SHELL_NAME=bash command ds "$@"' "$result"
 _assert_contains "ds init bash: includes bash shell names" 'compgen -W "bash zsh"' "$result"
 
 # init zsh emits zsh completion wiring
 result=$("$SCRIPT_DIR/../bin/ds" init zsh 2>&1)
+_assert_contains "ds init zsh: wraps ds invocation" 'DS_SHELL_NAME=zsh command ds "$@"' "$result"
 _assert_contains "ds init zsh: defines zsh completion" 'compdef _ds ds' "$result"
 _assert_contains "ds init zsh: offers both shells" 'shells=(bash zsh)' "$result"
 
@@ -950,6 +958,18 @@ _do_session
 log=$(_tmux_log)
 _assert_contains "profile function invoked" "TEST_MARKER_testval" "$log"
 unset DS_TEST_VAR
+
+_reset_tmux_log
+export MOCK_SESSIONS=""
+export MOCK_DS_MANAGED=""
+export DS_SHELL_NAME="zsh"
+SESSION="ds"
+PROFILE="ds"
+_do_session
+log=$(_tmux_log)
+_assert_contains "selected shell propagates into session" "set-environment -t ds DS_SHELL_NAME zsh" "$log"
+_assert_eq "selected shell helper resolves zsh" "zsh" "$(_shell_name)"
+unset DS_SHELL_NAME
 
 # ---------------------------------------------------------------------------
 # Tests: _attach behavior
@@ -1057,6 +1077,15 @@ _assert_contains "ssh remote: host" "SSH_HOST=server1" "$remote_log"
 # shellcheck disable=SC2088  # intentional — matching literal tilde in remote command
 _assert_contains "ssh remote: runs ds" "~/.local/bin/ds" "$remote_log"
 _assert_contains "ssh remote: passes session name" "dev" "$remote_log"
+_assert_contains "ssh remote: defaults to bash login shell" "DS_SHELL_NAME=bash bash -lc" "$remote_log"
+
+# Test remote prefers the invoking shell when available
+result=$(_run_remote "HOST=server1 ACTION=session SESSION=dev \
+    CONNECT_OVERRIDE= DS_SHELL_NAME=zsh")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "ssh remote: prefers invoking shell" "command -v zsh" "$remote_log"
+_assert_contains "ssh remote: passes zsh shell env" "DS_SHELL_NAME=zsh zsh -lc" "$remote_log"
+_assert_contains "ssh remote: retains bash fallback" "DS_SHELL_NAME=bash bash -lc" "$remote_log"
 
 # Test default session omits session name in remote args
 result=$(_run_remote "HOST=server1 ACTION=session SESSION=ds \

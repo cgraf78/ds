@@ -416,7 +416,7 @@ _share_start() {
     hosted_cmd="umask 077; echo \"\$UPTERM_ADMIN_SOCKET\" > $escaped_admin_file; while true; do sleep 86400; done"
     # Connecting clients get a plain login shell. They can interact with the
     # host's tmux sessions non-destructively via tmux send-keys/capture-pane.
-    force_cmd="bash -l"
+    force_cmd="$(_shell_login_cmd)"
 
     local upterm_pid
     if command -v setsid >/dev/null 2>&1 && ! _upterm_is_wsl; then

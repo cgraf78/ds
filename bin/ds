@@ -72,6 +72,61 @@ _usage() {
     echo "  ds -l @nas             list sessions on remote host"
 }
 
+# --- Shell selection ---
+
+_shell_name() {
+    local shell="${DS_SHELL_NAME:-}"
+    local parent=""
+
+    if [[ -z "$shell" ]] && command -v ps >/dev/null 2>&1; then
+        parent="$(ps -p "$PPID" -o comm= 2>/dev/null || true)"
+        parent="${parent##*/}"
+        parent="${parent#-}"
+
+        case "$parent" in
+            bash|zsh)
+                shell="$parent"
+                ;;
+        esac
+    fi
+
+    if [[ -z "$shell" && -n "${SHELL:-}" ]]; then
+        shell="${SHELL##*/}"
+    fi
+
+    case "$shell" in
+        bash|zsh)
+            printf '%s\n' "$shell"
+            ;;
+        *)
+            printf 'bash\n'
+            ;;
+    esac
+}
+
+_shell_path() {
+    local shell
+    shell="$(_shell_name)"
+
+    if command -v "$shell" >/dev/null 2>&1; then
+        command -v "$shell"
+        return
+    fi
+
+    if [[ -n "${SHELL:-}" && -x "${SHELL:-}" ]]; then
+        printf '%s\n' "$SHELL"
+        return
+    fi
+
+    printf '/bin/bash\n'
+}
+
+_shell_login_cmd() {
+    local shell_path
+    shell_path="$(_shell_path)"
+    printf 'exec %q -l' "$shell_path"
+}
+
 # --- Plugin discovery ---
 # Search for a plugin file by name, checking user config first, then bundled.
 _find_plugin() {
@@ -393,6 +448,7 @@ _do_session() {
 
     tmux new-session -d -s "$SESSION"
     tmux set-environment -t "$SESSION" DS_MANAGED 1
+    tmux set-environment -t "$SESSION" DS_SHELL_NAME "$(_shell_name)"
     "_profile_$PROFILE" "$SESSION"
     if [[ -n "${DS_SHARE_VIA:-}" ]]; then
         _share_start "$SESSION"
@@ -412,6 +468,10 @@ _do_init() {
     case "$shell" in
         bash)
             cat <<'INIT_EOF'
+
+ds() {
+    DS_SHELL_NAME=bash command ds "$@"
+}
 
 # Connect handoff: attach-next lets connect plugins request a session
 _ds_f="$HOME/.local/state/ds/attach-next"
@@ -483,6 +543,10 @@ INIT_EOF
             ;;
         zsh)
             cat <<'INIT_EOF'
+
+ds() {
+    DS_SHELL_NAME=zsh command ds "$@"
+}
 
 # Connect handoff: attach-next lets connect plugins request a session
 _ds_f="$HOME/.local/state/ds/attach-next"
@@ -608,10 +672,18 @@ _remote() {
             ;;
     esac
 
-    # Wrap in bash -lc so the remote login profile is sourced.
-    local remote_cmd
+    # Prefer the invoking shell on the remote side, but fall back to bash
+    # when that shell is unavailable there.
+    local remote_cmd shell remote_ds_cmd remote_ds_q
+    shell="$(_shell_name)"
     # shellcheck disable=SC2088  # intentional — remote shell expands ~
-    remote_cmd="NO_TMUX=1 bash -lc '~/.local/bin/ds $(printf '%q ' "${args[@]}")'"
+    remote_ds_cmd="~/.local/bin/ds $(printf '%q ' "${args[@]}")"
+    printf -v remote_ds_q '%q' "$remote_ds_cmd"
+    if [[ "$shell" == "bash" ]]; then
+        remote_cmd="NO_TMUX=1 DS_SHELL_NAME=bash bash -lc $remote_ds_q"
+    else
+        remote_cmd="if command -v $shell >/dev/null 2>&1; then NO_TMUX=1 DS_SHELL_NAME=$shell $shell -lc $remote_ds_q; else NO_TMUX=1 DS_SHELL_NAME=bash bash -lc $remote_ds_q; fi"
+    fi
 
     case "$CONNECT" in
         -)   echo "ds: host '$HOST' is local-only (no remote connections)" >&2; exit 1 ;;

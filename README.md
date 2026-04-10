@@ -77,7 +77,8 @@ _profile_myprofile() {
 
 ### Bundled profiles
 
-**dev** — chatbot pane (top) + bash (bottom) + separate bash window.
+**dev** — chatbot pane (top) + login shell (bottom) + separate login shell
+window.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -140,7 +141,10 @@ See `examples/share-upterm.conf` for a template.
 
 #### Proxy session
 
-When sharing, connecting clients get a plain login shell (`bash -l`) on the host. From there they can interact with your tmux sessions non-destructively via `tmux capture-pane` (read) and `tmux send-keys` (write) without mirroring into or resizing your active session.
+When sharing, connecting clients get a plain login shell on the host. From
+there they can interact with your tmux sessions non-destructively via `tmux
+capture-pane` (read) and `tmux send-keys` (write) without mirroring into or
+resizing your active session.
 
 #### Share TTL
 
