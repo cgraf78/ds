@@ -446,9 +446,13 @@ _do_session() {
         return
     fi
 
-    tmux new-session -d -s "$SESSION"
+    local shell_name shell_cmd
+    shell_name="$(_shell_name)"
+    shell_cmd="$(_shell_login_cmd)"
+    tmux new-session -d -s "$SESSION" "$shell_cmd"
     tmux set-environment -t "$SESSION" DS_MANAGED 1
-    tmux set-environment -t "$SESSION" DS_SHELL_NAME "$(_shell_name)"
+    tmux set-environment -t "$SESSION" DS_SHELL_NAME "$shell_name"
+    tmux set-option -t "$SESSION" default-command "$shell_cmd"
     "_profile_$PROFILE" "$SESSION"
     if [[ -n "${DS_SHARE_VIA:-}" ]]; then
         _share_start "$SESSION"

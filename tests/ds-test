@@ -968,6 +968,9 @@ PROFILE="ds"
 _do_session
 log=$(_tmux_log)
 _assert_contains "selected shell propagates into session" "set-environment -t ds DS_SHELL_NAME zsh" "$log"
+_assert_contains "new-session uses shell login cmd" "new-session" "$log"
+_assert_contains "new-session includes shell -l flag" " -l" "$log"
+_assert_contains "default-command set to shell login cmd" "set-option -t ds default-command" "$log"
 _assert_eq "selected shell helper resolves zsh" "zsh" "$(_shell_name)"
 unset DS_SHELL_NAME
 
