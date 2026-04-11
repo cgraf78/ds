@@ -475,7 +475,9 @@ if [[ $- == *i* && -f "$_ds_f" ]]; then
     read -r _ds_args < "$_ds_f"
     rm -f "$_ds_f"
     # shellcheck disable=SC2086
-    [[ -n "$_ds_args" ]] && exec ds $_ds_args
+INIT_EOF
+    echo "    [[ -n \"\$_ds_args\" ]] && DS_SHELL_NAME=$shell exec ds \$_ds_args"
+    cat <<'INIT_EOF'
 fi
 unset _ds_f _ds_args
 
@@ -484,7 +486,9 @@ unset _ds_f _ds_args
 # DS_SSH_AUTO_ATTACH=dev     → attach to "dev" session
 # NO_TMUX=1                  → skip auto-attach for this login
 if [[ -n "${DS_SSH_AUTO_ATTACH:-}" && -z "$TMUX" && $- == *i* && -n "$SSH_CONNECTION" && -z "$NO_TMUX" ]] && command -v tmux &>/dev/null; then
-    exec ds "$DS_SSH_AUTO_ATTACH"
+INIT_EOF
+    echo "    DS_SHELL_NAME=$shell exec ds \"\$DS_SSH_AUTO_ATTACH\""
+    cat <<'INIT_EOF'
 fi
 
 _ds() {
@@ -549,7 +553,9 @@ _ds_f="$HOME/.local/state/ds/attach-next"
 if [[ -o interactive && -f "$_ds_f" ]]; then
     read -r _ds_args < "$_ds_f"
     rm -f "$_ds_f"
-    [[ -n "$_ds_args" ]] && exec ds ${(z)_ds_args}
+INIT_EOF
+    echo "    [[ -n \"\$_ds_args\" ]] && DS_SHELL_NAME=$shell exec ds \${(z)_ds_args}"
+    cat <<'INIT_EOF'
 fi
 unset _ds_f _ds_args
 
@@ -558,7 +564,9 @@ unset _ds_f _ds_args
 # DS_SSH_AUTO_ATTACH=dev     → attach to "dev" session
 # NO_TMUX=1                  → skip auto-attach for this login
 if [[ -n "${DS_SSH_AUTO_ATTACH:-}" && -z "$TMUX" && -o interactive && -n "$SSH_CONNECTION" && -z "$NO_TMUX" ]] && command -v tmux >/dev/null 2>&1; then
-    exec ds "$DS_SSH_AUTO_ATTACH"
+INIT_EOF
+    echo "    DS_SHELL_NAME=$shell exec ds \"\$DS_SSH_AUTO_ATTACH\""
+    cat <<'INIT_EOF'
 fi
 
 _ds() {
