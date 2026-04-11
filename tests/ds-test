@@ -23,14 +23,14 @@ export CONF_DIR="$TEST_HOME/.config/ds"
 mkdir -p "$CONF_DIR"
 
 # Create a minimal profile for testing
-cat > "$CONF_DIR/profile-dev.sh" <<'PROFILE'
+cat >"$CONF_DIR/profile-dev.sh" <<'PROFILE'
 _profile_dev() {
     local session="$1"
     : # no-op for testing
 }
 PROFILE
 
-cat > "$CONF_DIR/profile-web.sh" <<'PROFILE'
+cat >"$CONF_DIR/profile-web.sh" <<'PROFILE'
 _profile_web() {
     local session="$1"
     : # no-op for testing
@@ -40,7 +40,7 @@ PROFILE
 export DS_SOURCED=1
 export DS_UPTERM_PRIVATE_KEY="$TEST_HOME/.ssh/test_upterm_key"
 mkdir -p "$TEST_HOME/.ssh"
-printf 'dummy' > "$DS_UPTERM_PRIVATE_KEY"
+printf 'dummy' >"$DS_UPTERM_PRIVATE_KEY"
 # shellcheck source=../bin/ds
 . "$SCRIPT_DIR/../bin/ds"
 # Install and load the upterm share backend for sharing tests
@@ -52,7 +52,7 @@ cp "$SCRIPT_DIR/../lib/plugins/share-upterm.sh" "$CONF_DIR/"
 MOCK_BIN=$(_tmpdir)
 TMUX_LOG="$MOCK_BIN/tmux.log"
 
-cat > "$MOCK_BIN/tmux" <<'MOCK'
+cat >"$MOCK_BIN/tmux" <<'MOCK'
 #!/usr/bin/env bash
 # Mock tmux that logs calls and simulates responses
 echo "tmux $*" >> "${TMUX_LOG:-/dev/null}"
@@ -105,7 +105,7 @@ esac
 MOCK
 chmod +x "$MOCK_BIN/tmux"
 
-cat > "$MOCK_BIN/upterm" <<'MOCK'
+cat >"$MOCK_BIN/upterm" <<'MOCK'
 #!/usr/bin/env bash
 echo "upterm $*" >> "${TMUX_LOG:-/dev/null}"
 if [[ "$1" == "host" ]]; then
@@ -141,7 +141,7 @@ exit 0
 MOCK
 chmod +x "$MOCK_BIN/upterm"
 
-cat > "$MOCK_BIN/zsh" <<'MOCK'
+cat >"$MOCK_BIN/zsh" <<'MOCK'
 #!/usr/bin/env bash
 exit 0
 MOCK
@@ -151,11 +151,11 @@ export PATH="$MOCK_BIN:$PATH"
 export TMUX_LOG
 
 _reset_tmux_log() {
-    : > "$TMUX_LOG"
+  : >"$TMUX_LOG"
 }
 
 _tmux_log() {
-    cat "$TMUX_LOG" 2>/dev/null || true
+  cat "$TMUX_LOG" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -164,7 +164,7 @@ _tmux_log() {
 
 echo "=== Host config lookup ==="
 
-cat > "$CONF_DIR/connect.conf" <<'EOF'
+cat >"$CONF_DIR/connect.conf" <<'EOF'
 # hostname    connect
 desktop        -
 fileserver           autossh
@@ -172,7 +172,7 @@ EOF
 
 # Reset globals before each lookup test
 _reset_lookup() {
-    CONNECT="ssh"
+  CONNECT="ssh"
 }
 
 _reset_lookup
@@ -186,14 +186,14 @@ _assert_eq "fileserver: connect method" "autossh" "$CONNECT"
 # Unknown host returns failure, doesn't change globals
 _reset_lookup
 if lookup_host "unknown-host"; then
-    _fail "unknown host should return 1"
+  _fail "unknown host should return 1"
 else
-    _pass "unknown host returns 1"
+  _pass "unknown host returns 1"
 fi
 _assert_eq "unknown host: connect unchanged" "ssh" "$CONNECT"
 
 # Glob pattern matching in connect config
-cat > "$CONF_DIR/connect-work.conf" <<'EOF'
+cat >"$CONF_DIR/connect-work.conf" <<'EOF'
 dev*          et
 mydevbox      autossh
 EOF
@@ -219,13 +219,13 @@ rm -f "$CONF_DIR/connect-work.conf"
 rm -f "$CONF_DIR/connect.conf"
 _reset_lookup
 if lookup_host "anyhost"; then
-    _fail "no connect.conf files should return 1"
+  _fail "no connect.conf files should return 1"
 else
-    _pass "no connect.conf files returns 1"
+  _pass "no connect.conf files returns 1"
 fi
 
 # Restore connect.conf for remaining tests
-cat > "$CONF_DIR/connect.conf" <<'EOF'
+cat >"$CONF_DIR/connect.conf" <<'EOF'
 # hostname    connect
 desktop        -
 fileserver           autossh
@@ -320,12 +320,18 @@ _resolve_session_target
 _assert_eq "explicit SESSION preserved" "dev" "$SESSION"
 
 # Remote without session → error
-result=$( (SESSION="" HOST="myhost"; _resolve_session_target) 2>&1 || true)
+result=$( (
+  SESSION="" HOST="myhost"
+  _resolve_session_target
+) 2>&1 || true)
 _assert_contains "remote without session errors" "session name required for remote" "$result"
 
 # No session, no host, no tmux → error
 # shellcheck disable=SC2030  # intentional — TMUX set in subshell for isolation
-result=$( (SESSION="" HOST="" TMUX=""; _resolve_session_target) 2>&1 || true)
+result=$( (
+  SESSION="" HOST="" TMUX=""
+  _resolve_session_target
+) 2>&1 || true)
 _assert_contains "no session, no tmux errors" "not inside tmux" "$result"
 
 # Inside tmux, no session → defaults to current session
@@ -361,9 +367,9 @@ result=$(_do_session 2>&1)
 log=$(_tmux_log)
 _assert_contains "no-attach: creates tmux session" "tmux new-session -d -s ds" "$log"
 if echo "$log" | grep -qx 'tmux attach -t =ds'; then
-    _fail "no-attach: skips local attach"
+  _fail "no-attach: skips local attach"
 else
-    _pass "no-attach: skips local attach"
+  _pass "no-attach: skips local attach"
 fi
 
 # Test --share action with existing session
@@ -371,7 +377,7 @@ _reset_tmux_log
 export MOCK_SESSIONS="ds"
 DS_SHARE_VIA="upterm"
 DS_UPTERM_GITHUB_USER="testuser"
-DS_UPTERM_SHARE_TTL="0"  # disable TTL for this test to avoid background watchers
+DS_UPTERM_SHARE_TTL="0" # disable TTL for this test to avoid background watchers
 SESSION="ds"
 HOST=""
 # _do_share calls _share_start, which runs the full share flow with mock upterm
@@ -389,9 +395,9 @@ _assert_contains "share action: error for nonexistent session" "no session" "$re
 # Clean up state from share test (kill mock upterm, remove PID/state files)
 _pid_f=$(_upterm_pid_file)
 if [[ -f "$_pid_f" ]]; then
-    _pid=$(cat "$_pid_f" 2>/dev/null || true)
-    if [[ "$_pid" =~ ^[0-9]+$ ]]; then kill "$_pid" 2>/dev/null || true; fi
-    rm -f "$_pid_f"
+  _pid=$(cat "$_pid_f" 2>/dev/null || true)
+  if [[ "$_pid" =~ ^[0-9]+$ ]]; then kill "$_pid" 2>/dev/null || true; fi
+  rm -f "$_pid_f"
 fi
 rm -f "$DS_SHARE_INFO_FILE" "$(_upterm_admin_file)" "$(_upterm_session_file)" "$(_upterm_log_file)"
 
@@ -407,7 +413,7 @@ _assert_contains "normalize upterm: command format" "ssh: ssh token123@uptermd.u
 
 # Test reading share info directly from upterm log fallback
 log_file="$(_tmpdir)/upterm.log"
-printf '%s\n' 'Some startup text' 'Command: ssh abc123@uptermd.upterm.dev' > "$log_file"
+printf '%s\n' 'Some startup text' 'Command: ssh abc123@uptermd.upterm.dev' >"$log_file"
 result=$(_upterm_read_info_from_log "$log_file")
 _assert_contains "log fallback: extracts ssh command" "ssh: ssh abc123@uptermd.upterm.dev" "$result"
 
@@ -415,36 +421,36 @@ _assert_contains "log fallback: extracts ssh command" "ssh: ssh abc123@uptermd.u
 pid_dir=$(_tmpdir)
 DS_UPTERM_PID_FILE="$pid_dir/test.pid"
 
-echo "not-a-pid" > "$DS_UPTERM_PID_FILE"
+echo "not-a-pid" >"$DS_UPTERM_PID_FILE"
 if _share_running; then
-    _fail "share_running: rejects non-numeric PID"
+  _fail "share_running: rejects non-numeric PID"
 else
-    _pass "share_running: rejects non-numeric PID"
+  _pass "share_running: rejects non-numeric PID"
 fi
 
-echo "12345; rm -rf /" > "$DS_UPTERM_PID_FILE"
+echo "12345; rm -rf /" >"$DS_UPTERM_PID_FILE"
 if _share_running; then
-    _fail "share_running: rejects PID with injection"
+  _fail "share_running: rejects PID with injection"
 else
-    _pass "share_running: rejects PID with injection"
+  _pass "share_running: rejects PID with injection"
 fi
 
-echo "" > "$DS_UPTERM_PID_FILE"
+echo "" >"$DS_UPTERM_PID_FILE"
 if _share_running; then
-    _fail "share_running: rejects empty PID"
+  _fail "share_running: rejects empty PID"
 else
-    _pass "share_running: rejects empty PID"
+  _pass "share_running: rejects empty PID"
 fi
 
 rm -f "$DS_UPTERM_PID_FILE"
 if _share_running; then
-    _fail "share_running: rejects missing PID file"
+  _fail "share_running: rejects missing PID file"
 else
-    _pass "share_running: rejects missing PID file"
+  _pass "share_running: rejects missing PID file"
 fi
 
 # Test _share_load_config reads share-upterm.conf
-cat > "$CONF_DIR/share-upterm.conf" <<'EOF'
+cat >"$CONF_DIR/share-upterm.conf" <<'EOF'
 # test config
 server=myupterm.internal:2222
 known-hosts=/path/to/known_hosts
@@ -485,7 +491,7 @@ _assert_eq "env override: authorized-keys" "/env/authorized_keys" "$DS_UPTERM_AU
 _assert_eq "env override: push" "envuser@envhost" "$DS_UPTERM_PUSH"
 
 # share-ttl config key loaded
-cat > "$CONF_DIR/share-upterm.conf" <<'EOF'
+cat >"$CONF_DIR/share-upterm.conf" <<'EOF'
 server=myupterm.internal:2222
 share-ttl=1800
 EOF
@@ -519,7 +525,7 @@ echo "=== Share TTL watcher ==="
 # Add a mock setsid that just runs its args directly (no new process group
 # needed in tests — we just need to verify the watcher pid file is created
 # and the watcher can be cancelled).
-cat > "$MOCK_BIN/setsid" <<'MOCK'
+cat >"$MOCK_BIN/setsid" <<'MOCK'
 #!/usr/bin/env bash
 # Run in background so sleep doesn't block the test process.
 "$@" &
@@ -528,7 +534,7 @@ chmod +x "$MOCK_BIN/setsid"
 
 # Add a mock ds that records --unshare calls
 DS_UNSHARE_LOG="$MOCK_BIN/ds-unshare.log"
-cat > "$MOCK_BIN/ds" <<MOCK
+cat >"$MOCK_BIN/ds" <<MOCK
 #!/usr/bin/env bash
 echo "ds \$*" >> "${DS_UNSHARE_LOG}"
 MOCK
@@ -538,24 +544,24 @@ chmod +x "$MOCK_BIN/ds"
 _reset_tmux_log
 DS_UPTERM_PID_FILE="$(_upterm_pid_file)"
 DS_UPTERM_SHARE_TTL=""
-: > "$DS_UNSHARE_LOG"
+: >"$DS_UNSHARE_LOG"
 _upterm_start_ttl_watcher 60 "ds"
 ttl_pid_file=$(_upterm_ttl_pid_file)
 _assert_file_exists "watcher: ttl pid file created" "$ttl_pid_file"
 watcher_pid=$(cat "$ttl_pid_file" 2>/dev/null || true)
 if [[ "$watcher_pid" =~ ^[0-9]+$ ]]; then
-    _pass "watcher: pid file contains numeric PID"
+  _pass "watcher: pid file contains numeric PID"
 else
-    _fail "watcher: pid file contains non-numeric value: '$watcher_pid'"
+  _fail "watcher: pid file contains non-numeric value: '$watcher_pid'"
 fi
 # Clean up — kill the watcher (it's sleeping for 60s)
 _upterm_cancel_ttl_watcher
 _assert_file_missing "watcher: cancel removes pid file" "$ttl_pid_file"
 # Watcher process should be gone
 if [[ "$watcher_pid" =~ ^[0-9]+$ ]] && kill -0 "$watcher_pid" 2>/dev/null; then
-    _fail "watcher: cancel killed process"
+  _fail "watcher: cancel killed process"
 else
-    _pass "watcher: cancel killed process"
+  _pass "watcher: cancel killed process"
 fi
 
 # --- _upterm_cancel_ttl_watcher is idempotent (no pid file) ---
@@ -569,14 +575,14 @@ first_pid=$(cat "$(_upterm_ttl_pid_file)" 2>/dev/null || true)
 _upterm_start_ttl_watcher 60 "ds"
 second_pid=$(cat "$(_upterm_ttl_pid_file)" 2>/dev/null || true)
 if [[ "$first_pid" != "$second_pid" ]]; then
-    _pass "watcher: re-start spawns new watcher"
+  _pass "watcher: re-start spawns new watcher"
 else
-    _fail "watcher: re-start should spawn a new watcher PID"
+  _fail "watcher: re-start should spawn a new watcher PID"
 fi
 if [[ "$first_pid" =~ ^[0-9]+$ ]] && kill -0 "$first_pid" 2>/dev/null; then
-    _fail "watcher: re-start killed previous watcher"
+  _fail "watcher: re-start killed previous watcher"
 else
-    _pass "watcher: re-start killed previous watcher"
+  _pass "watcher: re-start killed previous watcher"
 fi
 _upterm_cancel_ttl_watcher
 
@@ -593,9 +599,9 @@ _assert_not_contains "ttl=0: no auto-expire message" "auto-expire" "$result"
 # Clean up share state
 _pid_f=$(_upterm_pid_file)
 if [[ -f "$_pid_f" ]]; then
-    _pid=$(cat "$_pid_f" 2>/dev/null || true)
-    if [[ "$_pid" =~ ^[0-9]+$ ]]; then kill "$_pid" 2>/dev/null || true; fi
-    rm -f "$_pid_f"
+  _pid=$(cat "$_pid_f" 2>/dev/null || true)
+  if [[ "$_pid" =~ ^[0-9]+$ ]]; then kill "$_pid" 2>/dev/null || true; fi
+  rm -f "$_pid_f"
 fi
 rm -f "$DS_SHARE_INFO_FILE" "$(_upterm_admin_file)" "$(_upterm_session_file)" "$(_upterm_log_file)"
 
@@ -615,7 +621,7 @@ DS_UPTERM_GITHUB_USER="testuser"
 DS_SHARE_INFO_FILE="$(_default_share_info_file)"
 DS_UPTERM_PID_FILE="$(_upterm_pid_file)"
 SESSION="ds" HOST=""
-_do_share > "$_share_out" 2>&1 || true
+_do_share >"$_share_out" 2>&1 || true
 result=$(cat "$_share_out")
 _assert_file_exists "ttl>0: ttl pid file created on share" "$(_upterm_ttl_pid_file)"
 _assert_contains "ttl>0: auto-expire message shown" "auto-expire" "$result"
@@ -626,14 +632,14 @@ SESSION="ds" HOST=""
 _do_unshare 2>&1 || true
 _assert_file_missing "unshare: ttl pid file removed" "$(_upterm_ttl_pid_file)"
 if [[ "$share_watcher_pid" =~ ^[0-9]+$ ]] && kill -0 "$share_watcher_pid" 2>/dev/null; then
-    _fail "unshare: watcher process killed"
+  _fail "unshare: watcher process killed"
 else
-    _pass "unshare: watcher process killed"
+  _pass "unshare: watcher process killed"
 fi
 
 # --- TTL fires and calls ds --unshare ---
 DS_UPTERM_SHARE_TTL=""
-: > "$DS_UNSHARE_LOG"
+: >"$DS_UNSHARE_LOG"
 _upterm_start_ttl_watcher 1 "myses"
 sleep 2
 unshare_calls=$(cat "$DS_UNSHARE_LOG" 2>/dev/null || true)
@@ -944,8 +950,8 @@ echo "=== Profile function invocation ==="
 
 # Define a test profile that makes a distinctive tmux call
 _profile_testprofile() {
-    local session="$1"
-    tmux rename-window -t "$session:1" "TEST_MARKER_${DS_TEST_VAR:-default}"
+  local session="$1"
+  tmux rename-window -t "$session:1" "TEST_MARKER_${DS_TEST_VAR:-default}"
 }
 
 _reset_tmux_log
@@ -997,7 +1003,7 @@ _assert_contains "inside tmux: switch-client" "switch-client -t =test-session" "
 unset TMUX
 
 # Restore connect.conf
-cat > "$CONF_DIR/connect.conf" <<'EOF'
+cat >"$CONF_DIR/connect.conf" <<'EOF'
 # hostname    connect
 desktop        -
 fileserver           autossh
@@ -1013,11 +1019,11 @@ echo "=== Remote command building ==="
 
 # Install connection plugins for testing
 # shellcheck disable=SC2016  # intentional — writing literal $1/$2 to file
-cp "$SCRIPT_DIR/../lib/plugins/connect-autossh.sh" "$CONF_DIR/" 2>/dev/null || \
-    printf '_connect_autossh() { exec autossh -M0 "$1" -t "$2"; }\n' > "$CONF_DIR/connect-autossh.sh"
+cp "$SCRIPT_DIR/../lib/plugins/connect-autossh.sh" "$CONF_DIR/" 2>/dev/null ||
+  printf '_connect_autossh() { exec autossh -M0 "$1" -t "$2"; }\n' >"$CONF_DIR/connect-autossh.sh"
 
 # Mock ssh/autossh to capture args instead of connecting
-cat > "$MOCK_BIN/ssh" <<'MOCK'
+cat >"$MOCK_BIN/ssh" <<'MOCK'
 #!/usr/bin/env bash
 # ssh is called as: ssh -t -- HOST CMD
 # Skip flags/-- to find the host positional arg
@@ -1032,7 +1038,7 @@ echo "SSH_ARGS=$*" >> "${REMOTE_LOG:-/dev/null}"
 MOCK
 chmod +x "$MOCK_BIN/ssh"
 
-cat > "$MOCK_BIN/autossh" <<'MOCK'
+cat >"$MOCK_BIN/autossh" <<'MOCK'
 #!/usr/bin/env bash
 echo "AUTOSSH_ARGS=$*" > "${REMOTE_LOG:-/dev/null}"
 MOCK
@@ -1045,27 +1051,31 @@ export REMOTE_LOG
 # Run each test in a fresh bash process that sources ds.
 # Uses timeout (Linux) or gtimeout (macOS/Homebrew) with bash fallback.
 _timeout() {
-    if command -v timeout >/dev/null 2>&1; then
-        timeout "$@"
-    elif command -v gtimeout >/dev/null 2>&1; then
-        gtimeout "$@"
-    else
-        # bash-native fallback: run in background, kill after $1 seconds
-        local secs="$1"; shift
-        "$@" &
-        local pid=$!
-        ( sleep "$secs"; kill "$pid" 2>/dev/null ) &
-        local watchdog=$!
-        wait "$pid" 2>/dev/null
-        kill "$watchdog" 2>/dev/null
-        wait "$watchdog" 2>/dev/null
-    fi
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$@"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$@"
+  else
+    # bash-native fallback: run in background, kill after $1 seconds
+    local secs="$1"
+    shift
+    "$@" &
+    local pid=$!
+    (
+      sleep "$secs"
+      kill "$pid" 2>/dev/null
+    ) &
+    local watchdog=$!
+    wait "$pid" 2>/dev/null
+    kill "$watchdog" 2>/dev/null
+    wait "$watchdog" 2>/dev/null
+  fi
 }
 
 _run_remote() {
-    : > "$REMOTE_LOG"
-    local env_args="$1"
-    _timeout 3 bash -c "
+  : >"$REMOTE_LOG"
+  local env_args="$1"
+  _timeout 3 bash -c "
         export DS_SOURCED=1
         . '$SCRIPT_DIR/../bin/ds'
         $env_args _remote
@@ -1146,7 +1156,7 @@ _assert_contains "remote share backend: passes --no-attach" "--no-attach" "$remo
 echo ""
 echo "=== Edge cases ==="
 
-cat > "$CONF_DIR/connect.conf" <<'EOF'
+cat >"$CONF_DIR/connect.conf" <<'EOF'
 # This is a comment
 
   # Indented comment
@@ -1164,7 +1174,7 @@ lookup_host "host2"
 _assert_eq "host2 found (blank lines ignored)" "et" "$CONNECT"
 
 # Restore connect.conf
-cat > "$CONF_DIR/connect.conf" <<'EOF'
+cat >"$CONF_DIR/connect.conf" <<'EOF'
 # hostname    connect
 desktop        -
 fileserver           autossh

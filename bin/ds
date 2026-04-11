@@ -23,10 +23,10 @@
 # Resolve bundled plugin directory (follows symlinks to find real install location)
 _ds_self="$0"
 if [[ -L "$_ds_self" ]]; then
-    # readlink -f isn't portable (macOS); resolve one level which is enough
-    _ds_self="$(cd "$(dirname "$_ds_self")" && readlink "$(basename "$_ds_self")")"
-    # Handle relative symlink targets
-    [[ "$_ds_self" != /* ]] && _ds_self="$(cd "$(dirname "$0")" && cd "$(dirname "$_ds_self")" && pwd)/$(basename "$_ds_self")"
+  # readlink -f isn't portable (macOS); resolve one level which is enough
+  _ds_self="$(cd "$(dirname "$_ds_self")" && readlink "$(basename "$_ds_self")")"
+  # Handle relative symlink targets
+  [[ "$_ds_self" != /* ]] && _ds_self="$(cd "$(dirname "$0")" && cd "$(dirname "$_ds_self")" && pwd)/$(basename "$_ds_self")"
 fi
 DS_LIB_DIR="$(cd "$(dirname "$_ds_self")/../lib/plugins" 2>/dev/null && pwd)"
 unset _ds_self
@@ -44,133 +44,133 @@ DS_SHARE_INFO_FILE="${DS_SHARE_INFO_FILE:-}"
 DS_STATE_DIR="${DS_STATE_DIR:-$HOME/.local/state/ds}"
 
 _usage() {
-    echo "Usage: ds [session] [@host]          create or attach to a session"
-    echo "       ds -l [@host]                 list active ds sessions"
-    echo "       ds -k [session] [@host]       kill a ds session (defaults to current)"
-    echo "       ds --killall [@host]          kill all ds sessions"
-    echo "       ds --share [session]          share a session (defaults to current)"
-    echo "       ds --unshare [session]        stop sharing (defaults to current)"
-    echo "       ds init <bash|zsh>            print shell integration snippet"
-    echo ""
-    echo "Options:"
-    echo "  -c, --connect METHOD   override connect method (ssh, autossh, et, ...)"
-    echo "  --share-via BACKEND    share backend to use (e.g. upterm)"
-    echo "  --no-attach            create session without attaching"
-    echo ""
-    echo "Sessions can be a profile name (dev), profile-instance (dev-work),"
-    echo "or any arbitrary name (myproject). Arbitrary names use the default"
-    echo "ds profile (plain tmux). Default session is 'ds'."
-    echo ""
-    echo "Examples:"
-    echo "  ds                     start or attach to default 'ds' session"
-    echo "  ds dev                 start or attach to 'dev' profile session"
-    echo "  ds dev-work            second 'dev' instance named 'dev-work'"
-    echo "  ds myproject           plain tmux session named 'myproject'"
-    echo "  ds @nas                default session on remote host 'nas'"
-    echo "  ds dev @nas            'dev' session on remote host"
-    echo "  ds dev @nas -c et      remote session via eternal terminal"
-    echo "  ds -l @nas             list sessions on remote host"
+  echo "Usage: ds [session] [@host]          create or attach to a session"
+  echo "       ds -l [@host]                 list active ds sessions"
+  echo "       ds -k [session] [@host]       kill a ds session (defaults to current)"
+  echo "       ds --killall [@host]          kill all ds sessions"
+  echo "       ds --share [session]          share a session (defaults to current)"
+  echo "       ds --unshare [session]        stop sharing (defaults to current)"
+  echo "       ds init <bash|zsh>            print shell integration snippet"
+  echo ""
+  echo "Options:"
+  echo "  -c, --connect METHOD   override connect method (ssh, autossh, et, ...)"
+  echo "  --share-via BACKEND    share backend to use (e.g. upterm)"
+  echo "  --no-attach            create session without attaching"
+  echo ""
+  echo "Sessions can be a profile name (dev), profile-instance (dev-work),"
+  echo "or any arbitrary name (myproject). Arbitrary names use the default"
+  echo "ds profile (plain tmux). Default session is 'ds'."
+  echo ""
+  echo "Examples:"
+  echo "  ds                     start or attach to default 'ds' session"
+  echo "  ds dev                 start or attach to 'dev' profile session"
+  echo "  ds dev-work            second 'dev' instance named 'dev-work'"
+  echo "  ds myproject           plain tmux session named 'myproject'"
+  echo "  ds @nas                default session on remote host 'nas'"
+  echo "  ds dev @nas            'dev' session on remote host"
+  echo "  ds dev @nas -c et      remote session via eternal terminal"
+  echo "  ds -l @nas             list sessions on remote host"
 }
 
 # --- Shell selection ---
 
 _shell_name() {
-    local shell="${DS_SHELL_NAME:-}"
-    local parent=""
+  local shell="${DS_SHELL_NAME:-}"
+  local parent=""
 
-    if [[ -z "$shell" ]] && command -v ps >/dev/null 2>&1; then
-        parent="$(ps -p "$PPID" -o comm= 2>/dev/null || true)"
-        parent="${parent##*/}"
-        parent="${parent#-}"
-        [[ -n "$parent" ]] && shell="$parent"
-    fi
+  if [[ -z "$shell" ]] && command -v ps >/dev/null 2>&1; then
+    parent="$(ps -p "$PPID" -o comm= 2>/dev/null || true)"
+    parent="${parent##*/}"
+    parent="${parent#-}"
+    [[ -n "$parent" ]] && shell="$parent"
+  fi
 
-    if [[ -z "$shell" && -n "${SHELL:-}" ]]; then
-        shell="${SHELL##*/}"
-    fi
+  if [[ -z "$shell" && -n "${SHELL:-}" ]]; then
+    shell="${SHELL##*/}"
+  fi
 
-    if [[ -n "$shell" ]]; then
-        printf '%s\n' "$shell"
-    else
-        printf 'bash\n'
-    fi
+  if [[ -n "$shell" ]]; then
+    printf '%s\n' "$shell"
+  else
+    printf 'bash\n'
+  fi
 }
 
 _shell_path() {
-    local shell
-    shell="$(_shell_name)"
+  local shell
+  shell="$(_shell_name)"
 
-    if command -v "$shell" >/dev/null 2>&1; then
-        command -v "$shell"
-        return
-    fi
+  if command -v "$shell" >/dev/null 2>&1; then
+    command -v "$shell"
+    return
+  fi
 
-    if [[ -n "${SHELL:-}" && -x "${SHELL:-}" ]]; then
-        printf '%s\n' "$SHELL"
-        return
-    fi
+  if [[ -n "${SHELL:-}" && -x "${SHELL:-}" ]]; then
+    printf '%s\n' "$SHELL"
+    return
+  fi
 
-    printf '/bin/bash\n'
+  printf '/bin/bash\n'
 }
 
 _shell_login_cmd() {
-    local shell_path
-    shell_path="$(_shell_path)"
-    printf 'exec %q -l' "$shell_path"
+  local shell_path
+  shell_path="$(_shell_path)"
+  printf 'exec %q -l' "$shell_path"
 }
 
 # --- Plugin discovery ---
 # Search for a plugin file by name, checking user config first, then bundled.
 _find_plugin() {
-    local name="$1"
-    if [[ -f "$CONF_DIR/$name" ]]; then
-        echo "$CONF_DIR/$name"
-    elif [[ -n "${DS_LIB_DIR:-}" && -f "$DS_LIB_DIR/$name" ]]; then
-        echo "$DS_LIB_DIR/$name"
-    else
-        return 1
-    fi
+  local name="$1"
+  if [[ -f "$CONF_DIR/$name" ]]; then
+    echo "$CONF_DIR/$name"
+  elif [[ -n "${DS_LIB_DIR:-}" && -f "$DS_LIB_DIR/$name" ]]; then
+    echo "$DS_LIB_DIR/$name"
+  else
+    return 1
+  fi
 }
 
 # Glob for plugin files matching a pattern, searching both dirs (user overrides bundled).
 _glob_plugins() {
-    local pattern="$1"
-    local -A seen
-    local f base
-    for f in "$CONF_DIR"/$pattern; do
-        [[ -f "$f" ]] || continue
-        base="${f##*/}"
-        seen["$base"]="$f"
+  local pattern="$1"
+  local -A seen
+  local f base
+  for f in "$CONF_DIR"/$pattern; do
+    [[ -f "$f" ]] || continue
+    base="${f##*/}"
+    seen["$base"]="$f"
+  done
+  if [[ -n "${DS_LIB_DIR:-}" ]]; then
+    for f in "$DS_LIB_DIR"/$pattern; do
+      [[ -f "$f" ]] || continue
+      base="${f##*/}"
+      [[ -n "${seen[$base]:-}" ]] && continue
+      seen["$base"]="$f"
     done
-    if [[ -n "${DS_LIB_DIR:-}" ]]; then
-        for f in "$DS_LIB_DIR"/$pattern; do
-            [[ -f "$f" ]] || continue
-            base="${f##*/}"
-            [[ -n "${seen[$base]:-}" ]] && continue
-            seen["$base"]="$f"
-        done
-    fi
-    for f in "${seen[@]+"${seen[@]}"}"; do
-        echo "$f"
-    done
+  fi
+  for f in "${seen[@]+"${seen[@]}"}"; do
+    echo "$f"
+  done
 }
 
 # --- Profile layouts ---
 
 _profile_ds() {
-    : # default tmux window is already what we want
+  : # default tmux window is already what we want
 }
 
 while IFS= read -r _profile_file; do
-    [[ -n "$_profile_file" ]] || continue
-    # shellcheck source=/dev/null
-    . "$_profile_file"
+  [[ -n "$_profile_file" ]] || continue
+  # shellcheck source=/dev/null
+  . "$_profile_file"
 done < <(_glob_plugins 'profile-*.sh')
 unset _profile_file
 
 # List valid profile names (derived from discovered _profile_* functions).
 _profiles() {
-    declare -F | sed -n 's/.*_profile_//p' | sort
+  declare -F | sed -n 's/.*_profile_//p' | sort
 }
 
 # --- Host config ---
@@ -180,40 +180,40 @@ _profiles() {
 # Returns 1 if no match was found (script defaults apply).
 # Hostnames support glob patterns (e.g., server* matches server1, server2).
 lookup_host() {
-    local target="$1"
-    local -a conf_files=()
-    local f
-    for f in "$CONF_DIR"/connect*.conf; do
-        [[ -f "$f" ]] && conf_files+=("$f")
+  local target="$1"
+  local -a conf_files=()
+  local f
+  for f in "$CONF_DIR"/connect*.conf; do
+    [[ -f "$f" ]] && conf_files+=("$f")
+  done
+  if [[ -n "${DS_LIB_DIR:-}" ]]; then
+    for f in "$DS_LIB_DIR"/connect*.conf; do
+      [[ -f "$f" ]] && conf_files+=("$f")
     done
-    if [[ -n "${DS_LIB_DIR:-}" ]]; then
-        for f in "$DS_LIB_DIR"/connect*.conf; do
-            [[ -f "$f" ]] && conf_files+=("$f")
-        done
-    fi
-    [[ ${#conf_files[@]} -gt 0 ]] || return 1
-    for f in "${conf_files[@]}"; do
-        while read -r name connect; do
-            [[ -z "$name" || "$name" == \#* ]] && continue
-            # shellcheck disable=SC2053  # intentional glob matching
-            if [[ "$target" == $name ]]; then
-                CONNECT="$connect"
-                return 0
-            fi
-        done < "$f"
-    done
-    return 1
+  fi
+  [[ ${#conf_files[@]} -gt 0 ]] || return 1
+  for f in "${conf_files[@]}"; do
+    while read -r name connect; do
+      [[ -z "$name" || "$name" == \#* ]] && continue
+      # shellcheck disable=SC2053  # intentional glob matching
+      if [[ "$target" == $name ]]; then
+        CONNECT="$connect"
+        return 0
+      fi
+    done <"$f"
+  done
+  return 1
 }
 
 # --- State helpers ---
 
 _ensure_state_dir() {
-    mkdir -p "$DS_STATE_DIR"
-    chmod 700 "$DS_STATE_DIR" 2>/dev/null || true
+  mkdir -p "$DS_STATE_DIR"
+  chmod 700 "$DS_STATE_DIR" 2>/dev/null || true
 }
 
 _state_file_prefix() {
-    printf '%s/%s' "$DS_STATE_DIR" "ds"
+  printf '%s/%s' "$DS_STATE_DIR" "ds"
 }
 
 # --- Share interface ---
@@ -226,46 +226,46 @@ _state_file_prefix() {
 #   _share_load_config         load backend-specific config
 
 _write_share_info() {
-    local content="$1"
-    [[ -n "${DS_SHARE_INFO_FILE:-}" ]] || return 0
-    _ensure_state_dir
-    local old_umask
-    old_umask=$(umask)
-    umask 077
-    printf '%s\n' "$content" > "$DS_SHARE_INFO_FILE"
-    umask "$old_umask"
-    chmod 600 "$DS_SHARE_INFO_FILE" 2>/dev/null || true
+  local content="$1"
+  [[ -n "${DS_SHARE_INFO_FILE:-}" ]] || return 0
+  _ensure_state_dir
+  local old_umask
+  old_umask=$(umask)
+  umask 077
+  printf '%s\n' "$content" >"$DS_SHARE_INFO_FILE"
+  umask "$old_umask"
+  chmod 600 "$DS_SHARE_INFO_FILE" 2>/dev/null || true
 }
 
 _show_share_info() {
-    [[ -n "${DS_SHARE_INFO_FILE:-}" && -f "$DS_SHARE_INFO_FILE" ]] || return 0
-    cat "$DS_SHARE_INFO_FILE"
+  [[ -n "${DS_SHARE_INFO_FILE:-}" && -f "$DS_SHARE_INFO_FILE" ]] || return 0
+  cat "$DS_SHARE_INFO_FILE"
 }
 
 _default_share_info_file() {
-    echo "$(_state_file_prefix).share"
+  echo "$(_state_file_prefix).share"
 }
 
 # Load a share backend plugin. Sets up _share_* functions.
 _load_share_backend() {
-    local backend="$1"
-    local plugin
-    plugin=$(_find_plugin "share-${backend}.sh") || {
-        echo "ds: unknown share backend '$backend' (no plugin found)" >&2
-        exit 1
-    }
-    # shellcheck source=/dev/null
-    . "$plugin"
+  local backend="$1"
+  local plugin
+  plugin=$(_find_plugin "share-${backend}.sh") || {
+    echo "ds: unknown share backend '$backend' (no plugin found)" >&2
+    exit 1
+  }
+  # shellcheck source=/dev/null
+  . "$plugin"
 }
 
 # Stubs for when no share backend is loaded.
-_share_running()         { return 1; }
+_share_running() { return 1; }
 _share_current_session() { :; }
-_share_load_config()     { :; }
+_share_load_config() { :; }
 _share_reset_stubs() {
-    _share_running()         { return 1; }
-    _share_current_session() { :; }
-    _share_load_config()     { :; }
+  _share_running() { return 1; }
+  _share_current_session() { :; }
+  _share_load_config() { :; }
 }
 
 # --- Tmux helpers ---
@@ -274,196 +274,202 @@ _share_reset_stubs() {
 # No exec — returns after tmux detaches so the calling shell can exit cleanly.
 # Uses = prefix for exact session name matching.
 _attach() {
-    local session="$1"
-    if [[ -n "${TMUX:-}" ]]; then
-        tmux switch-client -t "=$session"
-    else
-        tmux attach -t "=$session"
-    fi
+  local session="$1"
+  if [[ -n "${TMUX:-}" ]]; then
+    tmux switch-client -t "=$session"
+  else
+    tmux attach -t "=$session"
+  fi
 }
 
 # --- Session resolution helpers ---
 
 # Resolve the current tmux session name, or error if not inside tmux.
 _current_session() {
-    if [[ -n "${TMUX:-}" ]]; then
-        tmux display-message -p '#{session_name}'
-    else
-        echo "ds: session name required (not inside tmux)" >&2
-        exit 1
-    fi
+  if [[ -n "${TMUX:-}" ]]; then
+    tmux display-message -p '#{session_name}'
+  else
+    echo "ds: session name required (not inside tmux)" >&2
+    exit 1
+  fi
 }
 
 # Resolve SESSION for actions that operate on existing sessions (kill, share,
 # unshare).  Defaults to current tmux session if no session specified.
 # Errors if remote (@host) without an explicit session name.
 _resolve_session_target() {
-    if [[ -n "$SESSION" ]]; then
-        return
-    fi
-    if [[ -n "$HOST" ]]; then
-        echo "ds: session name required for remote operations" >&2
-        exit 1
-    fi
-    SESSION=$(_current_session) || exit 1
+  if [[ -n "$SESSION" ]]; then
+    return
+  fi
+  if [[ -n "$HOST" ]]; then
+    echo "ds: session name required for remote operations" >&2
+    exit 1
+  fi
+  SESSION=$(_current_session) || exit 1
 }
 
 # Resolve PROFILE from SESSION for session creation.
 # SESSION is a profile name (dev), a profile-instance (dev-work), or empty
 # (defaults to the "ds" session with ds profile).
 _resolve_profile() {
-    if [[ -z "$SESSION" ]]; then
-        SESSION="ds"
-        PROFILE="ds"
-        return
-    fi
-    # Check if SESSION itself is a profile name
-    if declare -f "_profile_$SESSION" &>/dev/null; then
-        PROFILE="$SESSION"
-        return
-    fi
-    # Split on first dash — left side may be a profile
-    local prefix="${SESSION%%-*}"
-    if [[ "$prefix" != "$SESSION" ]] && declare -f "_profile_$prefix" &>/dev/null; then
-        PROFILE="$prefix"
-        return
-    fi
-    # Arbitrary name — use default "ds" profile
+  if [[ -z "$SESSION" ]]; then
+    SESSION="ds"
     PROFILE="ds"
+    return
+  fi
+  # Check if SESSION itself is a profile name
+  if declare -f "_profile_$SESSION" &>/dev/null; then
+    PROFILE="$SESSION"
+    return
+  fi
+  # Split on first dash — left side may be a profile
+  local prefix="${SESSION%%-*}"
+  if [[ "$prefix" != "$SESSION" ]] && declare -f "_profile_$prefix" &>/dev/null; then
+    PROFILE="$prefix"
+    return
+  fi
+  # Arbitrary name — use default "ds" profile
+  PROFILE="ds"
 }
 
 # --- Actions ---
 
 _do_list() {
-    local shared_session=""
-    if _share_running; then
-        shared_session=$(_share_current_session)
+  local shared_session=""
+  if _share_running; then
+    shared_session=$(_share_current_session)
+  fi
+  local all_sessions
+  all_sessions=$(tmux ls -F '#{session_name}' 2>/dev/null) || true
+  [[ -z "$all_sessions" ]] && {
+    echo "(no active ds sessions)"
+    return
+  }
+  local output=""
+  while IFS= read -r name; do
+    if tmux show-environment -t "=$name" DS_MANAGED 2>/dev/null | grep -q '^DS_MANAGED='; then
+      local info
+      info=$(tmux ls -F '#{session_name}	#{session_windows} windows (#{?session_attached,attached,detached})' |
+        awk -F'\t' -v s="$name" '$1==s{print $2}')
+      local line="$name: $info"
+      if [[ "$name" == "$shared_session" ]]; then
+        line="$line [shared]"
+      fi
+      output+="$line"$'\n'
     fi
-    local all_sessions
-    all_sessions=$(tmux ls -F '#{session_name}' 2>/dev/null) || true
-    [[ -z "$all_sessions" ]] && { echo "(no active ds sessions)"; return; }
-    local output=""
-    while IFS= read -r name; do
-        if tmux show-environment -t "=$name" DS_MANAGED 2>/dev/null | grep -q '^DS_MANAGED='; then
-            local info
-            info=$(tmux ls -F '#{session_name}	#{session_windows} windows (#{?session_attached,attached,detached})' \
-                | awk -F'\t' -v s="$name" '$1==s{print $2}')
-            local line="$name: $info"
-            if [[ "$name" == "$shared_session" ]]; then
-                line="$line [shared]"
-            fi
-            output+="$line"$'\n'
-        fi
-    done <<< "$all_sessions"
-    if [[ -z "$output" ]]; then
-        echo "(no active ds sessions)"
-    else
-        printf '%s' "$output"
-    fi
+  done <<<"$all_sessions"
+  if [[ -z "$output" ]]; then
+    echo "(no active ds sessions)"
+  else
+    printf '%s' "$output"
+  fi
 }
 
 _do_kill() {
-    local shared_session
-    if tmux has-session -t "=$SESSION" 2>/dev/null; then
-        shared_session=$(_share_current_session)
-        if [[ "$shared_session" == "$SESSION" ]]; then
-            _share_stop "$SESSION" || true
-        fi
-        tmux kill-session -t "=$SESSION"
-        echo "killed $SESSION"
-    else
-        echo "ds: no session '$SESSION' — active sessions:" >&2
-        _do_list >&2
-        exit 1
+  local shared_session
+  if tmux has-session -t "=$SESSION" 2>/dev/null; then
+    shared_session=$(_share_current_session)
+    if [[ "$shared_session" == "$SESSION" ]]; then
+      _share_stop "$SESSION" || true
     fi
+    tmux kill-session -t "=$SESSION"
+    echo "killed $SESSION"
+  else
+    echo "ds: no session '$SESSION' — active sessions:" >&2
+    _do_list >&2
+    exit 1
+  fi
 }
 
 _do_killall() {
-    local shared_session
-    shared_session=$(_share_current_session)
-    if [[ -n "$shared_session" ]]; then
-        _share_stop "$shared_session" || true
-    fi
+  local shared_session
+  shared_session=$(_share_current_session)
+  if [[ -n "$shared_session" ]]; then
+    _share_stop "$shared_session" || true
+  fi
 
-    local all_sessions
-    all_sessions=$(tmux ls -F '#{session_name}' 2>/dev/null) || true
-    [[ -z "$all_sessions" ]] && { echo "(no active ds sessions)"; return; }
-    local found=0
-    while IFS= read -r s; do
-        if tmux show-environment -t "=$s" DS_MANAGED 2>/dev/null | grep -q '^DS_MANAGED='; then
-            tmux kill-session -t "=$s"
-            echo "killed $s"
-            found=1
-        fi
-    done <<< "$all_sessions"
-    if [[ "$found" -eq 0 ]]; then
-        echo "(no active ds sessions)"
+  local all_sessions
+  all_sessions=$(tmux ls -F '#{session_name}' 2>/dev/null) || true
+  [[ -z "$all_sessions" ]] && {
+    echo "(no active ds sessions)"
+    return
+  }
+  local found=0
+  while IFS= read -r s; do
+    if tmux show-environment -t "=$s" DS_MANAGED 2>/dev/null | grep -q '^DS_MANAGED='; then
+      tmux kill-session -t "=$s"
+      echo "killed $s"
+      found=1
     fi
+  done <<<"$all_sessions"
+  if [[ "$found" -eq 0 ]]; then
+    echo "(no active ds sessions)"
+  fi
 }
 
 _do_share() {
-    if [[ -n "$HOST" ]]; then
-        echo "ds: --share is local only" >&2
-        exit 1
-    fi
+  if [[ -n "$HOST" ]]; then
+    echo "ds: --share is local only" >&2
+    exit 1
+  fi
 
-    if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
-        echo "ds: no session '$SESSION' to share — active sessions:" >&2
-        _do_list >&2
-        exit 1
-    fi
+  if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
+    echo "ds: no session '$SESSION' to share — active sessions:" >&2
+    _do_list >&2
+    exit 1
+  fi
 
-    _share_start "$SESSION"
+  _share_start "$SESSION"
 }
 
 _do_unshare() {
-    if [[ -n "$HOST" ]]; then
-        echo "ds: --unshare is local only" >&2
-        exit 1
-    fi
+  if [[ -n "$HOST" ]]; then
+    echo "ds: --unshare is local only" >&2
+    exit 1
+  fi
 
-    _share_stop "$SESSION"
+  _share_stop "$SESSION"
 }
 
 _do_session() {
-    # Attach if session already exists (= prefix for exact match)
-    if tmux has-session -t "=$SESSION" 2>/dev/null; then
-        if [[ -n "${DS_SHARE_VIA:-}" ]]; then
-            _share_start "$SESSION"
-        fi
-        if [[ "$DS_NO_ATTACH" == "1" ]]; then
-            return
-        fi
-        _attach "$SESSION"
-        return
-    fi
-
-    local shell_name shell_cmd
-    shell_name="$(_shell_name)"
-    shell_cmd="$(_shell_login_cmd)"
-    tmux new-session -d -s "$SESSION" "$shell_cmd"
-    tmux set-environment -t "$SESSION" DS_MANAGED 1
-    tmux set-environment -t "$SESSION" DS_SHELL_NAME "$shell_name"
-    tmux set-option -t "$SESSION" default-command "$shell_cmd"
-    "_profile_$PROFILE" "$SESSION"
+  # Attach if session already exists (= prefix for exact match)
+  if tmux has-session -t "=$SESSION" 2>/dev/null; then
     if [[ -n "${DS_SHARE_VIA:-}" ]]; then
-        _share_start "$SESSION"
+      _share_start "$SESSION"
     fi
     if [[ "$DS_NO_ATTACH" == "1" ]]; then
-        return
+      return
     fi
     _attach "$SESSION"
+    return
+  fi
+
+  local shell_name shell_cmd
+  shell_name="$(_shell_name)"
+  shell_cmd="$(_shell_login_cmd)"
+  tmux new-session -d -s "$SESSION" "$shell_cmd"
+  tmux set-environment -t "$SESSION" DS_MANAGED 1
+  tmux set-environment -t "$SESSION" DS_SHELL_NAME "$shell_name"
+  tmux set-option -t "$SESSION" default-command "$shell_cmd"
+  "_profile_$PROFILE" "$SESSION"
+  if [[ -n "${DS_SHARE_VIA:-}" ]]; then
+    _share_start "$SESSION"
+  fi
+  if [[ "$DS_NO_ATTACH" == "1" ]]; then
+    return
+  fi
+  _attach "$SESSION"
 }
 
 _do_init() {
-    local shell="${1:-}"
-    if [[ -z "$shell" ]]; then
-        echo "ds: init requires a shell name (e.g., ds init bash)" >&2
-        exit 1
-    fi
-    case "$shell" in
-        bash)
-            cat <<'INIT_EOF'
+  local shell="${1:-}"
+  if [[ -z "$shell" ]]; then
+    echo "ds: init requires a shell name (e.g., ds init bash)" >&2
+    exit 1
+  fi
+  case "$shell" in
+    bash)
+      cat <<'INIT_EOF'
 
 ds() {
     DS_SHELL_NAME=bash command ds "$@"
@@ -476,8 +482,8 @@ if [[ $- == *i* && -f "$_ds_f" ]]; then
     rm -f "$_ds_f"
     # shellcheck disable=SC2086
 INIT_EOF
-    echo "    [[ -n \"\$_ds_args\" ]] && DS_SHELL_NAME=$shell exec ds \$_ds_args"
-    cat <<'INIT_EOF'
+      echo "    [[ -n \"\$_ds_args\" ]] && DS_SHELL_NAME=$shell exec ds \$_ds_args"
+      cat <<'INIT_EOF'
 fi
 unset _ds_f _ds_args
 
@@ -487,8 +493,8 @@ unset _ds_f _ds_args
 # NO_TMUX=1                  → skip auto-attach for this login
 if [[ -n "${DS_SSH_AUTO_ATTACH:-}" && -z "$TMUX" && $- == *i* && -n "$SSH_CONNECTION" && -z "$NO_TMUX" ]] && command -v tmux &>/dev/null; then
 INIT_EOF
-    echo "    DS_SHELL_NAME=$shell exec ds \"\$DS_SSH_AUTO_ATTACH\""
-    cat <<'INIT_EOF'
+      echo "    DS_SHELL_NAME=$shell exec ds \"\$DS_SSH_AUTO_ATTACH\""
+      cat <<'INIT_EOF'
 fi
 
 _ds() {
@@ -540,9 +546,9 @@ _ds() {
 }
 complete -F _ds ds
 INIT_EOF
-            ;;
-        zsh)
-            cat <<'INIT_EOF'
+      ;;
+    zsh)
+      cat <<'INIT_EOF'
 
 ds() {
     DS_SHELL_NAME=zsh command ds "$@"
@@ -554,8 +560,8 @@ if [[ -o interactive && -f "$_ds_f" ]]; then
     read -r _ds_args < "$_ds_f"
     rm -f "$_ds_f"
 INIT_EOF
-    echo "    [[ -n \"\$_ds_args\" ]] && DS_SHELL_NAME=$shell exec ds \${(z)_ds_args}"
-    cat <<'INIT_EOF'
+      echo "    [[ -n \"\$_ds_args\" ]] && DS_SHELL_NAME=$shell exec ds \${(z)_ds_args}"
+      cat <<'INIT_EOF'
 fi
 unset _ds_f _ds_args
 
@@ -565,8 +571,8 @@ unset _ds_f _ds_args
 # NO_TMUX=1                  → skip auto-attach for this login
 if [[ -n "${DS_SSH_AUTO_ATTACH:-}" && -z "$TMUX" && -o interactive && -n "$SSH_CONNECTION" && -z "$NO_TMUX" ]] && command -v tmux >/dev/null 2>&1; then
 INIT_EOF
-    echo "    DS_SHELL_NAME=$shell exec ds \"\$DS_SSH_AUTO_ATTACH\""
-    cat <<'INIT_EOF'
+      echo "    DS_SHELL_NAME=$shell exec ds \"\$DS_SSH_AUTO_ATTACH\""
+      cat <<'INIT_EOF'
 fi
 
 _ds() {
@@ -639,176 +645,225 @@ _ds() {
 }
 (( $+functions[compdef] )) && compdef _ds ds
 INIT_EOF
-            ;;
-        *)
-            echo "ds: unsupported shell '$shell' (supported: bash, zsh)" >&2
-            exit 1
-            ;;
-    esac
+      ;;
+    *)
+      echo "ds: unsupported shell '$shell' (supported: bash, zsh)" >&2
+      exit 1
+      ;;
+  esac
 }
 
 # --- Remote dispatch ---
 
 _remote() {
-    lookup_host "$HOST"
-    [[ -n "$CONNECT_OVERRIDE" ]] && CONNECT="$CONNECT_OVERRIDE"
+  lookup_host "$HOST"
+  [[ -n "$CONNECT_OVERRIDE" ]] && CONNECT="$CONNECT_OVERRIDE"
 
-    # Build the remote ds command args.
-    local args=()
+  # Build the remote ds command args.
+  local args=()
 
-    case "$ACTION" in
-        list)
-            args+=("-l")
-            ;;
-        kill)
-            args+=("-k" "$SESSION")
-            ;;
-        killall)
-            args+=("--killall")
-            ;;
-        session)
-            # Default "ds" session needs no positional arg on the remote side
-            if [[ "$SESSION" != "ds" ]]; then
-                args+=("$SESSION")
-            fi
-            [[ -n "${DS_SHARE_VIA:-}" ]] && args+=("--share-via" "$DS_SHARE_VIA")
-            [[ "$DS_NO_ATTACH" == "1" ]] && args+=("--no-attach")
-            ;;
-    esac
+  case "$ACTION" in
+    list)
+      args+=("-l")
+      ;;
+    kill)
+      args+=("-k" "$SESSION")
+      ;;
+    killall)
+      args+=("--killall")
+      ;;
+    session)
+      # Default "ds" session needs no positional arg on the remote side
+      if [[ "$SESSION" != "ds" ]]; then
+        args+=("$SESSION")
+      fi
+      [[ -n "${DS_SHARE_VIA:-}" ]] && args+=("--share-via" "$DS_SHARE_VIA")
+      [[ "$DS_NO_ATTACH" == "1" ]] && args+=("--no-attach")
+      ;;
+  esac
 
-    # Prefer the invoking shell on the remote side, but fall back to bash
-    # when that shell is unavailable there.
-    local remote_cmd shell remote_ds_cmd remote_ds_q
-    shell="$(_shell_name)"
-    # shellcheck disable=SC2088  # intentional — remote shell expands ~
-    remote_ds_cmd="~/.local/bin/ds $(printf '%q ' "${args[@]}")"
-    printf -v remote_ds_q '%q' "$remote_ds_cmd"
-    if [[ "$shell" == "bash" ]]; then
-        remote_cmd="NO_TMUX=1 DS_SHELL_NAME=bash bash -lc $remote_ds_q"
-    else
-        remote_cmd="if command -v $shell >/dev/null 2>&1; then NO_TMUX=1 DS_SHELL_NAME=$shell $shell -lc $remote_ds_q; else NO_TMUX=1 DS_SHELL_NAME=bash bash -lc $remote_ds_q; fi"
-    fi
+  # Prefer the invoking shell on the remote side, but fall back to bash
+  # when that shell is unavailable there.
+  local remote_cmd shell remote_ds_cmd remote_ds_q
+  shell="$(_shell_name)"
+  # shellcheck disable=SC2088  # intentional — remote shell expands ~
+  remote_ds_cmd="~/.local/bin/ds $(printf '%q ' "${args[@]}")"
+  printf -v remote_ds_q '%q' "$remote_ds_cmd"
+  if [[ "$shell" == "bash" ]]; then
+    remote_cmd="NO_TMUX=1 DS_SHELL_NAME=bash bash -lc $remote_ds_q"
+  else
+    remote_cmd="if command -v $shell >/dev/null 2>&1; then NO_TMUX=1 DS_SHELL_NAME=$shell $shell -lc $remote_ds_q; else NO_TMUX=1 DS_SHELL_NAME=bash bash -lc $remote_ds_q; fi"
+  fi
 
-    case "$CONNECT" in
-        -)   echo "ds: host '$HOST' is local-only (no remote connections)" >&2; exit 1 ;;
-        ssh) exec ssh -t -- "$HOST" "$remote_cmd" ;;
-        *)
-            local plugin
-            plugin=$(_find_plugin "connect-${CONNECT}.sh") || {
-                echo "ds: unknown connect method '$CONNECT' (no plugin found)" >&2
-                exit 1
-            }
-            # shellcheck source=/dev/null
-            . "$plugin"
-            "_connect_${CONNECT}" "$HOST" "$remote_cmd" "$SESSION" "$ACTION" "${args[*]}"
-            ;;
-    esac
+  case "$CONNECT" in
+    -)
+      echo "ds: host '$HOST' is local-only (no remote connections)" >&2
+      exit 1
+      ;;
+    ssh) exec ssh -t -- "$HOST" "$remote_cmd" ;;
+    *)
+      local plugin
+      plugin=$(_find_plugin "connect-${CONNECT}.sh") || {
+        echo "ds: unknown connect method '$CONNECT' (no plugin found)" >&2
+        exit 1
+      }
+      # shellcheck source=/dev/null
+      . "$plugin"
+      "_connect_${CONNECT}" "$HOST" "$remote_cmd" "$SESSION" "$ACTION" "${args[*]}"
+      ;;
+  esac
 }
 
 # --- Main ---
 
 # When sourced for testing, export functions but skip arg parsing and execution.
 if [[ -n "${DS_SOURCED:-}" ]]; then
-    # shellcheck disable=SC2317
-    return 0 2>/dev/null || exit 0
+  # shellcheck disable=SC2317
+  return 0 2>/dev/null || exit 0
 fi
 
 while [[ $# -gt 0 ]]; do
-    case "$1" in
-        -c|--connect) [[ $# -ge 2 ]] || { echo "ds: $1 requires an argument" >&2; exit 1; }
-                      CONNECT_OVERRIDE="$2"; shift 2 ;;
-        --share-via)  [[ $# -ge 2 ]] || { echo "ds: $1 requires an argument" >&2; exit 1; }
-                      DS_SHARE_VIA="$2"; shift 2 ;;
-        --share)      ACTION="share"; shift ;;
-        --unshare)    ACTION="unshare"; shift ;;
-        --no-attach)  DS_NO_ATTACH=1; shift ;;
-        -l|--list)    ACTION="list"; shift ;;
-        -k|--kill)    ACTION="kill"; shift ;;
-        --killall)    ACTION="killall"; shift ;;
-        init)         ACTION="init"
-                      if [[ $# -gt 1 && "$2" != -* && "$2" != @* ]]; then
-                          INIT_SHELL="$2"; shift
-                      fi
-                      shift ;;
-        -h|--help)    _usage; exit 0 ;;
-        -*)           _usage >&2; exit 1 ;;
-        @*)           HOST="${1#@}"; shift ;;
-        *)            SESSION="$1"; shift ;;
-    esac
+  case "$1" in
+    -c | --connect)
+      [[ $# -ge 2 ]] || {
+        echo "ds: $1 requires an argument" >&2
+        exit 1
+      }
+      CONNECT_OVERRIDE="$2"
+      shift 2
+      ;;
+    --share-via)
+      [[ $# -ge 2 ]] || {
+        echo "ds: $1 requires an argument" >&2
+        exit 1
+      }
+      DS_SHARE_VIA="$2"
+      shift 2
+      ;;
+    --share)
+      ACTION="share"
+      shift
+      ;;
+    --unshare)
+      ACTION="unshare"
+      shift
+      ;;
+    --no-attach)
+      DS_NO_ATTACH=1
+      shift
+      ;;
+    -l | --list)
+      ACTION="list"
+      shift
+      ;;
+    -k | --kill)
+      ACTION="kill"
+      shift
+      ;;
+    --killall)
+      ACTION="killall"
+      shift
+      ;;
+    init)
+      ACTION="init"
+      if [[ $# -gt 1 && "$2" != -* && "$2" != @* ]]; then
+        INIT_SHELL="$2"
+        shift
+      fi
+      shift
+      ;;
+    -h | --help)
+      _usage
+      exit 0
+      ;;
+    -*)
+      _usage >&2
+      exit 1
+      ;;
+    @*)
+      HOST="${1#@}"
+      shift
+      ;;
+    *)
+      SESSION="$1"
+      shift
+      ;;
+  esac
 done
 
 _ensure_state_dir
 
 if [[ -z "$DS_SHARE_INFO_FILE" ]]; then
-    DS_SHARE_INFO_FILE="$(_default_share_info_file)"
+  DS_SHARE_INFO_FILE="$(_default_share_info_file)"
 fi
 
 # Load share backend if requested (by flag or for actions that need it)
 if [[ -n "$DS_SHARE_VIA" ]]; then
-    _load_share_backend "$DS_SHARE_VIA"
-    _share_load_config
-elif [[ "$ACTION" == "share" || "$ACTION" == "unshare" || "$ACTION" == "list" \
-     || "$ACTION" == "kill" || "$ACTION" == "killall" ]]; then
-    # Auto-detect active backend from state directory
-    while IFS= read -r _sb; do
-        [[ -n "$_sb" ]] || continue
-        _sbn="${_sb##*/share-}"; _sbn="${_sbn%.sh}"
-        # shellcheck source=/dev/null
-        . "$_sb"
-        if _share_running 2>/dev/null; then
-            DS_SHARE_VIA="$_sbn"
-            _share_load_config
-            break
-        fi
-        # Reset stubs if this backend isn't active
-        _share_reset_stubs
-    done < <(_glob_plugins 'share-*.sh')
-    unset _sb _sbn
+  _load_share_backend "$DS_SHARE_VIA"
+  _share_load_config
+elif [[ "$ACTION" == "share" || "$ACTION" == "unshare" || "$ACTION" == "list" ||
+  "$ACTION" == "kill" || "$ACTION" == "killall" ]]; then
+  # Auto-detect active backend from state directory
+  while IFS= read -r _sb; do
+    [[ -n "$_sb" ]] || continue
+    _sbn="${_sb##*/share-}"
+    _sbn="${_sbn%.sh}"
+    # shellcheck source=/dev/null
+    . "$_sb"
+    if _share_running 2>/dev/null; then
+      DS_SHARE_VIA="$_sbn"
+      _share_load_config
+      break
+    fi
+    # Reset stubs if this backend isn't active
+    _share_reset_stubs
+  done < <(_glob_plugins 'share-*.sh')
+  unset _sb _sbn
 fi
 
 # Validate: --killall and -l don't take a session name
 if [[ "$ACTION" == "killall" && -n "$SESSION" ]]; then
-    echo "ds: --killall does not take a session name (use -k to kill a single session)" >&2
-    exit 1
+  echo "ds: --killall does not take a session name (use -k to kill a single session)" >&2
+  exit 1
 fi
 if [[ "$ACTION" == "list" && -n "$SESSION" ]]; then
-    echo "ds: -l does not take a session name" >&2
-    exit 1
+  echo "ds: -l does not take a session name" >&2
+  exit 1
 fi
 
 # Validate: init doesn't use @host
 if [[ "$ACTION" == "init" && -n "$HOST" ]]; then
-    echo "ds: init does not support remote hosts" >&2
-    exit 1
+  echo "ds: init does not support remote hosts" >&2
+  exit 1
 fi
 
 # Validate: -c without @host is meaningless
 if [[ -n "$CONNECT_OVERRIDE" && -z "$HOST" ]]; then
-    echo "ds: -c requires a remote host (@host)" >&2
-    exit 1
+  echo "ds: -c requires a remote host (@host)" >&2
+  exit 1
 fi
 
 # Resolve session/profile depending on the action
 case "$ACTION" in
-    session)
-        if [[ -n "$HOST" ]]; then
-            # Remote: skip local profile resolution — the remote ds handles it
-            :
-        elif [[ -n "$SESSION" ]] && tmux has-session -t "=$SESSION" 2>/dev/null; then
-            # Existing local session: attach directly (no profile needed)
-            PROFILE=""
-        else
-            _resolve_profile
-        fi
-        ;;
-    kill|share|unshare)
-        _resolve_session_target
-        ;;
+  session)
+    if [[ -n "$HOST" ]]; then
+      # Remote: skip local profile resolution — the remote ds handles it
+      :
+    elif [[ -n "$SESSION" ]] && tmux has-session -t "=$SESSION" 2>/dev/null; then
+      # Existing local session: attach directly (no profile needed)
+      PROFILE=""
+    else
+      _resolve_profile
+    fi
+    ;;
+  kill | share | unshare)
+    _resolve_session_target
+    ;;
 esac
 
 if [[ -n "$HOST" ]]; then
-    _remote
-    exit 0
+  _remote
+  exit 0
 fi
 
 case "$ACTION" in
@@ -826,22 +881,23 @@ case "$ACTION" in
     ;;
   share)
     if [[ -z "$DS_SHARE_VIA" ]]; then
-        # Auto-select if exactly one share backend is installed
-        _backends=()
-        while IFS= read -r _sb; do
-            [[ -n "$_sb" ]] || continue
-            _sbn="${_sb##*/share-}"; _sbn="${_sbn%.sh}"
-            _backends+=("$_sbn")
-        done < <(_glob_plugins 'share-*.sh')
-        if [[ ${#_backends[@]} -eq 1 ]]; then
-            DS_SHARE_VIA="${_backends[0]}"
-            _load_share_backend "$DS_SHARE_VIA"
-            _share_load_config
-        else
-            echo "ds: --share-via <backend> required (available: ${_backends[*]:-none})" >&2
-            exit 1
-        fi
-        unset _backends _sb _sbn
+      # Auto-select if exactly one share backend is installed
+      _backends=()
+      while IFS= read -r _sb; do
+        [[ -n "$_sb" ]] || continue
+        _sbn="${_sb##*/share-}"
+        _sbn="${_sbn%.sh}"
+        _backends+=("$_sbn")
+      done < <(_glob_plugins 'share-*.sh')
+      if [[ ${#_backends[@]} -eq 1 ]]; then
+        DS_SHARE_VIA="${_backends[0]}"
+        _load_share_backend "$DS_SHARE_VIA"
+        _share_load_config
+      else
+        echo "ds: --share-via <backend> required (available: ${_backends[*]:-none})" >&2
+        exit 1
+      fi
+      unset _backends _sb _sbn
     fi
     _do_share
     ;;
