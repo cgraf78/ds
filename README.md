@@ -30,7 +30,8 @@ ds chat                         # session "chat" with chat profile
 
 ds dev @myhost                  # dev session on remote host
 ds @myhost                      # default session on remote host
-ds @myhost -L 3011:3011         # forward a local port to the remote
+ds @myhost -L 3011:3011         # forward local port 3011 → remote 3011 (ssh -L shorthand)
+ds @myhost -R 3333:2222         # reverse-forward remote port 3333 → local 2222 (ssh -R shorthand)
 
 ds -l                           # list active ds sessions
 ds -l @myhost                   # list sessions on remote host

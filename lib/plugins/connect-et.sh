@@ -6,10 +6,14 @@ _connect_et() {
   # right session when the ET connection opens an interactive shell.
   ssh "$host" "mkdir -p ~/.local/state/ds && cat > ~/.local/state/ds/attach-next" <<<"$session"
   local -a fwd=()
+  # et's `-t local:remote` matches our DS_FORWARDS spec directly.
+  # et's `-r source:destination` (bind-on-remote : target-on-client)
+  # matches our DS_R_FORWARDS (REMOTE:LOCAL) directly.
   if [[ -n "${DS_FORWARDS:-}" ]]; then
-    # et takes -t as a comma-separated list of local:remote pairs.
-    local joined="${DS_FORWARDS// /,}"
-    fwd=("-t" "$joined")
+    fwd+=("-t" "${DS_FORWARDS// /,}")
+  fi
+  if [[ -n "${DS_R_FORWARDS:-}" ]]; then
+    fwd+=("-r" "${DS_R_FORWARDS// /,}")
   fi
   exec et "${fwd[@]+"${fwd[@]}"}" "$host"
 }

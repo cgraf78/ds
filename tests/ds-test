@@ -918,6 +918,18 @@ _assert_contains "ds --forward non-numeric: rejects" "invalid forward spec" "$re
 result=$("$SCRIPT_DIR/../bin/ds" -L 3011:3011 2>&1 || true)
 _assert_contains "ds -L without @host: requires remote host" "requires a remote host" "$result"
 
+# -R without argument → error
+result=$("$SCRIPT_DIR/../bin/ds" -R 2>&1 || true)
+_assert_contains "ds -R (no arg): requires argument" "requires an argument" "$result"
+
+# -R with invalid format → error
+result=$("$SCRIPT_DIR/../bin/ds" -R 2222 @server1 2>&1 || true)
+_assert_contains "ds -R 2222: rejects bad format" "invalid forward spec" "$result"
+
+# -R without @host → error
+result=$("$SCRIPT_DIR/../bin/ds" -R 2222:3333 2>&1 || true)
+_assert_contains "ds -R without @host: requires remote host" "requires a remote host" "$result"
+
 # -l with session name → error
 result=$("$SCRIPT_DIR/../bin/ds" -l dev 2>&1 || true)
 _assert_contains "ds -l dev: rejects session name" "does not take a session name" "$result"
@@ -1164,26 +1176,52 @@ _assert_contains "remote share backend: passes --share-via" "--share-via" "$remo
 _assert_contains "remote share backend: passes upterm" "upterm" "$remote_log"
 _assert_contains "remote share backend: passes --no-attach" "--no-attach" "$remote_log"
 
-# Test -L port forwarding through ssh transport
+# Array env-for-command (VAR=(a b) cmd) only works single-element in bash,
+# so split assignments with `;` for the FORWARDS / R_FORWARDS array setup.
+
+# Test -L port forwarding through ssh transport (3-part form)
 result=$(_run_remote "HOST=server1 ACTION=session SESSION=ds \
-    CONNECT_OVERRIDE= FORWARDS=(3011:3011)")
+    CONNECT_OVERRIDE=; FORWARDS=(3011:3011);")
 remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
 _assert_contains "ssh forward: passes -L" "-L" "$remote_log"
-_assert_contains "ssh forward: passes spec" "3011:3011" "$remote_log"
+_assert_contains "ssh forward: passes 3-part spec" "3011:localhost:3011" "$remote_log"
 
 # Test multiple -L forwards through ssh transport
 result=$(_run_remote "HOST=server1 ACTION=session SESSION=ds \
-    CONNECT_OVERRIDE= FORWARDS=(3011:3011 8080:80)")
+    CONNECT_OVERRIDE=; FORWARDS=(3011:3011 8080:80);")
 remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
-_assert_contains "ssh forward: first spec" "3011:3011" "$remote_log"
-_assert_contains "ssh forward: second spec" "8080:80" "$remote_log"
+_assert_contains "ssh forward: first spec" "3011:localhost:3011" "$remote_log"
+_assert_contains "ssh forward: second spec" "8080:localhost:80" "$remote_log"
 
 # Test -L port forwarding through autossh transport
 result=$(_run_remote "HOST=fileserver ACTION=session SESSION=ds \
-    CONNECT_OVERRIDE= FORWARDS=(3011:3011)")
+    CONNECT_OVERRIDE=; FORWARDS=(3011:3011);")
 remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
 _assert_contains "autossh forward: passes -L" "-L" "$remote_log"
-_assert_contains "autossh forward: passes spec" "3011:3011" "$remote_log"
+_assert_contains "autossh forward: passes 3-part spec" "3011:localhost:3011" "$remote_log"
+
+# Test -R reverse forwarding through ssh transport. Spec is REMOTE:LOCAL
+# (ssh's -R shorthand: bind on server : target on client). ssh gets the
+# 3-part form REMOTE:localhost:LOCAL, passed through directly.
+result=$(_run_remote "HOST=server1 ACTION=session SESSION=ds \
+    CONNECT_OVERRIDE=; R_FORWARDS=(3333:2222);")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "ssh reverse: passes -R" "-R" "$remote_log"
+_assert_contains "ssh reverse: 3-part spec direct" "3333:localhost:2222" "$remote_log"
+
+# Test combined -L and -R through ssh transport
+result=$(_run_remote "HOST=server1 ACTION=session SESSION=ds \
+    CONNECT_OVERRIDE=; FORWARDS=(3011:3011); R_FORWARDS=(3333:2222);")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "ssh combined: has -L spec" "3011:localhost:3011" "$remote_log"
+_assert_contains "ssh combined: has -R spec" "3333:localhost:2222" "$remote_log"
+
+# Test -R reverse forwarding through autossh transport
+result=$(_run_remote "HOST=fileserver ACTION=session SESSION=ds \
+    CONNECT_OVERRIDE=; R_FORWARDS=(3333:2222);")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "autossh reverse: passes -R" "-R" "$remote_log"
+_assert_contains "autossh reverse: 3-part spec direct" "3333:localhost:2222" "$remote_log"
 
 # ---------------------------------------------------------------------------
 # Tests: Connect config comments and blank lines
