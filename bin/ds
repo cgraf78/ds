@@ -42,6 +42,7 @@ DS_SHARE_VIA="${DS_SHARE_VIA:-}"
 DS_NO_ATTACH="${DS_NO_ATTACH:-0}"
 DS_SHARE_INFO_FILE="${DS_SHARE_INFO_FILE:-}"
 DS_STATE_DIR="${DS_STATE_DIR:-$HOME/.local/state/ds}"
+FORWARDS=()
 
 _usage() {
   echo "Usage: ds [session] [@host]          create or attach to a session"
@@ -54,6 +55,7 @@ _usage() {
   echo ""
   echo "Options:"
   echo "  -c, --connect METHOD   override connect method (ssh, autossh, et, ...)"
+  echo "  -L, --forward SPEC     forward a port: LOCAL:REMOTE (repeatable)"
   echo "  --share-via BACKEND    share backend to use (e.g. upterm)"
   echo "  --no-attach            create session without attaching"
   echo ""
@@ -514,7 +516,7 @@ _ds() {
             done 2>/dev/null)
             COMPREPLY=($(compgen -W "$sessions" -- "$cur"))
             return ;;
-        -c|--connect|--share-via)
+        -c|--connect|--share-via|-L|--forward)
             return ;;
     esac
 
@@ -541,7 +543,7 @@ _ds() {
 
     # shellcheck disable=SC2086
     COMPREPLY=($(compgen -W \
-        "-l --list -k --kill --killall --share --unshare --no-attach -c --connect --share-via init -h --help$profiles" \
+        "-l --list -k --kill --killall --share --unshare --no-attach -c --connect -L --forward --share-via init -h --help$profiles" \
         -- "$cur"))
 }
 complete -F _ds ds
@@ -594,6 +596,8 @@ _ds() {
         --no-attach
         -c
         --connect
+        -L
+        --forward
         --share-via
         init
         -h
@@ -612,7 +616,7 @@ _ds() {
             (( ${#sessions[@]} > 0 )) && compadd -- "${sessions[@]}"
             return
             ;;
-        -c|--connect|--share-via)
+        -c|--connect|--share-via|-L|--forward)
             return
             ;;
     esac
@@ -695,12 +699,20 @@ _remote() {
     remote_cmd="if command -v $shell >/dev/null 2>&1; then NO_TMUX=1 DS_SHELL_NAME=$shell $shell -lc $remote_ds_q; else NO_TMUX=1 DS_SHELL_NAME=bash bash -lc $remote_ds_q; fi"
   fi
 
+  # Build -L args for ssh-family transports; plugins may read DS_FORWARDS too.
+  local -a ssh_fwd=()
+  local fspec
+  for fspec in "${FORWARDS[@]+"${FORWARDS[@]}"}"; do
+    ssh_fwd+=("-L" "$fspec")
+  done
+  export DS_FORWARDS="${FORWARDS[*]+${FORWARDS[*]}}"
+
   case "$CONNECT" in
     -)
       echo "ds: host '$HOST' is local-only (no remote connections)" >&2
       exit 1
       ;;
-    ssh) exec ssh -t -- "$HOST" "$remote_cmd" ;;
+    ssh) exec ssh -t "${ssh_fwd[@]+"${ssh_fwd[@]}"}" -- "$HOST" "$remote_cmd" ;;
     *)
       local plugin
       plugin=$(_find_plugin "connect-${CONNECT}.sh") || {
@@ -730,6 +742,18 @@ while [[ $# -gt 0 ]]; do
         exit 1
       }
       CONNECT_OVERRIDE="$2"
+      shift 2
+      ;;
+    -L | --forward)
+      [[ $# -ge 2 ]] || {
+        echo "ds: $1 requires an argument" >&2
+        exit 1
+      }
+      if [[ ! "$2" =~ ^[0-9]+:[0-9]+$ ]]; then
+        echo "ds: invalid forward spec '$2' (expected LOCAL:REMOTE)" >&2
+        exit 1
+      fi
+      FORWARDS+=("$2")
       shift 2
       ;;
     --share-via)
@@ -840,6 +864,12 @@ fi
 # Validate: -c without @host is meaningless
 if [[ -n "$CONNECT_OVERRIDE" && -z "$HOST" ]]; then
   echo "ds: -c requires a remote host (@host)" >&2
+  exit 1
+fi
+
+# Validate: -L without @host is meaningless
+if [[ ${#FORWARDS[@]} -gt 0 && -z "$HOST" ]]; then
+  echo "ds: -L requires a remote host (@host)" >&2
   exit 1
 fi
 

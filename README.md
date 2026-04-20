@@ -30,6 +30,7 @@ ds chat                         # session "chat" with chat profile
 
 ds dev @myhost                  # dev session on remote host
 ds @myhost                      # default session on remote host
+ds @myhost -L 3011:3011         # forward a local port to the remote
 
 ds -l                           # list active ds sessions
 ds -l @myhost                   # list sessions on remote host
