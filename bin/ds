@@ -543,9 +543,15 @@ _ds() {
         profiles+=" $pname"
     done
 
+    local sessions=""
+    sessions=$(ds -l 2>/dev/null | while IFS=: read -r name _rest; do
+        [[ "$name" == "("* ]] && continue
+        echo "$name"
+    done)
+
     # shellcheck disable=SC2086
     COMPREPLY=($(compgen -W \
-        "-l --list -k --kill --killall --share --unshare --no-attach -c --connect -L --forward -R --reverse --share-via init -h --help$profiles" \
+        "--list --kill --killall --share --unshare --no-attach --connect --forward --reverse --share-via init --help$profiles $sessions" \
         -- "$cur"))
 }
 complete -F _ds ds
@@ -588,23 +594,17 @@ _ds() {
 
     shells=(bash zsh)
     options=(
-        -l
         --list
-        -k
         --kill
         --killall
         --share
         --unshare
         --no-attach
-        -c
         --connect
-        -L
         --forward
-        -R
         --reverse
         --share-via
         init
-        -h
         --help
     )
 
@@ -649,7 +649,12 @@ _ds() {
         profiles+=("${pname%.sh}")
     done
 
-    compadd -- "${options[@]}" "${profiles[@]}"
+    sessions=(${(f)"$(ds -l 2>/dev/null | while IFS=: read -r name _rest; do
+        [[ "$name" == "("* ]] && continue
+        echo "$name"
+    done)"})
+
+    compadd -- "${options[@]}" "${profiles[@]}" "${sessions[@]}"
 }
 (( $+functions[compdef] )) && compdef _ds ds
 INIT_EOF
