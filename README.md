@@ -1,7 +1,6 @@
 # ds — Dev Session Launcher
 
 ![CI](https://github.com/cgraf78/ds/actions/workflows/ci.yml/badge.svg)
-![Release](https://img.shields.io/github/v/release/cgraf78/ds)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ![Bash](https://img.shields.io/badge/bash-4%2B-blue)
 
@@ -13,7 +12,7 @@
 curl -sL https://raw.githubusercontent.com/cgraf78/ds/main/install.sh | bash
 ```
 
-Or from source:
+Or from a repo checkout:
 
 ```bash
 git clone https://github.com/cgraf78/ds.git

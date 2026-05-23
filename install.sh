@@ -5,30 +5,29 @@
 #   From source tree:  cd ds && bash install.sh
 #   Standalone:        curl -sL https://raw.githubusercontent.com/cgraf78/ds/main/install.sh | bash
 #
-# When run standalone (no bin/ds in the current directory), the script
-# fetches the latest release tarball, extracts to a temp directory, and
-# installs from there.
+# ds is repo-versioned rather than release-versioned. Standalone installs clone
+# the current main branch into a temp directory and install from that checkout,
+# matching the same source-of-truth used by shdeps' github:repo method.
 set -euo pipefail
 
 REPO="cgraf78/ds"
 INSTALL_DIR="${DS_INSTALL_DIR:-$HOME/.local/bin}"
 LIB_DIR="${DS_LIB_DIR:-$HOME/.local/lib/ds/plugins}"
 
-# If not in a source tree, fetch the latest release tarball.
+# If not in a source tree, clone the current repo snapshot.
 cleanup=""
 if [[ ! -f bin/ds ]]; then
-  echo "Fetching latest release..."
-  tag=$(curl -sL "https://api.github.com/repos/$REPO/releases/latest" | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)
-  if [[ -z "$tag" ]]; then
-    echo "error: failed to determine latest release" >&2
+  if ! command -v git >/dev/null 2>&1; then
+    echo "error: git is required for standalone install" >&2
     exit 1
   fi
+  echo "Cloning latest ds..."
   tmpdir=$(mktemp -d)
   cleanup="$tmpdir"
   trap 'rm -rf "$cleanup"' EXIT
-  curl -sL "https://github.com/$REPO/releases/download/${tag}/ds-${tag}.tar.gz" | tar xz -C "$tmpdir"
-  cd "$tmpdir/ds-${tag}"
-  echo "  resolved $tag"
+  git clone --depth 1 "https://github.com/$REPO.git" "$tmpdir/ds" >/dev/null
+  cd "$tmpdir/ds"
+  echo "  resolved commit $(git rev-parse --short HEAD)"
 fi
 
 echo "Installing ds..."
