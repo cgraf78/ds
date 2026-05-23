@@ -25,7 +25,17 @@ if [[ ! -f bin/ds ]]; then
   tmpdir=$(mktemp -d)
   cleanup="$tmpdir"
   trap 'rm -rf "$cleanup"' EXIT
-  git clone --depth 1 "https://github.com/$REPO.git" "$tmpdir/ds" >/dev/null
+  repo_url="https://github.com/$REPO.git"
+  ssh_url="git@github.com:$REPO.git"
+  if ! git clone --depth 1 "$repo_url" "$tmpdir/ds" >/dev/null; then
+    rm -rf "$tmpdir/ds"
+    # Release assets are intentionally gone now, so a standalone install has to
+    # get source from git. Private or auth-required repos fail anonymous HTTPS
+    # clones in non-interactive shells, while SSH works with the user's normal
+    # GitHub key setup. Keep HTTPS as the fast public path, then retry SSH.
+    echo "  HTTPS clone failed, retrying SSH..."
+    git clone --depth 1 "$ssh_url" "$tmpdir/ds" >/dev/null
+  fi
   cd "$tmpdir/ds"
   echo "  resolved commit $(git rev-parse --short HEAD)"
 fi

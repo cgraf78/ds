@@ -647,7 +647,9 @@ _assert_contains "ttl fire: ds --unshare called after TTL" "--unshare myses" "$u
 rm -f "$(_upterm_ttl_pid_file)"
 
 # Reset sharing vars for remaining tmux tests
+# shellcheck disable=SC2034  # sourced helpers read these globals dynamically.
 DS_SHARE_VIA=""
+# shellcheck disable=SC2034  # sourced helpers read these globals dynamically.
 DS_NO_ATTACH=0
 DS_SHARE_INFO_FILE=""
 DS_UPTERM_PID_FILE=""
@@ -656,6 +658,7 @@ DS_UPTERM_AUTHORIZED_KEYS=""
 DS_UPTERM_PUSH=""
 DS_UPTERM_SHARE_TTL=""
 SESSION=""
+# shellcheck disable=SC2034  # sourced helpers read this global dynamically.
 HOST=""
 
 # ---------------------------------------------------------------------------
@@ -1246,6 +1249,67 @@ _assert_eq "host1 found (blank lines ignored)" "ssh" "$CONNECT"
 _reset_lookup
 lookup_host "host2"
 _assert_eq "host2 found (blank lines ignored)" "et" "$CONNECT"
+
+# ---------------------------------------------------------------------------
+# Tests: Installer
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== Installer ==="
+
+_inst_repo=$(_tmpdir)
+mkdir -p "$_inst_repo/bin" "$_inst_repo/lib/plugins"
+cat >"$_inst_repo/bin/ds" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "mock ds"
+SH
+chmod +x "$_inst_repo/bin/ds"
+printf '%s\n' "# mock plugin" >"$_inst_repo/lib/plugins/mock-plugin.sh"
+
+_inst_mock_bin=$(_tmpdir)
+_inst_git_log="$(_tmpdir)/git.log"
+cat >"$_inst_mock_bin/git" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$DS_TEST_GIT_LOG"
+if [[ "$1" == "clone" && "$2" == "--depth" && "$3" == "1" ]]; then
+  case "$4" in
+    https://github.com/cgraf78/ds.git)
+      exit 128
+      ;;
+    git@github.com:cgraf78/ds.git)
+      mkdir -p "$5"
+      cp -R "$DS_TEST_REPO"/. "$5/"
+      exit 0
+      ;;
+  esac
+fi
+if [[ "$1" == "rev-parse" && "$2" == "--short" && "$3" == "HEAD" ]]; then
+  printf '%s\n' "abc1234"
+  exit 0
+fi
+exit 1
+SH
+chmod +x "$_inst_mock_bin/git"
+
+_inst_root=$(_tmpdir)
+_inst_cwd=$(_tmpdir)
+_inst_output=$(
+  cd "$_inst_cwd"
+  PATH="$_inst_mock_bin:$PATH" \
+    DS_TEST_GIT_LOG="$_inst_git_log" \
+    DS_TEST_REPO="$_inst_repo" \
+    DS_INSTALL_DIR="$_inst_root/bin" \
+    DS_LIB_DIR="$_inst_root/plugins" \
+    bash "$SCRIPT_DIR/../install.sh" 2>&1
+)
+_inst_git_calls=$(cat "$_inst_git_log")
+_assert_contains "installer: tries HTTPS clone first" \
+  "clone --depth 1 https://github.com/cgraf78/ds.git" "$_inst_git_calls"
+_assert_contains "installer: falls back to SSH clone" \
+  "clone --depth 1 git@github.com:cgraf78/ds.git" "$_inst_git_calls"
+_assert_contains "installer: reports resolved commit" "resolved commit abc1234" "$_inst_output"
+_assert_file_exists "installer: installs ds binary" "$_inst_root/bin/ds"
+_assert_file_exists "installer: installs plugin" "$_inst_root/plugins/mock-plugin.sh"
 
 # Restore connect.conf
 cat >"$CONF_DIR/connect.conf" <<'EOF'
