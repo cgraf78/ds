@@ -2,33 +2,19 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
   pull_request:
-    branches: [main]
+    branches: [master, main]
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  shellcheck:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
-      - name: Run shellcheck on ds
-        run: shellcheck -x bin/ds
-      - name: Run shellcheck on plugins
-        run: shellcheck -x lib/plugins/*.sh
-      - name: Run shellcheck on tests
-        run: shellcheck -x -P SCRIPTDIR tests/ds-test tests/test-helpers.sh
-
   test:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install Bash (macOS)
-        if: runner.os == 'macOS'
-        run: brew install bash
-      - name: Run tests
-        run: bash tests/ds-test
+    uses: cgraf78/actions/.github/workflows/portable-shell-ci.yml@main # zizmor: ignore[unpinned-uses]
+    with:
+      profiles: base,shellcheck
+      test-command: bash tests/ds-ci

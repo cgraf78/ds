@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# ds-ci — local entrypoint for the same checks GitHub Actions runs.
+#
+# Keeping the file list here lets the shared reusable workflow stay generic
+# while ds owns the shellcheck paths that define its public and plugin surface.
+
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+shellcheck -x bin/ds
+shellcheck -x lib/plugins/*.sh
+shellcheck -x -P SCRIPTDIR tests/ds-test tests/test-helpers.sh
+
+bash tests/ds-test
