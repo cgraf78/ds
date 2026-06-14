@@ -27,7 +27,7 @@ Single-file CLI (`bin/ds`) with a plugin system. Everything is pure bash (4+).
 
 **Plugin discovery** (`_find_plugin`, `_glob_plugins`): searches `~/.config/ds/` first (user override), then `lib/plugins/` (bundled). Three plugin types:
 
-- **Profiles** (`profile-<name>.sh`): define `_profile_<name>()` to set up tmux window/pane layouts. Bundled: `dev`, `chat`. Built-in: `ds` (plain tmux, used as default).
+- **Profiles** (`profile-<name>.sh`): define `_profile_<name>()` to set up tmux window/pane layouts. Bundled: `dev`, `chat`. Built-in: `ds` (plain tmux, used as default). Trivial single-command profiles can instead be declared as data rows (`<name> <window> <command...>`) in `profile*.conf`; `_load_data_profiles` synthesizes `_profile_<name>` wrappers around `_profile_run_command` before the `.sh` source loop, so a `.sh` of the same name overrides a data row.
 - **Connect methods** (`connect-<method>.sh`): define `_connect_<method>()` for remote transport. `ssh` is built-in. Bundled: `autossh`.
 - **Share backends** (`share-<backend>.sh`): define `_share_start`, `_share_stop`, `_share_info`, `_share_running`, `_share_current_session`, `_share_load_config`. Bundled: `upterm`.
 

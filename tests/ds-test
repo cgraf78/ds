@@ -308,6 +308,77 @@ _assert_eq "myproject → PROFILE=ds" "ds" "$PROFILE"
 _assert_eq "myproject SESSION preserved" "myproject" "$SESSION"
 
 # ---------------------------------------------------------------------------
+# Tests: Data profiles (profile*.conf)
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== Data profiles ==="
+
+cat >"$CONF_DIR/profile.conf" <<'CONF'
+# name    window   command
+argus     argus    argus
+claude    claude   claude
+notes     notes    nvim ~/notes
+bare      bare
+b@d       x        y
+CONF
+_load_data_profiles 2>/dev/null
+
+result=$(_profiles)
+_assert_contains "data profile: argus discovered" "argus" "$result"
+_assert_contains "data profile: claude discovered" "claude" "$result"
+_assert_contains "data profile: notes discovered" "notes" "$result"
+
+if declare -f "_profile_b@d" &>/dev/null; then
+  _fail "data profile: unsafe name rejected"
+else
+  _pass "data profile: unsafe name rejected"
+fi
+
+# Data profiles flow through normal resolution, including instance splitting.
+SESSION="argus" PROFILE=""
+_resolve_profile
+_assert_eq "data profile: argus resolves" "argus" "$PROFILE"
+SESSION="argus-foo" PROFILE=""
+_resolve_profile
+_assert_eq "data profile: argus-foo → PROFILE=argus" "argus" "$PROFILE"
+_assert_eq "data profile: argus-foo SESSION preserved" "argus-foo" "$SESSION"
+
+# Running a data profile renames window 1 and sends the command.
+_reset_tmux_log
+_profile_argus "ds"
+log=$(_tmux_log)
+_assert_contains "data profile: renames window" "rename-window -t ds:1 argus" "$log"
+_assert_contains "data profile: sends command" "send-keys -t ds:1 argus C-m" "$log"
+
+# Multi-word commands survive as the trailing remainder of the row.
+_reset_tmux_log
+_profile_notes "ds"
+log=$(_tmux_log)
+_assert_contains "data profile: multi-word command preserved" \
+  "send-keys -t ds:1 nvim ~/notes C-m" "$log"
+
+# A row with no command renames but sends nothing.
+_reset_tmux_log
+_profile_bare "ds"
+log=$(_tmux_log)
+_assert_contains "data profile: window-only renames" "rename-window -t ds:1 bare" "$log"
+_assert_not_contains "data profile: window-only sends nothing" "send-keys" "$log"
+
+# bin/ds synthesizes .conf wrappers before sourcing .sh profiles, so a custom
+# profile-<name>.sh always overrides a data row. Model that order here.
+cat >"$CONF_DIR/profile-argus.sh" <<'PROFILE'
+_profile_argus() { tmux send-keys -t "$1:1" "argus_from_sh" C-m; }
+PROFILE
+# shellcheck source=/dev/null
+. "$CONF_DIR/profile-argus.sh"
+_reset_tmux_log
+_profile_argus "ds"
+log=$(_tmux_log)
+_assert_contains "data profile: later .sh definition overrides .conf" "argus_from_sh" "$log"
+rm -f "$CONF_DIR/profile.conf" "$CONF_DIR/profile-argus.sh"
+
+# ---------------------------------------------------------------------------
 # Tests: Session target resolution
 # ---------------------------------------------------------------------------
 
