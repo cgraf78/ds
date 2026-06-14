@@ -165,6 +165,42 @@ _profile_ds() {
   : # default tmux window is already what we want
 }
 
+# Run a trivial single-command profile: rename window 1 and send one command.
+# Data profiles (profile*.conf rows) are realized as _profile_<name> wrappers
+# around this, so they flow through the normal profile pipeline unchanged.
+_profile_run_command() {
+  local session="$1" window="$2" command="$3"
+  [[ -n "$window" ]] && tmux rename-window -t "$session:1" "$window"
+  [[ -n "$command" ]] && tmux send-keys -t "$session:1" "$command" C-m
+  # Never propagate the falsy result of an empty-command guard: a profile that
+  # only renames the window must still report success to set -e callers.
+  return 0
+}
+
+# Synthesize _profile_<name> wrappers from profile*.conf rows so trivial
+# single-command profiles can be declared as data instead of one near-identical
+# profile-<name>.sh per profile. Each row is "name window command...", where
+# command is the rest of the line (may contain spaces). Runs before the .sh
+# source loop below, so a custom .sh layout of the same name overrides a data
+# row. eval is required to define a dynamically-named function; the name is
+# validated as an identifier and the row's values are %q-quoted, so row content
+# cannot inject code.
+_load_data_profiles() {
+  local file name window command
+  while IFS= read -r file; do
+    [[ -n "$file" ]] || continue
+    while read -r name window command; do
+      [[ -z "$name" || "$name" == \#* ]] && continue
+      if [[ ! "$name" =~ ^[A-Za-z0-9_]+$ ]]; then
+        printf 'ds: ignoring invalid profile name %q in %s\n' "$name" "$file" >&2
+        continue
+      fi
+      eval "_profile_${name}() { _profile_run_command \"\$1\" $(printf %q "$window") $(printf %q "$command"); }"
+    done <"$file"
+  done < <(_glob_plugins 'profile*.conf')
+}
+_load_data_profiles
+
 while IFS= read -r _profile_file; do
   [[ -n "$_profile_file" ]] || continue
   # shellcheck source=/dev/null
@@ -542,6 +578,13 @@ _ds() {
         pname="${f##*/profile-}"; pname="${pname%.sh}"
         profiles+=" $pname"
     done
+    for f in "${HOME}/.config/ds/profile"*.conf; do
+        [[ -f "$f" ]] || continue
+        while read -r pname _rest; do
+            [[ -z "$pname" || "$pname" == \#* ]] && continue
+            profiles+=" $pname"
+        done < "$f"
+    done
 
     local sessions=""
     sessions=$(ds -l 2>/dev/null | while IFS=: read -r name _rest; do
@@ -647,6 +690,13 @@ _ds() {
         [[ -f "$f" ]] || continue
         pname="${f##*/profile-}"
         profiles+=("${pname%.sh}")
+    done
+    for f in "$conf_dir"/profile*.conf; do
+        [[ -f "$f" ]] || continue
+        while read -r pname _rest; do
+            [[ -z "$pname" || "$pname" == \#* ]] && continue
+            profiles+=("$pname")
+        done < "$f"
     done
 
     sessions=(${(f)"$(ds -l 2>/dev/null | while IFS=: read -r name _rest; do

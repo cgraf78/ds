@@ -76,6 +76,26 @@ _profile_myprofile() {
 }
 ```
 
+### Single-command profiles (data)
+
+A profile that only renames window 1 and runs one command does not need its own
+`.sh` file. Declare such profiles as rows in `~/.config/ds/profile*.conf`
+instead:
+
+```text
+# name     window   command
+argus      argus    argus
+claude     claude   claude
+notes      notes    nvim ~/notes
+```
+
+Each row is `<name> <window> <command...>`; the command is the rest of the line
+and may contain spaces (omit it for a rename-only profile). Rows become regular
+profiles, so they resolve, list, and accept instances (`argus-foo`) like any
+other. A `profile-<name>.sh` of the same name always overrides a row, so use a
+`.sh` file when a profile needs a real multi-window/pane layout. See
+[`examples/profile.conf`](examples/profile.conf).
+
 ### Bundled profiles
 
 **dev** — chatbot pane (top) + login shell (bottom) + separate login shell
