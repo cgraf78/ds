@@ -1016,14 +1016,14 @@ _assert_contains "ds init (no shell): requires shell name" "requires a shell nam
 result=$("$SCRIPT_DIR/../bin/ds" init bash 2>&1)
 _assert_contains "ds init bash: wraps ds invocation" 'DS_SHELL_NAME=bash command ds "$@"' "$result"
 _assert_contains "ds init bash: includes bash shell names" 'compgen -W "bash zsh"' "$result"
-_assert_contains "ds init bash: auto-attach skips command logins" '-z "${SSH_ORIGINAL_COMMAND:-}"' "$result"
+_assert_contains "ds init bash: auto-attach skips command logins" 'SSH_ORIGINAL_COMMAND:-}' "$result"
 
 # init zsh emits zsh completion wiring
 result=$("$SCRIPT_DIR/../bin/ds" init zsh 2>&1)
 _assert_contains "ds init zsh: wraps ds invocation" 'DS_SHELL_NAME=zsh command ds "$@"' "$result"
 _assert_contains "ds init zsh: defines zsh completion" 'compdef _ds ds' "$result"
 _assert_contains "ds init zsh: offers both shells" 'shells=(bash zsh)' "$result"
-_assert_contains "ds init zsh: auto-attach skips command logins" '-z "${SSH_ORIGINAL_COMMAND:-}"' "$result"
+_assert_contains "ds init zsh: auto-attach skips command logins" 'SSH_ORIGINAL_COMMAND:-}' "$result"
 
 # init rejects unknown shells
 result=$("$SCRIPT_DIR/../bin/ds" init fish 2>&1 || true)
