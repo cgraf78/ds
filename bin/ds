@@ -19,8 +19,8 @@
 #              DS_SSH_AUTO_ATTACH=ds      → auto-attach to default "ds" session
 #              DS_SSH_AUTO_ATTACH=dev     → auto-attach to "dev" session
 #              NO_TMUX=1                  → skip for one login
-#              (also skipped automatically when SSH_ORIGINAL_COMMAND is set,
-#               i.e. the login runs a command/tunnel rather than a plain shell)
+#              (also requires a real terminal: a login with no controlling tty,
+#               e.g. a tunnel/command session, is skipped even when interactive)
 
 # Resolve bundled plugin directory (follows symlinks to find real install location)
 _ds_self="$0"
@@ -535,12 +535,13 @@ unset _ds_f _ds_args
 [[ -f "$HOME/.cache/ds/autoattach-debug" ]] && printf '%s SOC=[%s] CONN=[%s] CLIENT=[%s] TTY=[%s] TERM=[%s] flags=[%s]\n' "$(date '+%F %T')" "${SSH_ORIGINAL_COMMAND:-}" "${SSH_CONNECTION:-}" "${SSH_CLIENT:-}" "${SSH_TTY:-}" "${TERM:-}" "$-" >>"$HOME/.cache/ds/autoattach-debug" 2>/dev/null
 
 # Auto-attach on SSH login (opt-in via DS_SSH_AUTO_ATTACH, skip with NO_TMUX=1).
-# Also skipped when SSH_ORIGINAL_COMMAND is set: a login that runs a command
-# (e.g. a port-forward keepalive) should not be hijacked by ds.
+# Also requires a real terminal (SSH_TTY): a login with no controlling tty —
+# e.g. an ET/command session holding a port-forward keepalive — is "interactive"
+# but has no pty, and should not be hijacked by ds. A human ssh login gets a pty.
 # DS_SSH_AUTO_ATTACH=ds      → attach to default "ds" session
 # DS_SSH_AUTO_ATTACH=dev     → attach to "dev" session
 # NO_TMUX=1                  → skip auto-attach for this login
-if [[ -n "${DS_SSH_AUTO_ATTACH:-}" && -z "$TMUX" && $- == *i* && -n "$SSH_CONNECTION" && -z "$NO_TMUX" && -z "${SSH_ORIGINAL_COMMAND:-}" ]] && command -v tmux &>/dev/null; then
+if [[ -n "${DS_SSH_AUTO_ATTACH:-}" && -z "$TMUX" && $- == *i* && -n "$SSH_CONNECTION" && -z "$NO_TMUX" && -n "${SSH_TTY:-}" ]] && command -v tmux &>/dev/null; then
 INIT_EOF
       echo "    DS_SHELL_NAME=$shell exec ds \"\$DS_SSH_AUTO_ATTACH\""
       cat <<'INIT_EOF'
@@ -633,12 +634,13 @@ unset _ds_f _ds_args
 [[ -f "$HOME/.cache/ds/autoattach-debug" ]] && printf '%s SOC=[%s] CONN=[%s] CLIENT=[%s] TTY=[%s] TERM=[%s] flags=[%s]\n' "$(date '+%F %T')" "${SSH_ORIGINAL_COMMAND:-}" "${SSH_CONNECTION:-}" "${SSH_CLIENT:-}" "${SSH_TTY:-}" "${TERM:-}" "$-" >>"$HOME/.cache/ds/autoattach-debug" 2>/dev/null
 
 # Auto-attach on SSH login (opt-in via DS_SSH_AUTO_ATTACH, skip with NO_TMUX=1).
-# Also skipped when SSH_ORIGINAL_COMMAND is set: a login that runs a command
-# (e.g. a port-forward keepalive) should not be hijacked by ds.
+# Also requires a real terminal (SSH_TTY): a login with no controlling tty —
+# e.g. an ET/command session holding a port-forward keepalive — is "interactive"
+# but has no pty, and should not be hijacked by ds. A human ssh login gets a pty.
 # DS_SSH_AUTO_ATTACH=ds      → attach to default "ds" session
 # DS_SSH_AUTO_ATTACH=dev     → attach to "dev" session
 # NO_TMUX=1                  → skip auto-attach for this login
-if [[ -n "${DS_SSH_AUTO_ATTACH:-}" && -z "$TMUX" && -o interactive && -n "$SSH_CONNECTION" && -z "$NO_TMUX" && -z "${SSH_ORIGINAL_COMMAND:-}" ]] && command -v tmux >/dev/null 2>&1; then
+if [[ -n "${DS_SSH_AUTO_ATTACH:-}" && -z "$TMUX" && -o interactive && -n "$SSH_CONNECTION" && -z "$NO_TMUX" && -n "${SSH_TTY:-}" ]] && command -v tmux >/dev/null 2>&1; then
 INIT_EOF
       echo "    DS_SHELL_NAME=$shell exec ds \"\$DS_SSH_AUTO_ATTACH\""
       cat <<'INIT_EOF'
