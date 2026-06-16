@@ -529,11 +529,6 @@ INIT_EOF
 fi
 unset _ds_f _ds_args
 
-# Diagnostic (temporary): when the marker file exists, record the SSH/login
-# context each time auto-attach is considered, so a command/tunnel session's
-# environment can be inspected. Remove once the tunnel signal is confirmed.
-[[ -f "$HOME/.cache/ds/autoattach-debug" ]] && printf '%s SOC=[%s] CONN=[%s] CLIENT=[%s] TTY=[%s] TERM=[%s] flags=[%s]\n' "$(date '+%F %T')" "${SSH_ORIGINAL_COMMAND:-}" "${SSH_CONNECTION:-}" "${SSH_CLIENT:-}" "${SSH_TTY:-}" "${TERM:-}" "$-" >>"$HOME/.cache/ds/autoattach-debug" 2>/dev/null
-
 # Auto-attach on SSH login (opt-in via DS_SSH_AUTO_ATTACH, skip with NO_TMUX=1).
 # Also requires a real terminal (SSH_TTY): a login with no controlling tty —
 # e.g. an ET/command session holding a port-forward keepalive — is "interactive"
@@ -627,11 +622,6 @@ INIT_EOF
       cat <<'INIT_EOF'
 fi
 unset _ds_f _ds_args
-
-# Diagnostic (temporary): when the marker file exists, record the SSH/login
-# context each time auto-attach is considered, so a command/tunnel session's
-# environment can be inspected. Remove once the tunnel signal is confirmed.
-[[ -f "$HOME/.cache/ds/autoattach-debug" ]] && printf '%s SOC=[%s] CONN=[%s] CLIENT=[%s] TTY=[%s] TERM=[%s] flags=[%s]\n' "$(date '+%F %T')" "${SSH_ORIGINAL_COMMAND:-}" "${SSH_CONNECTION:-}" "${SSH_CLIENT:-}" "${SSH_TTY:-}" "${TERM:-}" "$-" >>"$HOME/.cache/ds/autoattach-debug" 2>/dev/null
 
 # Auto-attach on SSH login (opt-in via DS_SSH_AUTO_ATTACH, skip with NO_TMUX=1).
 # Also requires a real terminal (SSH_TTY): a login with no controlling tty —
