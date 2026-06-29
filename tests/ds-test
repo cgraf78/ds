@@ -159,9 +159,87 @@ _tmux_log() {
 }
 
 # ---------------------------------------------------------------------------
+# Tests: Discovery contracts
+# ---------------------------------------------------------------------------
+
+echo "=== Discovery contracts ==="
+
+_contract_root=$(_tmpdir)
+_contract_conf="$_contract_root/conf"
+_contract_lib="$_contract_root/lib"
+mkdir -p "$_contract_conf" "$_contract_lib"
+touch \
+  "$_contract_conf/connect.conf" \
+  "$_contract_conf/profile.conf" \
+  "$_contract_conf/profile-dev.sh" \
+  "$_contract_conf/share-upterm.sh" \
+  "$_contract_lib/connect.conf" \
+  "$_contract_lib/profile-dev.sh" \
+  "$_contract_lib/profile-lib.sh" \
+  "$_contract_lib/profile-extra.conf" \
+  "$_contract_lib/share-upterm.sh" \
+  "$_contract_lib/share-local.sh"
+
+_saved_conf_dir="$CONF_DIR"
+_saved_lib_dir="${DS_LIB_DIR:-}"
+CONF_DIR="$_contract_conf"
+DS_LIB_DIR="$_contract_lib"
+
+_contract_connect=$(_connect_config_files | sed "s|$_contract_root|ROOT|g" | paste -sd '|' -)
+_contract_profile_scripts=$(_profile_script_files | sed "s|$_contract_root|ROOT|g" | paste -sd '|' -)
+_contract_profile_configs=$(_profile_config_files | sed "s|$_contract_root|ROOT|g" | paste -sd '|' -)
+_contract_share_backends=$(_share_backend_files | sed "s|$_contract_root|ROOT|g" | paste -sd '|' -)
+
+cat >"$_contract_conf/connect.conf" <<'EOF'
+shared-user ssh
+EOF
+cat >"$_contract_lib/connect.conf" <<'EOF'
+shared-lib et
+EOF
+_reset_lookup_contract() {
+  CONNECT="ssh"
+}
+_reset_lookup_contract
+lookup_host "shared-lib"
+_contract_lib_connect="$CONNECT"
+_reset_lookup_contract
+lookup_host "shared-user"
+_contract_user_connect="$CONNECT"
+
+CONF_DIR="$_saved_conf_dir"
+DS_LIB_DIR="$_saved_lib_dir"
+unset _saved_conf_dir _saved_lib_dir
+
+_assert_eq "connect configs are additive across user and bundled dirs" \
+  "ROOT/conf/connect.conf|ROOT/lib/connect.conf" "$_contract_connect"
+_assert_eq "profile scripts let user config override bundled files by basename" \
+  "ROOT/conf/profile-dev.sh|ROOT/lib/profile-lib.sh" "$_contract_profile_scripts"
+_assert_eq "profile data configs use the shared profile*.conf contract" \
+  "ROOT/conf/profile.conf|ROOT/lib/profile-extra.conf" "$_contract_profile_configs"
+_assert_eq "share backends let user config override bundled files by basename" \
+  "ROOT/conf/share-upterm.sh|ROOT/lib/share-local.sh" "$_contract_share_backends"
+_assert_eq "lookup_host reads bundled connect configs with matching basenames" "et" "$_contract_lib_connect"
+_assert_eq "lookup_host keeps user connect configs first" "ssh" "$_contract_user_connect"
+
+_saved_conf_dir="$CONF_DIR"
+_saved_lib_dir="${DS_LIB_DIR:-}"
+_empty_contract_root=$(_tmpdir)
+CONF_DIR="$_empty_contract_root/conf"
+DS_LIB_DIR="$_empty_contract_root/lib"
+mkdir -p "$CONF_DIR" "$DS_LIB_DIR"
+_empty_profile_scripts=$(_profile_script_files)
+_empty_profile_scripts_rc=$?
+_assert_eq "plugin discovery emits no blank record when empty" "" "$_empty_profile_scripts"
+_assert_eq "plugin discovery treats empty results as success" "0" "$_empty_profile_scripts_rc"
+CONF_DIR="$_saved_conf_dir"
+DS_LIB_DIR="$_saved_lib_dir"
+unset _saved_conf_dir _saved_lib_dir
+
+# ---------------------------------------------------------------------------
 # Tests: Host config lookup
 # ---------------------------------------------------------------------------
 
+echo ""
 echo "=== Host config lookup ==="
 
 cat >"$CONF_DIR/connect.conf" <<'EOF'
