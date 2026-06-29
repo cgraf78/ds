@@ -47,6 +47,11 @@ DS_STATE_DIR="${DS_STATE_DIR:-$HOME/.local/state/ds}"
 FORWARDS=()
 R_FORWARDS=()
 
+_DS_CONNECT_CONFIG_GLOB='connect*.conf'
+_DS_PROFILE_CONFIG_GLOB='profile*.conf'
+_DS_PROFILE_SCRIPT_GLOB='profile-*.sh'
+_DS_SHARE_BACKEND_GLOB='share-*.sh'
+
 _usage() {
   echo "Usage: ds [session] [@host]          create or attach to a session"
   echo "       ds -l [@host]                 list active ds sessions"
@@ -142,23 +147,52 @@ _find_plugin() {
 _glob_plugins() {
   local pattern="$1"
   local -A seen
+  local -a files=()
   local f base
   for f in "$CONF_DIR"/$pattern; do
     [[ -f "$f" ]] || continue
     base="${f##*/}"
-    seen["$base"]="$f"
+    seen["$base"]=1
+    files+=("$f")
   done
   if [[ -n "${DS_LIB_DIR:-}" ]]; then
     for f in "$DS_LIB_DIR"/$pattern; do
       [[ -f "$f" ]] || continue
       base="${f##*/}"
       [[ -n "${seen[$base]:-}" ]] && continue
-      seen["$base"]="$f"
+      seen["$base"]=1
+      files+=("$f")
     done
   fi
-  for f in "${seen[@]+"${seen[@]}"}"; do
-    echo "$f"
+  ((${#files[@]} == 0)) && return 0
+  printf '%s\n' "${files[@]}"
+}
+
+# Host configs are additive, unlike plugins: a user's connect.conf should not
+# hide a bundled connect.conf with the same basename. Lookup order still favors
+# user config first so local host aliases can win before bundled defaults.
+_connect_config_files() {
+  local f
+  for f in "$CONF_DIR"/$_DS_CONNECT_CONFIG_GLOB; do
+    [[ -f "$f" ]] && printf '%s\n' "$f"
   done
+  if [[ -n "${DS_LIB_DIR:-}" ]]; then
+    for f in "$DS_LIB_DIR"/$_DS_CONNECT_CONFIG_GLOB; do
+      [[ -f "$f" ]] && printf '%s\n' "$f"
+    done
+  fi
+}
+
+_profile_config_files() {
+  _glob_plugins "$_DS_PROFILE_CONFIG_GLOB"
+}
+
+_profile_script_files() {
+  _glob_plugins "$_DS_PROFILE_SCRIPT_GLOB"
+}
+
+_share_backend_files() {
+  _glob_plugins "$_DS_SHARE_BACKEND_GLOB"
 }
 
 # --- Profile layouts ---
@@ -199,7 +233,7 @@ _load_data_profiles() {
       fi
       eval "_profile_${name}() { _profile_run_command \"\$1\" $(printf %q "$window") $(printf %q "$command"); }"
     done <"$file"
-  done < <(_glob_plugins 'profile*.conf')
+  done < <(_profile_config_files)
 }
 _load_data_profiles
 
@@ -207,7 +241,7 @@ while IFS= read -r _profile_file; do
   [[ -n "$_profile_file" ]] || continue
   # shellcheck source=/dev/null
   . "$_profile_file"
-done < <(_glob_plugins 'profile-*.sh')
+done < <(_profile_script_files)
 unset _profile_file
 
 # List valid profile names (derived from discovered _profile_* functions).
@@ -223,18 +257,9 @@ _profiles() {
 # Hostnames support glob patterns (e.g., server* matches server1, server2).
 lookup_host() {
   local target="$1"
-  local -a conf_files=()
   local f
-  for f in "$CONF_DIR"/connect*.conf; do
-    [[ -f "$f" ]] && conf_files+=("$f")
-  done
-  if [[ -n "${DS_LIB_DIR:-}" ]]; then
-    for f in "$DS_LIB_DIR"/connect*.conf; do
-      [[ -f "$f" ]] && conf_files+=("$f")
-    done
-  fi
-  [[ ${#conf_files[@]} -gt 0 ]] || return 1
-  for f in "${conf_files[@]}"; do
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
     while read -r name connect; do
       [[ -z "$name" || "$name" == \#* ]] && continue
       # shellcheck disable=SC2053  # intentional glob matching
@@ -243,7 +268,7 @@ lookup_host() {
         return 0
       fi
     done <"$f"
-  done
+  done < <(_connect_config_files)
   return 1
 }
 
@@ -923,7 +948,7 @@ elif [[ "$ACTION" == "share" || "$ACTION" == "unshare" || "$ACTION" == "list" ||
     fi
     # Reset stubs if this backend isn't active
     _share_reset_stubs
-  done < <(_glob_plugins 'share-*.sh')
+  done < <(_share_backend_files)
   unset _sb _sbn
 fi
 
@@ -1004,7 +1029,7 @@ case "$ACTION" in
         _sbn="${_sb##*/share-}"
         _sbn="${_sbn%.sh}"
         _backends+=("$_sbn")
-      done < <(_glob_plugins 'share-*.sh')
+      done < <(_share_backend_files)
       if [[ ${#_backends[@]} -eq 1 ]]; then
         DS_SHARE_VIA="${_backends[0]}"
         _load_share_backend "$DS_SHARE_VIA"
