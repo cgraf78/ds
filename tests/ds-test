@@ -9,6 +9,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REAL_ZSH=$(command -v zsh || true)
 
 # shellcheck source=test-helpers.sh
 . "$SCRIPT_DIR/test-helpers.sh"
@@ -1133,11 +1134,11 @@ _assert_contains "ds init zsh: script profile completion uses shared profile glo
   "for f in \"\$conf_dir\"/\$profile_script_glob; do" "$result"
 _assert_contains "ds init zsh: data profile completion uses shared profile config glob" \
   "for f in \"\$conf_dir\"/\$profile_config_glob; do" "$result"
-if command -v zsh >/dev/null 2>&1; then
+if [[ -n "$REAL_ZSH" ]]; then
   zsh_init_file=$(_tmpdir)/ds-init.zsh
   printf '%s\n' "$result" >"$zsh_init_file"
   set +e
-  zsh -n "$zsh_init_file" >/dev/null 2>&1
+  "$REAL_ZSH" -n "$zsh_init_file" >/dev/null 2>&1
   rc=$?
   set -e
   _assert_exit "ds init zsh: generated snippet parses" 0 "$rc"
