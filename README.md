@@ -19,8 +19,10 @@ git clone https://github.com/cgraf78/ds.git
 cd ds && bash install.sh
 ```
 
-The installer also installs the `ds(1)` manual page. Set `DS_INSTALL_DIR`,
-`DS_LIB_DIR`, or `DS_MAN_DIR` to choose non-default destinations.
+The installer also installs the `ds(1)` manual page. By default, bundled
+plugins are installed next to the binary's runtime lookup path
+(`../lib/plugins` from `DS_INSTALL_DIR`). Set `DS_INSTALL_DIR`, `DS_LIB_DIR`,
+or `DS_MAN_DIR` to choose non-default destinations.
 
 ## Usage
 

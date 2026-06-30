@@ -1550,6 +1550,20 @@ _assert_file_exists "installer: installs ds binary" "$_inst_root/bin/ds"
 _assert_file_exists "installer: installs plugin" "$_inst_root/plugins/mock-plugin.sh"
 _assert_file_exists "installer: installs manpage" "$_inst_root/man/man1/ds.1"
 
+_source_inst_root=$(_tmpdir)
+_source_inst_output=$(
+  cd "$SCRIPT_DIR/.."
+  DS_INSTALL_DIR="$_source_inst_root/bin" \
+    DS_MAN_DIR="$_source_inst_root/man/man1" \
+    bash install.sh 2>&1
+)
+_assert_contains "installer: default plugin dir follows installed binary lookup" \
+  "Installed plugins to $_source_inst_root/lib/plugins/" "$_source_inst_output"
+_assert_file_exists "installer: default plugin path receives bundled profile" \
+  "$_source_inst_root/lib/plugins/profile-dev.sh"
+_assert_file_exists "installer: source install includes manpage by default" \
+  "$_source_inst_root/man/man1/ds.1"
+
 # Restore connect.conf
 cat >"$CONF_DIR/connect.conf" <<'EOF'
 # hostname    connect

@@ -101,7 +101,11 @@ binary when running
 .IR install.sh .
 .TP
 .B DS_LIB_DIR
-Directory for bundled plugin installation and discovery.
+Directory for bundled plugin installation and runtime discovery. The installer
+default is
+.IR ../lib/plugins
+relative to
+.BR DS_INSTALL_DIR .
 .TP
 .B DS_MAN_DIR
 Destination for installed manual pages. Defaults to
