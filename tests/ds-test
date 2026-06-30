@@ -1558,11 +1558,54 @@ _source_inst_output=$(
     bash install.sh 2>&1
 )
 _assert_contains "installer: default plugin dir follows installed binary lookup" \
-  "Installed plugins to $_source_inst_root/lib/plugins/" "$_source_inst_output"
+  "Installed plugins to $_source_inst_root/lib/ds/plugins/" "$_source_inst_output"
 _assert_file_exists "installer: default plugin path receives bundled profile" \
-  "$_source_inst_root/lib/plugins/profile-dev.sh"
+  "$_source_inst_root/lib/ds/plugins/profile-dev.sh"
 _assert_file_exists "installer: source install includes manpage by default" \
   "$_source_inst_root/man/man1/ds.1"
+
+_custom_inst_root=$(_tmpdir)
+_custom_inst_output=$(
+  cd "$SCRIPT_DIR/.."
+  DS_INSTALL_DIR="$_custom_inst_root/bin" \
+    DS_LIB_DIR="$_custom_inst_root/plugins" \
+    DS_MAN_DIR="$_custom_inst_root/man/man1" \
+    bash install.sh 2>&1
+)
+_assert_contains "installer: custom plugin dir is reported" \
+  "Installed plugins to $_custom_inst_root/plugins/" "$_custom_inst_output"
+_assert_file_exists "installer: custom plugin path receives bundled profile" \
+  "$_custom_inst_root/plugins/profile-dev.sh"
+
+_runtime_home=$(_tmpdir)
+_runtime_mock_bin=$(_tmpdir)
+_runtime_tmux_log="$(_tmpdir)/tmux.log"
+mkdir -p "$_runtime_home/.config/ds"
+cat >"$_runtime_mock_bin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf 'tmux %s\n' "$*" >>"$DS_TEST_TMUX_LOG"
+case "${1:-}" in
+  has-session)
+    exit 1
+    ;;
+esac
+exit 0
+SH
+chmod +x "$_runtime_mock_bin/tmux"
+
+# A split install only works if the runtime honors DS_LIB_DIR too. Use a clean
+# HOME so the dev profile can only come from the custom bundled plugin path.
+HOME="$_runtime_home" \
+  PATH="$_runtime_mock_bin:$PATH" \
+  DS_LIB_DIR="$_custom_inst_root/plugins" \
+  DS_STATE_DIR="$_runtime_home/.local/state/ds" \
+  DS_SHELL_NAME="bash" \
+  DS_SOURCED="" \
+  DS_TEST_TMUX_LOG="$_runtime_tmux_log" \
+  "$_custom_inst_root/bin/ds" dev --no-attach
+_runtime_tmux_calls=$(cat "$_runtime_tmux_log")
+_assert_contains "installed ds: custom DS_LIB_DIR loads bundled dev profile" \
+  "split-window" "$_runtime_tmux_calls"
 
 # Restore connect.conf
 cat >"$CONF_DIR/connect.conf" <<'EOF'

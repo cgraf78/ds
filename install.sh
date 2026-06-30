@@ -16,9 +16,10 @@ INSTALL_PARENT="$(dirname "$INSTALL_DIR")"
 mkdir -p "$INSTALL_PARENT"
 INSTALL_PREFIX="$(cd "$INSTALL_PARENT" && pwd)"
 # The installed binary follows its own symlink and discovers bundled plugins at
-# ../lib/plugins. Keep the installer default aligned with that runtime lookup so
-# a normal install works without exporting DS_LIB_DIR in every shell.
-LIB_DIR="${DS_LIB_DIR:-$INSTALL_PREFIX/lib/plugins}"
+# ../lib/ds/plugins. Keep the installer default aligned with that namespaced
+# runtime lookup so a normal install works without exporting DS_LIB_DIR in every
+# shell and does not claim a generic plugin directory.
+LIB_DIR="${DS_LIB_DIR:-$INSTALL_PREFIX/lib/ds/plugins}"
 MAN_DIR="${DS_MAN_DIR:-$HOME/.local/share/man/man1}"
 
 # If not in a source tree, clone the current repo snapshot.
