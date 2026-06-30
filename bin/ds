@@ -728,7 +728,7 @@ INIT_EOF
     fi
 
     if [[ "$cur" == @* ]]; then
-        for f in "$conf_dir"/$connect_config_glob; do
+        for f in "$conf_dir"/${~connect_config_glob}(N); do
             [[ -f "$f" ]] || continue
             while read -r name _conn; do
                 [[ -z "$name" || "$name" == '#'* ]] && continue
@@ -740,12 +740,12 @@ INIT_EOF
         return
     fi
 
-    for f in "$conf_dir"/$profile_script_glob; do
+    for f in "$conf_dir"/${~profile_script_glob}(N); do
         [[ -f "$f" ]] || continue
         pname="${f##*/profile-}"
         profiles+=("${pname%.sh}")
     done
-    for f in "$conf_dir"/$profile_config_glob; do
+    for f in "$conf_dir"/${~profile_config_glob}(N); do
         [[ -f "$f" ]] || continue
         while read -r pname _rest; do
             [[ -z "$pname" || "$pname" == \#* ]] && continue

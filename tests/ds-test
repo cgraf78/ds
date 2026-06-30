@@ -1129,11 +1129,11 @@ _assert_contains "ds init zsh: emits shared profile config glob" \
 _assert_contains "ds init zsh: emits shared profile script glob" \
   "local profile_script_glob=$(_shell_literal "$_DS_PROFILE_SCRIPT_GLOB")" "$result"
 _assert_contains "ds init zsh: host completion uses shared connect glob" \
-  "for f in \"\$conf_dir\"/\$connect_config_glob; do" "$result"
+  "for f in \"\$conf_dir\"/\${~connect_config_glob}(N); do" "$result"
 _assert_contains "ds init zsh: script profile completion uses shared profile glob" \
-  "for f in \"\$conf_dir\"/\$profile_script_glob; do" "$result"
+  "for f in \"\$conf_dir\"/\${~profile_script_glob}(N); do" "$result"
 _assert_contains "ds init zsh: data profile completion uses shared profile config glob" \
-  "for f in \"\$conf_dir\"/\$profile_config_glob; do" "$result"
+  "for f in \"\$conf_dir\"/\${~profile_config_glob}(N); do" "$result"
 if [[ -n "$REAL_ZSH" ]]; then
   zsh_init_file=$(_tmpdir)/ds-init.zsh
   printf '%s\n' "$result" >"$zsh_init_file"
@@ -1142,6 +1142,48 @@ if [[ -n "$REAL_ZSH" ]]; then
   rc=$?
   set -e
   _assert_exit "ds init zsh: generated snippet parses" 0 "$rc"
+
+  zsh_completion_home=$(_tmpdir)
+  mkdir -p "$zsh_completion_home/.config/ds"
+  cat >"$zsh_completion_home/.config/ds/connect.conf" <<'EOF'
+workhost ssh workhost.example
+dev* ssh wildcard.example
+EOF
+  cat >"$zsh_completion_home/.config/ds/profile-dev.sh" <<'EOF'
+_profile_dev() { :; }
+EOF
+  cat >"$zsh_completion_home/.config/ds/profile.conf" <<'EOF'
+data echo data
+EOF
+  # The inner program is zsh source code; its `$1`, `$@`, and `${...}` forms
+  # must be expanded by zsh after Bash passes the generated init file path.
+  # shellcheck disable=SC2016
+  zsh_completion_output=$(
+    HOME="$zsh_completion_home" PATH="$MOCK_BIN:$PATH" "$REAL_ZSH" -fc '
+      source "$1"
+      compadd() {
+        while [[ "${1:-}" == "--" ]]; do
+          shift
+        done
+        print -r -- "$@"
+      }
+      words=(ds @)
+      CURRENT=2
+      _ds
+      print -r -- --
+      words=(ds "")
+      CURRENT=2
+      _ds
+    ' zsh "$zsh_init_file"
+  )
+  _assert_contains "ds init zsh: dynamic host completion expands glob variables" \
+    "@workhost" "$zsh_completion_output"
+  _assert_not_contains "ds init zsh: wildcard host patterns are not completed" \
+    "@dev*" "$zsh_completion_output"
+  _assert_contains "ds init zsh: dynamic script profile completion expands glob variables" \
+    "dev" "$zsh_completion_output"
+  _assert_contains "ds init zsh: dynamic data profile completion expands glob variables" \
+    "data" "$zsh_completion_output"
 else
   echo "  SKIP: zsh not installed"
 fi
