@@ -36,12 +36,15 @@ if [[ -z "${DS_LIB_DIR:-}" ]]; then
   # Installed copies use the namespaced lib/ds/plugins path. Source checkouts
   # keep plugin sources in lib/plugins, so fall back there for direct repo
   # execution and tests without weakening the installed default.
-  DS_LIB_DIR="$(
-    cd "$(dirname "$_ds_self")/../lib/ds/plugins" 2>/dev/null && pwd ||
-      cd "$(dirname "$_ds_self")/../lib/plugins" 2>/dev/null && pwd ||
-      true
-  )"
-  unset _ds_self
+  _ds_lib_dir=""
+  if _ds_lib_dir="$(cd "$(dirname "$_ds_self")/../lib/ds/plugins" 2>/dev/null && pwd)"; then
+    DS_LIB_DIR="$_ds_lib_dir"
+  elif _ds_lib_dir="$(cd "$(dirname "$_ds_self")/../lib/plugins" 2>/dev/null && pwd)"; then
+    DS_LIB_DIR="$_ds_lib_dir"
+  else
+    DS_LIB_DIR=""
+  fi
+  unset _ds_self _ds_lib_dir
 fi
 CONF_DIR="${HOME}/.config/ds"
 ACTION="session"
