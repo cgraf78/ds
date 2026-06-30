@@ -1607,6 +1607,38 @@ _runtime_tmux_calls=$(cat "$_runtime_tmux_log")
 _assert_contains "installed ds: custom DS_LIB_DIR loads bundled dev profile" \
   "split-window" "$_runtime_tmux_calls"
 
+_source_link_root=$(_tmpdir)
+_source_link_home=$(_tmpdir)
+_source_link_mock_bin=$(_tmpdir)
+_source_link_tmux_log="$(_tmpdir)/tmux.log"
+mkdir -p "$_source_link_root/bin" "$_source_link_home/.config/ds"
+ln -s "$SCRIPT_DIR/../bin/ds" "$_source_link_root/bin/ds"
+cat >"$_source_link_mock_bin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf 'tmux %s\n' "$*" >>"$DS_TEST_TMUX_LOG"
+case "${1:-}" in
+  has-session)
+    exit 1
+    ;;
+esac
+exit 0
+SH
+chmod +x "$_source_link_mock_bin/tmux"
+
+# shdeps repo installs expose ds as a symlink into the checkout, not through
+# install.sh. With DS_LIB_DIR unset, that path must still find repo lib/plugins.
+HOME="$_source_link_home" \
+  PATH="$_source_link_mock_bin:$PATH" \
+  DS_LIB_DIR="" \
+  DS_STATE_DIR="$_source_link_home/.local/state/ds" \
+  DS_SHELL_NAME="bash" \
+  DS_SOURCED="" \
+  DS_TEST_TMUX_LOG="$_source_link_tmux_log" \
+  "$_source_link_root/bin/ds" dev --no-attach
+_source_link_tmux_calls=$(cat "$_source_link_tmux_log")
+_assert_contains "symlinked checkout ds: repo lib/plugins loads bundled dev profile" \
+  "split-window" "$_source_link_tmux_calls"
+
 # Restore connect.conf
 cat >"$CONF_DIR/connect.conf" <<'EOF'
 # hostname    connect
