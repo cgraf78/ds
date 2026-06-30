@@ -195,6 +195,21 @@ _share_backend_files() {
   _glob_plugins "$_DS_SHARE_BACKEND_GLOB"
 }
 
+_shell_literal() {
+  printf '%q' "$1"
+}
+
+_emit_completion_glob_contract() {
+  local indent="${1:-}"
+
+  # Completion snippets run in the user's shell, but their file discovery
+  # contract belongs to ds itself. Emit the runtime constants here so changing
+  # plugin/config naming conventions does not leave completions behind.
+  printf '%slocal connect_config_glob=%s\n' "$indent" "$(_shell_literal "$_DS_CONNECT_CONFIG_GLOB")"
+  printf '%slocal profile_config_glob=%s\n' "$indent" "$(_shell_literal "$_DS_PROFILE_CONFIG_GLOB")"
+  printf '%slocal profile_script_glob=%s\n' "$indent" "$(_shell_literal "$_DS_PROFILE_SCRIPT_GLOB")"
+}
+
 # --- Profile layouts ---
 
 _profile_ds() {
@@ -573,6 +588,9 @@ _ds() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
     COMPREPLY=()
 
+INIT_EOF
+      _emit_completion_glob_contract "    "
+      cat <<'INIT_EOF'
     case "$prev" in
         init)
             COMPREPLY=($(compgen -W "bash zsh" -- "$cur"))
@@ -590,7 +608,7 @@ _ds() {
 
     if [[ "$cur" == @* ]]; then
         local conf_dir="${HOME}/.config/ds" hosts="" name _conn f
-        for f in "$conf_dir"/connect*.conf; do
+        for f in "$conf_dir"/$connect_config_glob; do
             [[ -f "$f" ]] || continue
             while read -r name _conn; do
                 [[ -z "$name" || "$name" == '#'* ]] && continue
@@ -603,12 +621,12 @@ _ds() {
     fi
 
     local profiles="" f pname
-    for f in "${HOME}/.config/ds/profile-"*.sh; do
+    for f in "${HOME}/.config/ds"/$profile_script_glob; do
         [[ -f "$f" ]] || continue
         pname="${f##*/profile-}"; pname="${pname%.sh}"
         profiles+=" $pname"
     done
-    for f in "${HOME}/.config/ds/profile"*.conf; do
+    for f in "${HOME}/.config/ds"/$profile_config_glob; do
         [[ -f "$f" ]] || continue
         while read -r pname _rest; do
             [[ -z "$pname" || "$pname" == \#* ]] && continue
@@ -668,6 +686,9 @@ _ds() {
     local conf_dir="${HOME}/.config/ds"
     local f name _conn pname
 
+INIT_EOF
+      _emit_completion_glob_contract "    "
+      cat <<'INIT_EOF'
     shells=(bash zsh)
     options=(
         --list
@@ -707,7 +728,7 @@ _ds() {
     fi
 
     if [[ "$cur" == @* ]]; then
-        for f in "$conf_dir"/connect*.conf; do
+        for f in "$conf_dir"/${~connect_config_glob}(N); do
             [[ -f "$f" ]] || continue
             while read -r name _conn; do
                 [[ -z "$name" || "$name" == '#'* ]] && continue
@@ -719,12 +740,12 @@ _ds() {
         return
     fi
 
-    for f in "$conf_dir"/profile-*.sh; do
+    for f in "$conf_dir"/${~profile_script_glob}(N); do
         [[ -f "$f" ]] || continue
         pname="${f##*/profile-}"
         profiles+=("${pname%.sh}")
     done
-    for f in "$conf_dir"/profile*.conf; do
+    for f in "$conf_dir"/${~profile_config_glob}(N); do
         [[ -f "$f" ]] || continue
         while read -r pname _rest; do
             [[ -z "$pname" || "$pname" == \#* ]] && continue
