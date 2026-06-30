@@ -1107,6 +1107,13 @@ _assert_contains "ds init bash: script profile completion uses shared profile gl
   "for f in \"\${HOME}/.config/ds\"/\$profile_script_glob; do" "$result"
 _assert_contains "ds init bash: data profile completion uses shared profile config glob" \
   "for f in \"\${HOME}/.config/ds\"/\$profile_config_glob; do" "$result"
+bash_init_file=$(_tmpdir)/ds-init.bash
+printf '%s\n' "$result" >"$bash_init_file"
+set +e
+bash -n "$bash_init_file" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "ds init bash: generated snippet parses" 0 "$rc"
 
 # init zsh emits zsh completion wiring
 result=$("$SCRIPT_DIR/../bin/ds" init zsh 2>&1)
@@ -1126,6 +1133,17 @@ _assert_contains "ds init zsh: script profile completion uses shared profile glo
   "for f in \"\$conf_dir\"/\$profile_script_glob; do" "$result"
 _assert_contains "ds init zsh: data profile completion uses shared profile config glob" \
   "for f in \"\$conf_dir\"/\$profile_config_glob; do" "$result"
+if command -v zsh >/dev/null 2>&1; then
+  zsh_init_file=$(_tmpdir)/ds-init.zsh
+  printf '%s\n' "$result" >"$zsh_init_file"
+  set +e
+  zsh -n "$zsh_init_file" >/dev/null 2>&1
+  rc=$?
+  set -e
+  _assert_exit "ds init zsh: generated snippet parses" 0 "$rc"
+else
+  echo "  SKIP: zsh not installed"
+fi
 
 # init rejects unknown shells
 result=$("$SCRIPT_DIR/../bin/ds" init fish 2>&1 || true)
