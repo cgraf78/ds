@@ -1494,13 +1494,14 @@ echo ""
 echo "=== Installer ==="
 
 _inst_repo=$(_tmpdir)
-mkdir -p "$_inst_repo/bin" "$_inst_repo/lib/plugins"
+mkdir -p "$_inst_repo/bin" "$_inst_repo/lib/plugins" "$_inst_repo/man/man1"
 cat >"$_inst_repo/bin/ds" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "mock ds"
 SH
 chmod +x "$_inst_repo/bin/ds"
 printf '%s\n' "# mock plugin" >"$_inst_repo/lib/plugins/mock-plugin.sh"
+printf '%s\n' ".TH DS 1" >"$_inst_repo/man/man1/ds.1"
 
 _inst_mock_bin=$(_tmpdir)
 _inst_git_log="$(_tmpdir)/git.log"
@@ -1536,6 +1537,7 @@ _inst_output=$(
     DS_TEST_REPO="$_inst_repo" \
     DS_INSTALL_DIR="$_inst_root/bin" \
     DS_LIB_DIR="$_inst_root/plugins" \
+    DS_MAN_DIR="$_inst_root/man/man1" \
     bash "$SCRIPT_DIR/../install.sh" 2>&1
 )
 _inst_git_calls=$(cat "$_inst_git_log")
@@ -1546,6 +1548,96 @@ _assert_contains "installer: falls back to SSH clone" \
 _assert_contains "installer: reports resolved commit" "resolved commit abc1234" "$_inst_output"
 _assert_file_exists "installer: installs ds binary" "$_inst_root/bin/ds"
 _assert_file_exists "installer: installs plugin" "$_inst_root/plugins/mock-plugin.sh"
+_assert_file_exists "installer: installs manpage" "$_inst_root/man/man1/ds.1"
+
+_source_inst_root=$(_tmpdir)
+_source_inst_output=$(
+  cd "$SCRIPT_DIR/.."
+  DS_INSTALL_DIR="$_source_inst_root/bin" \
+    DS_MAN_DIR="$_source_inst_root/man/man1" \
+    bash install.sh 2>&1
+)
+_assert_contains "installer: default plugin dir follows installed binary lookup" \
+  "Installed plugins to $_source_inst_root/lib/ds/plugins/" "$_source_inst_output"
+_assert_file_exists "installer: default plugin path receives bundled profile" \
+  "$_source_inst_root/lib/ds/plugins/profile-dev.sh"
+_assert_file_exists "installer: source install includes manpage by default" \
+  "$_source_inst_root/man/man1/ds.1"
+
+_custom_inst_root=$(_tmpdir)
+_custom_inst_output=$(
+  cd "$SCRIPT_DIR/.."
+  DS_INSTALL_DIR="$_custom_inst_root/bin" \
+    DS_LIB_DIR="$_custom_inst_root/plugins" \
+    DS_MAN_DIR="$_custom_inst_root/man/man1" \
+    bash install.sh 2>&1
+)
+_assert_contains "installer: custom plugin dir is reported" \
+  "Installed plugins to $_custom_inst_root/plugins/" "$_custom_inst_output"
+_assert_file_exists "installer: custom plugin path receives bundled profile" \
+  "$_custom_inst_root/plugins/profile-dev.sh"
+
+_runtime_home=$(_tmpdir)
+_runtime_mock_bin=$(_tmpdir)
+_runtime_tmux_log="$(_tmpdir)/tmux.log"
+mkdir -p "$_runtime_home/.config/ds"
+cat >"$_runtime_mock_bin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf 'tmux %s\n' "$*" >>"$DS_TEST_TMUX_LOG"
+case "${1:-}" in
+  has-session)
+    exit 1
+    ;;
+esac
+exit 0
+SH
+chmod +x "$_runtime_mock_bin/tmux"
+
+# A split install only works if the runtime honors DS_LIB_DIR too. Use a clean
+# HOME so the dev profile can only come from the custom bundled plugin path.
+HOME="$_runtime_home" \
+  PATH="$_runtime_mock_bin:$PATH" \
+  DS_LIB_DIR="$_custom_inst_root/plugins" \
+  DS_STATE_DIR="$_runtime_home/.local/state/ds" \
+  DS_SHELL_NAME="bash" \
+  DS_SOURCED="" \
+  DS_TEST_TMUX_LOG="$_runtime_tmux_log" \
+  "$_custom_inst_root/bin/ds" dev --no-attach
+_runtime_tmux_calls=$(cat "$_runtime_tmux_log")
+_assert_contains "installed ds: custom DS_LIB_DIR loads bundled dev profile" \
+  "split-window" "$_runtime_tmux_calls"
+
+_source_link_root=$(_tmpdir)
+_source_link_home=$(_tmpdir)
+_source_link_mock_bin=$(_tmpdir)
+_source_link_tmux_log="$(_tmpdir)/tmux.log"
+mkdir -p "$_source_link_root/bin" "$_source_link_home/.config/ds"
+ln -s "$SCRIPT_DIR/../bin/ds" "$_source_link_root/bin/ds"
+cat >"$_source_link_mock_bin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf 'tmux %s\n' "$*" >>"$DS_TEST_TMUX_LOG"
+case "${1:-}" in
+  has-session)
+    exit 1
+    ;;
+esac
+exit 0
+SH
+chmod +x "$_source_link_mock_bin/tmux"
+
+# shdeps repo installs expose ds as a symlink into the checkout, not through
+# install.sh. With DS_LIB_DIR unset, that path must still find repo lib/plugins.
+HOME="$_source_link_home" \
+  PATH="$_source_link_mock_bin:$PATH" \
+  DS_LIB_DIR="" \
+  DS_STATE_DIR="$_source_link_home/.local/state/ds" \
+  DS_SHELL_NAME="bash" \
+  DS_SOURCED="" \
+  DS_TEST_TMUX_LOG="$_source_link_tmux_log" \
+  "$_source_link_root/bin/ds" dev --no-attach
+_source_link_tmux_calls=$(cat "$_source_link_tmux_log")
+_assert_contains "symlinked checkout ds: repo lib/plugins loads bundled dev profile" \
+  "split-window" "$_source_link_tmux_calls"
 
 # Restore connect.conf
 cat >"$CONF_DIR/connect.conf" <<'EOF'
