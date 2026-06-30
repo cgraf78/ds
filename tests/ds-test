@@ -1095,6 +1095,18 @@ result=$("$SCRIPT_DIR/../bin/ds" init bash 2>&1)
 _assert_contains "ds init bash: wraps ds invocation" 'DS_SHELL_NAME=bash command ds "$@"' "$result"
 _assert_contains "ds init bash: includes bash shell names" 'compgen -W "bash zsh"' "$result"
 _assert_contains "ds init bash: auto-attach requires a real terminal" 'SSH_TTY:-}' "$result"
+_assert_contains "ds init bash: emits shared connect config glob" \
+  "local connect_config_glob=$(_shell_literal "$_DS_CONNECT_CONFIG_GLOB")" "$result"
+_assert_contains "ds init bash: emits shared profile config glob" \
+  "local profile_config_glob=$(_shell_literal "$_DS_PROFILE_CONFIG_GLOB")" "$result"
+_assert_contains "ds init bash: emits shared profile script glob" \
+  "local profile_script_glob=$(_shell_literal "$_DS_PROFILE_SCRIPT_GLOB")" "$result"
+_assert_contains "ds init bash: host completion uses shared connect glob" \
+  "for f in \"\$conf_dir\"/\$connect_config_glob; do" "$result"
+_assert_contains "ds init bash: script profile completion uses shared profile glob" \
+  "for f in \"\${HOME}/.config/ds\"/\$profile_script_glob; do" "$result"
+_assert_contains "ds init bash: data profile completion uses shared profile config glob" \
+  "for f in \"\${HOME}/.config/ds\"/\$profile_config_glob; do" "$result"
 
 # init zsh emits zsh completion wiring
 result=$("$SCRIPT_DIR/../bin/ds" init zsh 2>&1)
@@ -1102,6 +1114,18 @@ _assert_contains "ds init zsh: wraps ds invocation" 'DS_SHELL_NAME=zsh command d
 _assert_contains "ds init zsh: defines zsh completion" 'compdef _ds ds' "$result"
 _assert_contains "ds init zsh: offers both shells" 'shells=(bash zsh)' "$result"
 _assert_contains "ds init zsh: auto-attach requires a real terminal" 'SSH_TTY:-}' "$result"
+_assert_contains "ds init zsh: emits shared connect config glob" \
+  "local connect_config_glob=$(_shell_literal "$_DS_CONNECT_CONFIG_GLOB")" "$result"
+_assert_contains "ds init zsh: emits shared profile config glob" \
+  "local profile_config_glob=$(_shell_literal "$_DS_PROFILE_CONFIG_GLOB")" "$result"
+_assert_contains "ds init zsh: emits shared profile script glob" \
+  "local profile_script_glob=$(_shell_literal "$_DS_PROFILE_SCRIPT_GLOB")" "$result"
+_assert_contains "ds init zsh: host completion uses shared connect glob" \
+  "for f in \"\$conf_dir\"/\$connect_config_glob; do" "$result"
+_assert_contains "ds init zsh: script profile completion uses shared profile glob" \
+  "for f in \"\$conf_dir\"/\$profile_script_glob; do" "$result"
+_assert_contains "ds init zsh: data profile completion uses shared profile config glob" \
+  "for f in \"\$conf_dir\"/\$profile_config_glob; do" "$result"
 
 # init rejects unknown shells
 result=$("$SCRIPT_DIR/../bin/ds" init fish 2>&1 || true)
