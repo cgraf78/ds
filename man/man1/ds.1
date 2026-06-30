@@ -1,0 +1,118 @@
+.TH DS 1 "2026-06-30" "ds" "User Commands"
+.SH NAME
+ds \- create and manage local or remote tmux dev sessions
+.SH SYNOPSIS
+.B ds
+.RI [ session ]
+.RI [ @host ]
+.br
+.B ds
+.B -l
+.RI [ @host ]
+.br
+.B ds
+.B -k
+.RI [ session ]
+.RI [ @host ]
+.br
+.B ds
+.B --killall
+.RI [ @host ]
+.br
+.B ds
+.B --share
+.RI [ session ]
+.br
+.B ds
+.B --unshare
+.RI [ session ]
+.br
+.B ds
+.B init
+.RI < bash | zsh >
+.SH DESCRIPTION
+.B ds
+creates tmux development sessions locally or on remote hosts. A session name
+selects a profile; a suffix after the first dash is treated as an instance tag
+when the prefix matches a known profile.
+.PP
+Profiles, connection methods, and share backends are plugin-based. Bundled
+plugins live with the installation, and user overrides live under
+.IR ~/.config/ds .
+.SH OPTIONS
+.TP
+.BR -l ", " --list
+List active ds-managed sessions.
+.TP
+.BR -k ", " --kill
+Kill the named session, or the current session when run inside tmux without a
+name.
+.TP
+.B --killall
+Kill all ds-managed sessions.
+.TP
+.BI -c ", --connect " method
+Override the connection method selected for a remote host.
+.TP
+.BI -L ", --forward " local:remote
+Add an SSH local port forward for a remote session.
+.TP
+.BI -R ", --reverse " remote:local
+Add an SSH reverse port forward for a remote session.
+.TP
+.B --share
+Share the named or current session.
+.TP
+.B --unshare
+Stop sharing the named or current session.
+.TP
+.BI --share-via " backend"
+Create or attach to the session and share it through the selected backend.
+.TP
+.B --no-attach
+Create or update the session without attaching.
+.TP
+.BR -h ", " --help
+Show usage.
+.SH CONFIGURATION
+.TP
+.I ~/.config/ds/profile-<name>.sh
+User profile scripts. A profile script defines
+.BI _profile_ name ()
+and receives the session name.
+.TP
+.I ~/.config/ds/profile*.conf
+Data-only profile rows for single-command profiles.
+.TP
+.I ~/.config/ds/connect*.conf
+Host-to-connection-method rules. Files are additive and read in order.
+.TP
+.I ~/.config/ds/connect-<method>.sh
+User connection method plugins.
+.TP
+.I ~/.config/ds/share-<backend>.sh
+User share backend plugins.
+.SH ENVIRONMENT
+.TP
+.B DS_INSTALL_DIR
+Destination for the installed
+.B ds
+binary when running
+.IR install.sh .
+.TP
+.B DS_LIB_DIR
+Directory for bundled plugin installation and discovery.
+.TP
+.B DS_MAN_DIR
+Destination for installed manual pages. Defaults to
+.IR ~/.local/share/man/man1 .
+.SH EXIT STATUS
+.TP
+.B 0
+The requested session operation succeeded.
+.TP
+.B 1
+The requested session operation failed.
+.TP
+.B 2
+Usage error.

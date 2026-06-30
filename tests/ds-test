@@ -1494,13 +1494,14 @@ echo ""
 echo "=== Installer ==="
 
 _inst_repo=$(_tmpdir)
-mkdir -p "$_inst_repo/bin" "$_inst_repo/lib/plugins"
+mkdir -p "$_inst_repo/bin" "$_inst_repo/lib/plugins" "$_inst_repo/man/man1"
 cat >"$_inst_repo/bin/ds" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "mock ds"
 SH
 chmod +x "$_inst_repo/bin/ds"
 printf '%s\n' "# mock plugin" >"$_inst_repo/lib/plugins/mock-plugin.sh"
+printf '%s\n' ".TH DS 1" >"$_inst_repo/man/man1/ds.1"
 
 _inst_mock_bin=$(_tmpdir)
 _inst_git_log="$(_tmpdir)/git.log"
@@ -1536,6 +1537,7 @@ _inst_output=$(
     DS_TEST_REPO="$_inst_repo" \
     DS_INSTALL_DIR="$_inst_root/bin" \
     DS_LIB_DIR="$_inst_root/plugins" \
+    DS_MAN_DIR="$_inst_root/man/man1" \
     bash "$SCRIPT_DIR/../install.sh" 2>&1
 )
 _inst_git_calls=$(cat "$_inst_git_log")
@@ -1546,6 +1548,7 @@ _assert_contains "installer: falls back to SSH clone" \
 _assert_contains "installer: reports resolved commit" "resolved commit abc1234" "$_inst_output"
 _assert_file_exists "installer: installs ds binary" "$_inst_root/bin/ds"
 _assert_file_exists "installer: installs plugin" "$_inst_root/plugins/mock-plugin.sh"
+_assert_file_exists "installer: installs manpage" "$_inst_root/man/man1/ds.1"
 
 # Restore connect.conf
 cat >"$CONF_DIR/connect.conf" <<'EOF'
