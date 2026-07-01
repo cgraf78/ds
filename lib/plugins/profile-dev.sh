@@ -9,7 +9,8 @@ _profile_dev() {
 
   shell_name="$(_shell_name)"
 
-  tmux send-keys -t "$session:1" "cd '$dir'" C-m
+  # %q-quote so a dir with spaces/quotes/specials produces a valid `cd`.
+  tmux send-keys -t "$session:1" "cd $(printf '%q' "$dir")" C-m
   if [[ -n "$chatbot" ]]; then
     tmux rename-window -t "$session:1" "$chatbot"
     tmux send-keys -t "$session:1" "$chatbot" C-m

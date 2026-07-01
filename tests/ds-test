@@ -458,6 +458,34 @@ _assert_contains "data profile: later .sh definition overrides .conf" "argus_fro
 rm -f "$CONF_DIR/profile.conf" "$CONF_DIR/profile-argus.sh"
 
 # ---------------------------------------------------------------------------
+# Tests: bundled dev/chat profiles quote the cd target
+# ---------------------------------------------------------------------------
+# Regression: `cd '$dir'` produced an unbalanced command when DS_DEV_DIR /
+# DS_CHAT_DIR contained an apostrophe (or other shell specials). The keystroke
+# must be %q-quoted so it always forms a valid `cd`.
+# shellcheck source=../lib/plugins/profile-dev.sh
+. "$SCRIPT_DIR/../lib/plugins/profile-dev.sh"
+# shellcheck source=../lib/plugins/profile-chat.sh
+. "$SCRIPT_DIR/../lib/plugins/profile-chat.sh"
+
+_tricky_dir="/tmp/it's a dir"
+_expected_cd="cd $(printf '%q' "$_tricky_dir")"
+
+_reset_tmux_log
+DS_DEV_DIR="$_tricky_dir" DS_DEV_CHATBOT="" _profile_dev "ds"
+log=$(_tmux_log)
+_assert_contains "profile dev: cd target is shell-quoted" "$_expected_cd" "$log"
+_assert_not_contains "profile dev: no unbalanced single-quote cd" \
+  "cd '$_tricky_dir'" "$log"
+
+_reset_tmux_log
+DS_CHAT_DIR="$_tricky_dir" DS_CHAT_CHATBOT="" _profile_chat "ds"
+log=$(_tmux_log)
+_assert_contains "profile chat: cd target is shell-quoted" "$_expected_cd" "$log"
+_assert_not_contains "profile chat: no unbalanced single-quote cd" \
+  "cd '$_tricky_dir'" "$log"
+
+# ---------------------------------------------------------------------------
 # Tests: Session target resolution
 # ---------------------------------------------------------------------------
 
