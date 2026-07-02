@@ -65,6 +65,8 @@ _DS_CONNECT_CONFIG_GLOB='connect*.conf'
 _DS_PROFILE_CONFIG_GLOB='profile*.conf'
 _DS_PROFILE_SCRIPT_GLOB='profile-*.sh'
 _DS_SHARE_BACKEND_GLOB='share-*.sh'
+_DS_HOST_LABEL_FORMAT='#{?@hostname_alias,#{@hostname_alias},#{host_short}}'
+_DS_HOST_LABEL_SEPARATOR=':'
 
 _usage() {
   echo "Usage: ds [session] [@host]          create or attach to a session"
@@ -378,6 +380,111 @@ _attach() {
   fi
 }
 
+_status_left_with_host() {
+  local status_left="$1"
+
+  if [[ -z "$status_left" ]]; then
+    printf '[ %s%s#S ] ' "$_DS_HOST_LABEL_FORMAT" "$_DS_HOST_LABEL_SEPARATOR"
+    return
+  fi
+
+  if _status_left_has_session "$status_left" && _status_left_has_host "$status_left"; then
+    printf '%s' "$status_left"
+  elif [[ "$status_left" == *'#{session_name}'* ]]; then
+    printf '%s' "${status_left//'#{session_name}'/"$_DS_HOST_LABEL_FORMAT$_DS_HOST_LABEL_SEPARATOR#{session_name}"}"
+  elif [[ "$status_left" == *'#S'* ]]; then
+    printf '%s' "${status_left//'#S'/"$_DS_HOST_LABEL_FORMAT$_DS_HOST_LABEL_SEPARATOR#S"}"
+  else
+    printf '[ %s%s#S ] %s' "$_DS_HOST_LABEL_FORMAT" "$_DS_HOST_LABEL_SEPARATOR" "$status_left"
+  fi
+}
+
+_status_left_has_session() {
+  case "$1" in
+    *'#{session_name}'* | *'#S'*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+_status_left_has_host() {
+  case "$1" in
+    *"$_DS_HOST_LABEL_FORMAT"* | \
+      *'#{?@hostname_alias,#{@hostname_alias},#{host_short}}'* | \
+      *'#{host_short}'* | \
+      *'#{host}'* | \
+      *'#H'*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+_remove_literal() {
+  local value="$1"
+  local needle="$2"
+  local result=""
+
+  # Tmux formats contain glob metacharacters, so Bash's pattern replacement
+  # cannot safely remove them as literals.
+  while [[ -n "$value" ]]; do
+    if [[ "$value" == "$needle"* ]]; then
+      value="${value:${#needle}}"
+    else
+      result+="${value:0:1}"
+      value="${value:1}"
+    fi
+  done
+  printf '%s' "$result"
+}
+
+_pane_border_without_host() {
+  local pane_border="$1"
+  local cleaned="$pane_border"
+  local alias_host_short='#{?@hostname_alias,#{@hostname_alias},#{host_short}}'
+  local alias_h='#{?@hostname_alias,#{@hostname_alias},#H}'
+  local host_short='#{host_short}'
+  local host='#{host}'
+
+  cleaned="$(_remove_literal "$cleaned" "$alias_host_short")"
+  cleaned="$(_remove_literal "$cleaned" "$alias_h")"
+  cleaned="$(_remove_literal "$cleaned" "$host_short")"
+  cleaned="$(_remove_literal "$cleaned" "$host")"
+  cleaned="$(_remove_literal "$cleaned" '#H')"
+  if [[ "$cleaned" != "$pane_border" ]]; then
+    while [[ "$cleaned" == *'  '* ]]; do
+      cleaned="${cleaned//'  '/' '}"
+    done
+  fi
+  printf '%s' "$cleaned"
+}
+
+_set_status_labels() {
+  local session="$1"
+  local pane_border pane_border_cleaned status_left
+
+  if ! _session_option_set "$session" status-left; then
+    status_left=$(tmux show-options -gqv status-left 2>/dev/null || true)
+    tmux set-option -t "$session" status-left "$(_status_left_with_host "$status_left")"
+  fi
+
+  if ! _session_option_set "$session" pane-border-format; then
+    pane_border=$(tmux show-options -gqv pane-border-format 2>/dev/null || true)
+    pane_border_cleaned="$(_pane_border_without_host "$pane_border")"
+    if [[ "$pane_border" != "$pane_border_cleaned" ]]; then
+      tmux set-option -t "$session" pane-border-format "$pane_border_cleaned"
+    fi
+  fi
+}
+
+_session_option_set() {
+  local session="$1"
+  local option="$2"
+
+  [[ -n "$(tmux show-options -t "$session" -q "$option" 2>/dev/null)" ]]
+}
+
 # --- Session resolution helpers ---
 
 # Resolve the current tmux session name, or error if not inside tmux.
@@ -532,6 +639,7 @@ _do_unshare() {
 _do_session() {
   # Attach if session already exists (= prefix for exact match)
   if tmux has-session -t "=$SESSION" 2>/dev/null; then
+    _set_status_labels "$SESSION"
     if [[ -n "${DS_SHARE_VIA:-}" ]]; then
       _share_start "$SESSION"
     fi
@@ -549,6 +657,7 @@ _do_session() {
   tmux set-environment -t "$SESSION" DS_MANAGED 1
   tmux set-environment -t "$SESSION" DS_SHELL_NAME "$shell_name"
   tmux set-option -t "$SESSION" default-command "$shell_cmd"
+  _set_status_labels "$SESSION"
   "_profile_$PROFILE" "$SESSION"
   if [[ -n "${DS_SHARE_VIA:-}" ]]; then
     _share_start "$SESSION"
