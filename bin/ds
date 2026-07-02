@@ -903,6 +903,8 @@ _remote() {
 
   # Build the remote ds command args.
   local args=()
+  local plugin_session="$SESSION"
+  local remote_session="$SESSION"
 
   case "$ACTION" in
     list)
@@ -915,10 +917,9 @@ _remote() {
       args+=("--killall")
       ;;
     session)
-      # Default "ds" session needs no positional arg on the remote side
-      if [[ "$SESSION" != "ds" ]]; then
-        args+=("$SESSION")
-      fi
+      remote_session="${SESSION:-ds}"
+      plugin_session="$remote_session"
+      args+=("$remote_session")
       [[ -n "${DS_SHARE_VIA:-}" ]] && args+=("--share-via" "$DS_SHARE_VIA")
       [[ "$DS_NO_ATTACH" == "1" ]] && args+=("--no-attach")
       ;;
@@ -971,7 +972,7 @@ _remote() {
       }
       # shellcheck source=/dev/null
       . "$plugin"
-      "_connect_${CONNECT}" "$HOST" "$remote_cmd" "$SESSION" "$ACTION" "${args[*]}"
+      "_connect_${CONNECT}" "$HOST" "$remote_cmd" "$plugin_session" "$ACTION" "${args[*]}"
       ;;
   esac
 }
