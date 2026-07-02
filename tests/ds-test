@@ -69,7 +69,25 @@ case "${args[0]:-}" in
         fi
         ;;
     ls)
-        echo "${MOCK_TMUX_LS:-}" | grep -v '^$' || true
+        # Render the requested -F format per session so callers that ask for
+        # combined fields (e.g. `_do_list`) get real name<TAB>info lines, while a
+        # bare `#{session_name}` format still yields plain names.
+        _ls_fmt=""
+        for ((_i = 0; _i < ${#args[@]}; _i++)); do
+            [[ "${args[_i]}" == "-F" ]] && _ls_fmt="${args[_i + 1]:-}"
+        done
+        if [[ -z "$_ls_fmt" ]]; then
+            echo "${MOCK_TMUX_LS:-}" | grep -v '^$' || true
+        else
+            while IFS= read -r _s; do
+                [[ -n "$_s" ]] || continue
+                _line="$_ls_fmt"
+                _line="${_line//'#{session_name}'/$_s}"
+                _line="${_line//'#{session_windows}'/3}"
+                _line="${_line//'#{?session_attached,attached,detached}'/detached}"
+                echo "$_line"
+            done < <(echo "${MOCK_TMUX_LS:-}" | grep -v '^$')
+        fi
         ;;
     set-environment)
         # Track DS_MANAGED sessions: set-environment -t <session> DS_MANAGED 1
@@ -946,6 +964,20 @@ export MOCK_TMUX_LS=""
 export MOCK_DS_MANAGED=""
 result=$(_do_list)
 _assert_contains "empty list shows message" "no active ds sessions" "$result"
+
+# Info column is read from the combined query (not a second per-session lookup).
+export MOCK_TMUX_LS="a
+b
+c
+d"
+export MOCK_DS_MANAGED=" a b c d"
+_reset_tmux_log
+result=$(_do_list)
+_assert_contains "list: info column populated" "a: 3 windows (detached)" "$result"
+# Perf regression: _do_list must call `tmux ls` exactly once regardless of the
+# number of sessions. The old code re-ran `tmux ls` per session (O(n^2)).
+_ls_count=$(_tmux_log | grep -c '^tmux ls')
+_assert_eq "list: single tmux ls call for 4 sessions" "1" "$_ls_count"
 
 # ---------------------------------------------------------------------------
 # Tests: Kill session
