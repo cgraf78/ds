@@ -1504,7 +1504,8 @@ remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
 _assert_contains "ssh remote: host" "SSH_HOST=server1" "$remote_log"
 # shellcheck disable=SC2088  # intentional — matching literal tilde in remote command
 _assert_contains "ssh remote: runs ds" "~/.local/bin/ds" "$remote_log"
-_assert_contains "ssh remote: passes session name" "dev" "$remote_log"
+# shellcheck disable=SC2088  # intentional — matching literal tilde in remote command
+_assert_contains "ssh remote: passes session name" "~/.local/bin/ds\\ dev" "$remote_log"
 _assert_contains "ssh remote: defaults to bash login shell" "DS_SHELL_NAME=bash bash -lc" "$remote_log"
 
 # Test remote prefers the invoking shell when available
@@ -1515,12 +1516,46 @@ _assert_contains "ssh remote: prefers invoking shell" "command -v zsh" "$remote_
 _assert_contains "ssh remote: passes zsh shell env" "DS_SHELL_NAME=zsh zsh -lc" "$remote_log"
 _assert_contains "ssh remote: retains bash fallback" "DS_SHELL_NAME=bash bash -lc" "$remote_log"
 
-# Test default session omits session name in remote args
+# Test default session is explicit in remote args, matching `ds ds @host`.
 result=$(_run_remote "HOST=server1 ACTION=session SESSION=ds \
     CONNECT_OVERRIDE=")
 remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
 # shellcheck disable=SC2088  # intentional — matching literal tilde in remote command
 _assert_contains "ssh remote default: runs ds" "~/.local/bin/ds" "$remote_log"
+# shellcheck disable=SC2088  # intentional — matching literal tilde in remote command
+_assert_contains "ssh remote default: passes ds session" "~/.local/bin/ds\\ ds" "$remote_log"
+
+# An omitted local session still means the default remote `ds` session.
+result=$(_run_remote "HOST=server1 ACTION=session CONNECT_OVERRIDE=")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+# shellcheck disable=SC2088  # intentional — matching literal tilde in remote command
+_assert_contains "ssh remote omitted session: passes ds session" "~/.local/bin/ds\\ ds" "$remote_log"
+
+# Connect plugins receive the same normalized default session for handoff.
+cat >"$CONF_DIR/connect-capture.sh" <<'EOF'
+_connect_capture() {
+  printf 'PLUGIN_HOST=%s\n' "$1" >"${REMOTE_LOG:-/dev/null}"
+  printf 'PLUGIN_CMD=%s\n' "$2" >>"${REMOTE_LOG:-/dev/null}"
+  printf 'PLUGIN_SESSION=%s\n' "$3" >>"${REMOTE_LOG:-/dev/null}"
+  printf 'PLUGIN_ACTION=%s\n' "$4" >>"${REMOTE_LOG:-/dev/null}"
+  printf 'PLUGIN_ARGS=%s\n' "$5" >>"${REMOTE_LOG:-/dev/null}"
+}
+EOF
+result=$(_run_remote "HOST=server1 ACTION=session CONNECT_OVERRIDE=capture")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "plugin remote omitted session: passes ds handoff" "PLUGIN_SESSION=ds" "$remote_log"
+# shellcheck disable=SC2088  # intentional — matching literal tilde in remote command
+_assert_contains "plugin remote omitted session: command passes ds" "~/.local/bin/ds\\ ds" "$remote_log"
+
+result=$(_run_remote "HOST=server1 ACTION=list CONNECT_OVERRIDE=capture")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "plugin remote list: keeps empty session handoff" "PLUGIN_SESSION=" "$remote_log"
+_assert_contains "plugin remote list: passes list args" "PLUGIN_ARGS=-l" "$remote_log"
+
+result=$(_run_remote "HOST=server1 ACTION=killall CONNECT_OVERRIDE=capture")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "plugin remote killall: keeps empty session handoff" "PLUGIN_SESSION=" "$remote_log"
+_assert_contains "plugin remote killall: passes killall args" "PLUGIN_ARGS=--killall" "$remote_log"
 
 # Test autossh connection method
 result=$(_run_remote "HOST=fileserver ACTION=session SESSION=ds \
