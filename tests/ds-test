@@ -117,6 +117,26 @@ case "${args[0]:-}" in
         echo "1 windows (detached)"
         exit 0
         ;;
+    list-windows)
+        while IFS= read -r _w; do
+            [[ -n "$_w" ]] || continue
+            echo "$_w"
+        done <<<"${MOCK_TMUX_WINDOWS:-%1}"
+        exit 0
+        ;;
+    show-window-options)
+        if [[ " ${args[*]} " == *" pane-border-format"* ]]; then
+            if [[ " ${args[*]} " == *" -v"* ]]; then
+                echo "${MOCK_TMUX_LOCAL_PANE_BORDER_FORMAT:-}"
+            elif [[ "${MOCK_TMUX_LOCAL_PANE_BORDER_FORMAT_SET:-0}" == "1" || -n "${MOCK_TMUX_LOCAL_PANE_BORDER_FORMAT:-}" ]]; then
+                echo "pane-border-format '${MOCK_TMUX_LOCAL_PANE_BORDER_FORMAT:-}'"
+            else
+                :
+            fi
+            exit 0
+        fi
+        exit 0
+        ;;
     show-options)
         if [[ " ${args[*]} " == *" status-left"* ]]; then
             if [[ " ${args[*]} " == *" -g"* ]]; then
@@ -145,7 +165,7 @@ case "${args[0]:-}" in
         fi
         exit 0
         ;;
-    new-session|attach|switch-client|kill-session|rename-window|split-window|new-window|select-window|send-keys)
+    new-session|attach|switch-client|kill-session|rename-window|split-window|new-window|select-window|send-keys|set-hook|set-window-option)
         exit 0
         ;;
 esac
@@ -898,6 +918,7 @@ echo "=== Session naming ==="
 _reset_tmux_log
 export MOCK_SESSIONS=""
 export MOCK_DS_MANAGED=""
+unset MOCK_TMUX_WINDOWS MOCK_TMUX_LOCAL_PANE_BORDER_FORMAT MOCK_TMUX_LOCAL_PANE_BORDER_FORMAT_SET
 SESSION="ds"
 PROFILE="ds"
 _do_session
@@ -906,8 +927,10 @@ _assert_contains "default → session 'ds'" "new-session -d -s ds" "$log"
 _assert_contains "tags session with DS_MANAGED" "set-environment -t ds DS_MANAGED 1" "$log"
 _assert_contains "display label includes host and session" \
   "set-option -t ds status-left [ $_DS_HOST_LABEL_FORMAT$_DS_HOST_LABEL_SEPARATOR#S ]" "$log"
-_assert_contains "pane title drops host prefix" \
-  "set-option -t ds pane-border-format  #{pane_current_command}" "$log"
+_assert_contains "pane title hook keeps future windows host-free" \
+  "set-hook -t ds $_DS_PANE_BORDER_HOOK set-window-option pane-border-format \" #{pane_current_command} \"" "$log"
+_assert_contains "pane title repairs initial window" \
+  "set-window-option -t %1 pane-border-format  #{pane_current_command}" "$log"
 _assert_not_contains "display label does not rename session" "rename-session" "$log"
 
 _reset_tmux_log
@@ -972,6 +995,8 @@ _assert_eq "pane border preserves style while dropping host" \
   "$(_pane_border_without_host '#[fg=blue] #{?@hostname_alias,#{@hostname_alias},#{host_short}}  #{pane_current_command} ')"
 _assert_eq "pane border keeps app-only format" \
   " #{pane_current_command} " "$(_pane_border_without_host ' #{pane_current_command} ')"
+_assert_eq "tmux command quoting preserves spaces and quotes" \
+  '" x \"y\" z "' "$(_tmux_command_quote ' x "y" z ')"
 
 # ---------------------------------------------------------------------------
 # Tests: Existing session attachment
@@ -986,15 +1011,28 @@ export MOCK_SESSIONS="ds"
 SESSION="ds"
 PROFILE="ds"
 unset TMUX 2>/dev/null || true
+unset MOCK_TMUX_WINDOWS MOCK_TMUX_LOCAL_PANE_BORDER_FORMAT MOCK_TMUX_LOCAL_PANE_BORDER_FORMAT_SET
 _do_session
 log=$(_tmux_log)
 _assert_contains "existing session: attaches" "attach -t =ds" "$log"
 _assert_not_contains "existing session: no new-session" "new-session" "$log"
 _assert_contains "existing session: refreshes display label" \
   "set-option -t ds status-left [ $_DS_HOST_LABEL_FORMAT$_DS_HOST_LABEL_SEPARATOR#S ]" "$log"
-_assert_contains "existing session: refreshes pane title" \
-  "set-option -t ds pane-border-format  #{pane_current_command}" "$log"
+_assert_contains "existing session: refreshes future pane titles" \
+  "set-hook -t ds $_DS_PANE_BORDER_HOOK set-window-option pane-border-format \" #{pane_current_command} \"" "$log"
+_assert_contains "existing session: refreshes current pane title" \
+  "set-window-option -t %1 pane-border-format  #{pane_current_command}" "$log"
 _assert_not_contains "existing session: display label does not rename session" "rename-session" "$log"
+
+_reset_tmux_log
+export MOCK_TMUX_WINDOWS=$'%1\n%2'
+_do_session
+log=$(_tmux_log)
+_assert_contains "existing session: refreshes first existing window" \
+  "set-window-option -t %1 pane-border-format  #{pane_current_command}" "$log"
+_assert_contains "existing session: refreshes second existing window" \
+  "set-window-option -t %2 pane-border-format  #{pane_current_command}" "$log"
+unset MOCK_TMUX_WINDOWS
 
 _reset_tmux_log
 export MOCK_TMUX_LOCAL_STATUS_LEFT="[ custom ] "
@@ -1003,8 +1041,10 @@ _do_session
 log=$(_tmux_log)
 _assert_not_contains "existing session: keeps local status-left override" \
   "set-option -t ds status-left" "$log"
-_assert_not_contains "existing session: keeps local pane-border override" \
-  "set-option -t ds pane-border-format" "$log"
+_assert_contains "existing session: still installs pane hook with local pane override" \
+  "set-hook -t ds $_DS_PANE_BORDER_HOOK" "$log"
+_assert_not_contains "existing session: keeps current local pane-border override" \
+  "set-window-option -t %1 pane-border-format" "$log"
 unset MOCK_TMUX_LOCAL_STATUS_LEFT MOCK_TMUX_LOCAL_PANE_BORDER_FORMAT
 
 _reset_tmux_log
@@ -1015,7 +1055,7 @@ log=$(_tmux_log)
 _assert_not_contains "existing session: keeps empty local status-left override" \
   "set-option -t ds status-left" "$log"
 _assert_not_contains "existing session: keeps empty local pane-border override" \
-  "set-option -t ds pane-border-format" "$log"
+  "set-window-option -t %1 pane-border-format" "$log"
 unset MOCK_TMUX_LOCAL_STATUS_LEFT_SET MOCK_TMUX_LOCAL_PANE_BORDER_FORMAT_SET
 
 # Inside tmux: switch-client instead of attach

@@ -67,6 +67,7 @@ _DS_PROFILE_SCRIPT_GLOB='profile-*.sh'
 _DS_SHARE_BACKEND_GLOB='share-*.sh'
 _DS_HOST_LABEL_FORMAT='#{?@hostname_alias,#{@hostname_alias},#{host_short}}'
 _DS_HOST_LABEL_SEPARATOR=':'
+_DS_PANE_BORDER_HOOK='after-new-window[99]'
 
 _usage() {
   echo "Usage: ds [session] [@host]          create or attach to a session"
@@ -460,21 +461,36 @@ _pane_border_without_host() {
   printf '%s' "$cleaned"
 }
 
+_tmux_command_quote() {
+  local value="$1"
+
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "$value"
+}
+
 _set_status_labels() {
   local session="$1"
-  local pane_border pane_border_cleaned status_left
+  local pane_border pane_border_cleaned status_left window window_border
 
   if ! _session_option_set "$session" status-left; then
     status_left=$(tmux show-options -gqv status-left 2>/dev/null || true)
     tmux set-option -t "$session" status-left "$(_status_left_with_host "$status_left")"
   fi
 
-  if ! _session_option_set "$session" pane-border-format; then
-    pane_border=$(tmux show-options -gqv pane-border-format 2>/dev/null || true)
-    pane_border_cleaned="$(_pane_border_without_host "$pane_border")"
-    if [[ "$pane_border" != "$pane_border_cleaned" ]]; then
-      tmux set-option -t "$session" pane-border-format "$pane_border_cleaned"
-    fi
+  pane_border=$(tmux show-options -gqv pane-border-format 2>/dev/null || true)
+  pane_border_cleaned="$(_pane_border_without_host "$pane_border")"
+  if [[ "$pane_border" != "$pane_border_cleaned" ]]; then
+    tmux set-hook -t "$session" "$_DS_PANE_BORDER_HOOK" \
+      "set-window-option pane-border-format $(_tmux_command_quote "$pane_border_cleaned")"
+    while IFS= read -r window; do
+      [[ -n "$window" ]] || continue
+      if _window_option_set "$window" pane-border-format; then
+        window_border=$(tmux show-window-options -v -t "$window" pane-border-format 2>/dev/null || true)
+        [[ "$(_pane_border_without_host "$window_border")" != "$window_border" ]] || continue
+      fi
+      tmux set-window-option -t "$window" pane-border-format "$pane_border_cleaned"
+    done < <(tmux list-windows -t "$session" -F '#{window_id}' 2>/dev/null || true)
   fi
 }
 
@@ -483,6 +499,13 @@ _session_option_set() {
   local option="$2"
 
   [[ -n "$(tmux show-options -t "$session" -q "$option" 2>/dev/null)" ]]
+}
+
+_window_option_set() {
+  local window="$1"
+  local option="$2"
+
+  [[ -n "$(tmux show-window-options -t "$window" "$option" 2>/dev/null)" ]]
 }
 
 # --- Session resolution helpers ---
