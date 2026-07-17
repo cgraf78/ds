@@ -920,6 +920,15 @@ INIT_EOF
 
 # --- Remote dispatch ---
 
+_remote_ds_command() {
+  local args_q
+  printf -v args_q '%q ' "$@"
+  # shellcheck disable=SC2016 # These variables expand in the remote login shell.
+  printf '%s' \
+    'remote_ds=$(command -v ds 2>/dev/null) && [ -x "$remote_ds" ] || { printf "%s\n" "ds: not found on remote PATH" >&2; exit 127; }; ' \
+    "exec \"\$remote_ds\" ${args_q}"
+}
+
 _remote() {
   lookup_host "$HOST"
   [[ -n "$CONNECT_OVERRIDE" ]] && CONNECT="$CONNECT_OVERRIDE"
@@ -952,8 +961,7 @@ _remote() {
   # when that shell is unavailable there.
   local remote_cmd shell remote_ds_cmd remote_ds_q
   shell="$(_shell_name)"
-  # shellcheck disable=SC2088  # intentional — remote shell expands ~
-  remote_ds_cmd="~/.local/bin/ds $(printf '%q ' "${args[@]}")"
+  remote_ds_cmd="$(_remote_ds_command "${args[@]}")"
   printf -v remote_ds_q '%q' "$remote_ds_cmd"
   if [[ "$shell" == "bash" ]]; then
     remote_cmd="NO_TMUX=1 DS_SHELL_NAME=bash bash -lc $remote_ds_q"
