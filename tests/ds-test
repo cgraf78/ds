@@ -1542,11 +1542,35 @@ result=$(_run_remote "HOST=server1 ACTION=session SESSION=dev \
     CONNECT_OVERRIDE=")
 remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
 _assert_contains "ssh remote: host" "SSH_HOST=server1" "$remote_log"
-# shellcheck disable=SC2088  # intentional — matching literal tilde in remote command
-_assert_contains "ssh remote: runs ds" "~/.local/bin/ds" "$remote_log"
-# shellcheck disable=SC2088  # intentional — matching literal tilde in remote command
-_assert_contains "ssh remote: passes session name" "~/.local/bin/ds\\ dev" "$remote_log"
+# shellcheck disable=SC2016 # The SSH mock records the %q-encoded command.
+_assert_contains "ssh remote: resolves ds through PATH" 'command\ -v\ ds' "$remote_log"
+# shellcheck disable=SC2016 # The assertion checks remote-shell source text.
+_assert_contains "ssh remote: runs resolved ds" 'exec\ \"\$remote_ds\"' "$remote_log"
+_assert_contains "ssh remote: passes session name" 'dev' "$remote_log"
 _assert_contains "ssh remote: defaults to bash login shell" "DS_SHELL_NAME=bash bash -lc" "$remote_log"
+
+# The generated payload must honor a non-default install directory and fail
+# clearly when the remote login PATH does not contain ds.
+custom_remote_bin=$(_tmpdir)
+custom_remote_log=$(_tmpdir)/remote-ds.log
+cat >"$custom_remote_bin/ds" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >"$CUSTOM_REMOTE_LOG"
+EOF
+chmod +x "$custom_remote_bin/ds"
+remote_ds_payload=$(_remote_ds_command 'dev work' --no-attach)
+CUSTOM_REMOTE_LOG="$custom_remote_log" PATH="$custom_remote_bin:/usr/bin:/bin" \
+  bash -c "$remote_ds_payload"
+_assert_eq "ssh remote payload: uses custom PATH install" \
+  "dev work --no-attach" "$(cat "$custom_remote_log")"
+
+set +e
+remote_missing_output=$(PATH="/usr/bin:/bin" bash -c "$remote_ds_payload" 2>&1)
+remote_missing_rc=$?
+set -e
+_assert_exit "ssh remote payload: missing ds exits 127" 127 "$remote_missing_rc"
+_assert_contains "ssh remote payload: missing ds is actionable" \
+  "ds: not found on remote PATH" "$remote_missing_output"
 
 # Test remote prefers the invoking shell when available
 result=$(_run_remote "HOST=server1 ACTION=session SESSION=dev \
@@ -1560,16 +1584,14 @@ _assert_contains "ssh remote: retains bash fallback" "DS_SHELL_NAME=bash bash -l
 result=$(_run_remote "HOST=server1 ACTION=session SESSION=ds \
     CONNECT_OVERRIDE=")
 remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
-# shellcheck disable=SC2088  # intentional — matching literal tilde in remote command
-_assert_contains "ssh remote default: runs ds" "~/.local/bin/ds" "$remote_log"
-# shellcheck disable=SC2088  # intentional — matching literal tilde in remote command
-_assert_contains "ssh remote default: passes ds session" "~/.local/bin/ds\\ ds" "$remote_log"
+# shellcheck disable=SC2016 # The assertion checks remote-shell source text.
+_assert_contains "ssh remote default: runs resolved ds" 'exec\ \"\$remote_ds\"' "$remote_log"
+_assert_contains "ssh remote default: passes ds session" 'ds' "$remote_log"
 
 # An omitted local session still means the default remote `ds` session.
 result=$(_run_remote "HOST=server1 ACTION=session CONNECT_OVERRIDE=")
 remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
-# shellcheck disable=SC2088  # intentional — matching literal tilde in remote command
-_assert_contains "ssh remote omitted session: passes ds session" "~/.local/bin/ds\\ ds" "$remote_log"
+_assert_contains "ssh remote omitted session: passes ds session" 'ds' "$remote_log"
 
 # Connect plugins receive the same normalized default session for handoff.
 cat >"$CONF_DIR/connect-capture.sh" <<'EOF'
@@ -1584,8 +1606,8 @@ EOF
 result=$(_run_remote "HOST=server1 ACTION=session CONNECT_OVERRIDE=capture")
 remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
 _assert_contains "plugin remote omitted session: passes ds handoff" "PLUGIN_SESSION=ds" "$remote_log"
-# shellcheck disable=SC2088  # intentional — matching literal tilde in remote command
-_assert_contains "plugin remote omitted session: command passes ds" "~/.local/bin/ds\\ ds" "$remote_log"
+# shellcheck disable=SC2016 # The plugin receives the %q-encoded command.
+_assert_contains "plugin remote omitted session: command resolves ds" 'command\ -v\ ds' "$remote_log"
 
 result=$(_run_remote "HOST=server1 ACTION=list CONNECT_OVERRIDE=capture")
 remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
