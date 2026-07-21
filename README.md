@@ -69,12 +69,15 @@ The profile is resolved from the session name: split on the first `-`, and if th
 
 ## Profiles
 
-Profiles define the tmux window/pane layout. Bundled profiles live in `lib/plugins/`. User profiles go in `~/.config/ds/profile-<name>.sh` (user config takes priority).
+User configuration lives in `$XDG_CONFIG_HOME/ds`, falling back to
+`~/.config/ds` when `XDG_CONFIG_HOME` is unset or empty. Profiles define the
+tmux window/pane layout. Bundled profiles live in `lib/plugins/`. User profiles
+go in the configuration directory as `profile-<name>.sh` and take priority.
 
 Each profile defines a `_profile_<name>()` function:
 
 ```bash
-# ~/.config/ds/profile-myprofile.sh
+# ${XDG_CONFIG_HOME:-$HOME/.config}/ds/profile-myprofile.sh
 _profile_myprofile() {
     local session="$1"
     # set up tmux windows/panes here
@@ -84,8 +87,8 @@ _profile_myprofile() {
 ### Single-command profiles (data)
 
 A profile that only renames window 1 and runs one command does not need its own
-`.sh` file. Declare such profiles as rows in `~/.config/ds/profile*.conf`
-instead:
+`.sh` file. Declare such profiles as `profile*.conf` files in the configuration
+directory instead:
 
 ```text
 # name     window   command
@@ -120,10 +123,12 @@ window.
 
 ## Host Resolution
 
-All `~/.config/ds/connect*.conf` files are read (additive). Format: two columns — hostname (glob patterns supported) and connect method. First match wins.
+All `connect*.conf` files in the configuration directory are read (additive).
+Format: two columns — hostname (glob patterns supported) and connect method.
+First match wins.
 
 ```text
-# ~/.config/ds/connect.conf
+# ${XDG_CONFIG_HOME:-$HOME/.config}/ds/connect.conf
 myserver      autossh
 dev*          ssh
 localbox      -
@@ -133,7 +138,9 @@ See `examples/connect.conf` for a template.
 
 ## Connect Methods
 
-`ssh` is built-in. Other methods are plugins in `~/.config/ds/connect-<method>.sh` (or bundled in `lib/plugins/`), defining `_connect_<method>()`.
+`ssh` is built-in. Other methods are `connect-<method>.sh` plugins in the
+configuration directory (or bundled in `lib/plugins/`), defining
+`_connect_<method>()`.
 
 | Method | Description |
 |---|---|
@@ -144,13 +151,16 @@ See `examples/connect.conf` for a template.
 
 ## Sharing
 
-Share backends live in `lib/plugins/share-<backend>.sh` or `~/.config/ds/share-<backend>.sh`. Config goes in `~/.config/ds/share-<backend>.conf`.
+Share backends live in `lib/plugins/share-<backend>.sh` or as
+`share-<backend>.sh` in the configuration directory. Config goes in the
+configuration directory as `share-<backend>.conf`.
 
 Only one session can be shared at a time. `ds -l` marks shared sessions with `[shared]`.
 
 ### Upterm backend
 
-Config file: `~/.config/ds/share-upterm.conf` (env vars `DS_UPTERM_*` override):
+Config file: `share-upterm.conf` in the configuration directory (env vars
+`DS_UPTERM_*` override):
 
 | Config key | Env var | Description |
 |---|---|---|
