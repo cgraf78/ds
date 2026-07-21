@@ -9,7 +9,8 @@
 #   _share_current_session   — print name of currently shared session
 #   _share_load_config       — load backend-specific config from share-upterm.conf
 #
-# Config: ~/.config/ds/share-upterm.conf (key=value, env vars override config)
+# Config: ${XDG_CONFIG_HOME:-$HOME/.config}/ds/share-upterm.conf
+#         (key=value, env vars override config)
 #   server             upterm server host:port (default: uptermd.upterm.dev:22)
 #   known-hosts        known_hosts file for server verification
 #   private-key        SSH private key for upterm (auto-detected if unset)
@@ -301,7 +302,7 @@ _share_start() {
     echo "" >&2
     read -r -p "  Share without authentication? [y/N] " answer </dev/tty
     if [[ "$answer" != [yY] ]]; then
-      echo "ds: aborted — set github-user or authorized-keys in ~/.config/ds/share-upterm.conf" >&2
+      echo "ds: aborted — set github-user or authorized-keys in $CONF_DIR/share-upterm.conf" >&2
       return 1
     fi
   fi
@@ -383,7 +384,7 @@ _share_start() {
     echo "" >&2
     read -r -p "  Skip host key check? [y/N] " answer </dev/tty
     if [[ "$answer" != [yY] ]]; then
-      echo "ds: aborted — set known-hosts in ~/.config/ds/share-upterm.conf" >&2
+      echo "ds: aborted — set known-hosts in $CONF_DIR/share-upterm.conf" >&2
       return 1
     fi
     host_args+=(--skip-host-key-check)

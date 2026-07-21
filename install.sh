@@ -78,5 +78,5 @@ if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
 fi
 
 echo ""
-echo "User config goes in ~/.config/ds/"
+echo "User config goes in ${XDG_CONFIG_HOME:-$HOME/.config}/ds/"
 echo "See examples/ for templates."

@@ -1280,6 +1280,13 @@ _assert_contains "ds -l dev: rejects session name" "does not take a session name
 result=$("$SCRIPT_DIR/../bin/ds" init 2>&1 || true)
 _assert_contains "ds init (no shell): requires shell name" "requires a shell name" "$result"
 
+xdg_config_home=$(_tmpdir)
+result=$(HOME="$TEST_HOME" XDG_CONFIG_HOME="$xdg_config_home" DS_SOURCED=1 bash -c '
+  source "$1"
+  printf "%s" "$CONF_DIR"
+' bash "$SCRIPT_DIR/../bin/ds")
+_assert_eq "runtime config: honors XDG_CONFIG_HOME" "$xdg_config_home/ds" "$result"
+
 # init bash advertises bash and zsh completions
 result=$("$SCRIPT_DIR/../bin/ds" init bash 2>&1)
 _assert_contains "ds init bash: wraps ds invocation" 'DS_SHELL_NAME=bash command ds "$@"' "$result"
@@ -1291,12 +1298,15 @@ _assert_contains "ds init bash: emits shared profile config glob" \
   "local profile_config_glob=$(_shell_literal "$_DS_PROFILE_CONFIG_GLOB")" "$result"
 _assert_contains "ds init bash: emits shared profile script glob" \
   "local profile_script_glob=$(_shell_literal "$_DS_PROFILE_SCRIPT_GLOB")" "$result"
+# shellcheck disable=SC2016 # Assert that generated code defers XDG expansion.
+_assert_contains "ds init bash: emits XDG config directory contract" \
+  'local conf_dir="${XDG_CONFIG_HOME:-$HOME/.config}/ds"' "$result"
 _assert_contains "ds init bash: host completion uses shared connect glob" \
   "for f in \"\$conf_dir\"/\$connect_config_glob; do" "$result"
 _assert_contains "ds init bash: script profile completion uses shared profile glob" \
-  "for f in \"\${HOME}/.config/ds\"/\$profile_script_glob; do" "$result"
+  "for f in \"\$conf_dir\"/\$profile_script_glob; do" "$result"
 _assert_contains "ds init bash: data profile completion uses shared profile config glob" \
-  "for f in \"\${HOME}/.config/ds\"/\$profile_config_glob; do" "$result"
+  "for f in \"\$conf_dir\"/\$profile_config_glob; do" "$result"
 bash_init_file=$(_tmpdir)/ds-init.bash
 printf '%s\n' "$result" >"$bash_init_file"
 set +e
@@ -1304,6 +1314,25 @@ bash -n "$bash_init_file" >/dev/null 2>&1
 rc=$?
 set -e
 _assert_exit "ds init bash: generated snippet parses" 0 "$rc"
+
+bash_completion_home=$(_tmpdir)
+bash_completion_xdg=$(_tmpdir)
+mkdir -p "$bash_completion_xdg/ds"
+cat >"$bash_completion_xdg/ds/connect.conf" <<'EOF'
+workhost ssh workhost.example
+EOF
+bash_completion_output=$(
+  HOME="$bash_completion_home" XDG_CONFIG_HOME="$bash_completion_xdg" \
+    PATH="$MOCK_BIN:$PATH" bash -c '
+      source "$1"
+      COMP_WORDS=(ds @)
+      COMP_CWORD=1
+      _ds
+      printf "%s\n" "${COMPREPLY[@]}"
+    ' bash "$bash_init_file"
+)
+_assert_contains "ds init bash: dynamic host completion honors XDG_CONFIG_HOME" \
+  "@workhost" "$bash_completion_output"
 
 # init zsh emits zsh completion wiring
 result=$("$SCRIPT_DIR/../bin/ds" init zsh 2>&1)
@@ -1317,6 +1346,9 @@ _assert_contains "ds init zsh: emits shared profile config glob" \
   "local profile_config_glob=$(_shell_literal "$_DS_PROFILE_CONFIG_GLOB")" "$result"
 _assert_contains "ds init zsh: emits shared profile script glob" \
   "local profile_script_glob=$(_shell_literal "$_DS_PROFILE_SCRIPT_GLOB")" "$result"
+# shellcheck disable=SC2016 # Assert that generated code defers XDG expansion.
+_assert_contains "ds init zsh: emits XDG config directory contract" \
+  'local conf_dir="${XDG_CONFIG_HOME:-$HOME/.config}/ds"' "$result"
 _assert_contains "ds init zsh: host completion uses shared connect glob" \
   "for f in \"\$conf_dir\"/\${~connect_config_glob}(N); do" "$result"
 _assert_contains "ds init zsh: script profile completion uses shared profile glob" \
@@ -1333,22 +1365,24 @@ if [[ -n "$REAL_ZSH" ]]; then
   _assert_exit "ds init zsh: generated snippet parses" 0 "$rc"
 
   zsh_completion_home=$(_tmpdir)
-  mkdir -p "$zsh_completion_home/.config/ds"
-  cat >"$zsh_completion_home/.config/ds/connect.conf" <<'EOF'
+  zsh_completion_xdg=$(_tmpdir)
+  mkdir -p "$zsh_completion_xdg/ds"
+  cat >"$zsh_completion_xdg/ds/connect.conf" <<'EOF'
 workhost ssh workhost.example
 dev* ssh wildcard.example
 EOF
-  cat >"$zsh_completion_home/.config/ds/profile-dev.sh" <<'EOF'
+  cat >"$zsh_completion_xdg/ds/profile-dev.sh" <<'EOF'
 _profile_dev() { :; }
 EOF
-  cat >"$zsh_completion_home/.config/ds/profile.conf" <<'EOF'
+  cat >"$zsh_completion_xdg/ds/profile.conf" <<'EOF'
 data echo data
 EOF
   # The inner program is zsh source code; its `$1`, `$@`, and `${...}` forms
   # must be expanded by zsh after Bash passes the generated init file path.
   # shellcheck disable=SC2016
   zsh_completion_output=$(
-    HOME="$zsh_completion_home" PATH="$MOCK_BIN:$PATH" "$REAL_ZSH" -fc '
+    HOME="$zsh_completion_home" XDG_CONFIG_HOME="$zsh_completion_xdg" \
+      PATH="$MOCK_BIN:$PATH" "$REAL_ZSH" -fc '
       source "$1"
       compadd() {
         while [[ "${1:-}" == "--" ]]; do

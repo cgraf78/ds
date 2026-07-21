@@ -37,8 +37,14 @@ selects a profile; a suffix after the first dash is treated as an instance tag
 when the prefix matches a known profile.
 .PP
 Profiles, connection methods, and share backends are plugin-based. Bundled
-plugins live with the installation, and user overrides live under
-.IR ~/.config/ds .
+plugins live with the installation. User overrides live under
+.IR $XDG_CONFIG_HOME/ds
+when
+.B XDG_CONFIG_HOME
+is nonempty, or under
+.I ~/.config/ds
+otherwise.
+The configuration paths below are relative to that directory.
 .SH OPTIONS
 .TP
 .BR -l ", " --list
@@ -76,23 +82,27 @@ Create or update the session without attaching.
 Show usage.
 .SH CONFIGURATION
 .TP
-.I ~/.config/ds/profile-<name>.sh
+.I profile-<name>.sh
 User profile scripts. A profile script defines
 .BI _profile_ name ()
 and receives the session name.
 .TP
-.I ~/.config/ds/profile*.conf
+.I profile*.conf
 Data-only profile rows for single-command profiles.
 .TP
-.I ~/.config/ds/connect*.conf
+.I connect*.conf
 Host-to-connection-method rules. Files are additive and read in order.
 .TP
-.I ~/.config/ds/connect-<method>.sh
+.I connect-<method>.sh
 User connection method plugins.
 .TP
-.I ~/.config/ds/share-<backend>.sh
+.I share-<backend>.sh
 User share backend plugins.
 .SH ENVIRONMENT
+.TP
+.B XDG_CONFIG_HOME
+Base directory for user configuration. When unset or empty, defaults to
+.IR ~/.config .
 .TP
 .B DS_INSTALL_DIR
 Destination for the installed

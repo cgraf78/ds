@@ -25,7 +25,7 @@ bash install.sh    # installs to ~/.local/bin/ds + ~/.local/lib/ds/plugins/
 
 Single-file CLI (`bin/ds`) with a plugin system. Everything is pure bash (4+).
 
-**Plugin discovery** (`_find_plugin`, `_glob_plugins`): searches `~/.config/ds/` first (user override), then `lib/plugins/` (bundled). Three plugin types:
+**Plugin discovery** (`_find_plugin`, `_glob_plugins`): searches `${XDG_CONFIG_HOME:-$HOME/.config}/ds/` first (user override), then `lib/plugins/` (bundled). Three plugin types:
 
 - **Profiles** (`profile-<name>.sh`): define `_profile_<name>()` to set up tmux window/pane layouts. Bundled: `dev`, `chat`. Built-in: `ds` (plain tmux, used as default). Trivial single-command profiles can instead be declared as data rows (`<name> <window> <command...>`) in `profile*.conf`; `_load_data_profiles` synthesizes `_profile_<name>` wrappers around `_profile_run_command` before the `.sh` source loop, so a `.sh` of the same name overrides a data row.
 - **Connect methods** (`connect-<method>.sh`): define `_connect_<method>()` for remote transport. `ssh` is built-in. Bundled: `autossh`.
@@ -33,7 +33,7 @@ Single-file CLI (`bin/ds`) with a plugin system. Everything is pure bash (4+).
 
 **Session naming**: session name = profile name, `profile-instance` (split on first `-`), or any arbitrary name (uses `ds` profile). Default session is `ds` with `ds` profile.
 
-**Host resolution**: `~/.config/ds/connect*.conf` files map hostname globs to connect methods. First match wins.
+**Host resolution**: `${XDG_CONFIG_HOME:-$HOME/.config}/ds/connect*.conf` files map hostname globs to connect methods. First match wins.
 
 **State**: runtime files (PID, share info, admin socket) live under `~/.local/state/ds/` with mode 0700.
 
