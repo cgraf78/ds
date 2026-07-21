@@ -20,6 +20,7 @@ REAL_ZSH=$(command -v zsh || true)
 
 TEST_HOME=$(_tmpdir)
 export HOME="$TEST_HOME"
+unset XDG_CONFIG_HOME
 export CONF_DIR="$TEST_HOME/.config/ds"
 mkdir -p "$CONF_DIR"
 
