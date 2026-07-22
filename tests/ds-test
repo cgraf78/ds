@@ -1316,6 +1316,24 @@ rc=$?
 set -e
 _assert_exit "ds init bash: generated snippet parses" 0 "$rc"
 
+handoff_bin=$(_tmpdir)
+handoff_home=$(_tmpdir)
+handoff_log=$(_tmpdir)/args.log
+mkdir -p "$handoff_home/.local/state/ds"
+cat >"$handoff_bin/ds" <<'EOF'
+#!/usr/bin/env bash
+printf 'COUNT=%s\n' "$#" >"${DS_HANDOFF_LOG:?}"
+for arg in "$@"; do
+  printf 'ARG=%s\n' "$arg" >>"$DS_HANDOFF_LOG"
+done
+EOF
+chmod +x "$handoff_bin/ds"
+printf '%s\n' -k 'dev work' 'dev*' >"$handoff_home/.local/state/ds/attach-next"
+HOME="$handoff_home" DS_HANDOFF_LOG="$handoff_log" PATH="$handoff_bin:$PATH" \
+  bash --noprofile --norc -ic 'source "$1"' bash "$bash_init_file" >/dev/null 2>&1
+_assert_eq "ds init bash: connect handoff preserves argument boundaries" \
+  $'COUNT=3\nARG=-k\nARG=dev work\nARG=dev*' "$(cat "$handoff_log")"
+
 bash_completion_home=$(_tmpdir)
 bash_completion_xdg=$(_tmpdir)
 mkdir -p "$bash_completion_xdg/ds"
@@ -1364,6 +1382,14 @@ if [[ -n "$REAL_ZSH" ]]; then
   rc=$?
   set -e
   _assert_exit "ds init zsh: generated snippet parses" 0 "$rc"
+
+  : >"$handoff_log"
+  printf '%s\n' -k 'dev work' 'dev*' >"$handoff_home/.local/state/ds/attach-next"
+  # shellcheck disable=SC2016 # $1 expands inside the zsh program.
+  HOME="$handoff_home" DS_HANDOFF_LOG="$handoff_log" PATH="$handoff_bin:$PATH" \
+    "$REAL_ZSH" -fic 'source "$1"' zsh "$zsh_init_file" >/dev/null 2>&1
+  _assert_eq "ds init zsh: connect handoff preserves argument boundaries" \
+    $'COUNT=3\nARG=-k\nARG=dev work\nARG=dev*' "$(cat "$handoff_log")"
 
   zsh_completion_home=$(_tmpdir)
   zsh_completion_xdg=$(_tmpdir)
@@ -1527,8 +1553,11 @@ done
 echo "SSH_HOST=$_host" > "${REMOTE_LOG:-/dev/null}"
 echo "SSH_ARGS=$*" >> "${REMOTE_LOG:-/dev/null}"
 if [[ "${MOCK_SSH_READ_STDIN:-0}" == "1" ]]; then
-    IFS= read -r _stdin || true
-    echo "SSH_STDIN=$_stdin" >> "${REMOTE_LOG:-/dev/null}"
+    _stdin_index=0
+    while IFS= read -r _stdin; do
+        echo "SSH_STDIN[$_stdin_index]=$_stdin" >> "${REMOTE_LOG:-/dev/null}"
+        _stdin_index=$((_stdin_index + 1))
+    done
 fi
 MOCK
 chmod +x "$MOCK_BIN/ssh"
@@ -1669,25 +1698,37 @@ _assert_contains "plugin remote killall: passes killall args" "PLUGIN_ARGS=--kil
 # through attach-next. ET itself only opens the persistent interactive transport.
 result=$(_run_remote "export MOCK_SSH_READ_STDIN=1; HOST=server1 ACTION=session SESSION=dev CONNECT_OVERRIDE=et")
 remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
-_assert_contains "et remote session: seeds session action" "SSH_STDIN=dev" "$remote_log"
+_assert_contains "et remote session: seeds session action" "SSH_STDIN[0]=dev" "$remote_log"
 _assert_contains "et remote session: opens ET transport" "ET_ARGS=server1" "$remote_log"
 
 result=$(_run_remote "export MOCK_SSH_READ_STDIN=1; HOST=server1 ACTION=session SESSION=dev CONNECT_OVERRIDE=et DS_SHARE_VIA=upterm DS_NO_ATTACH=1")
 remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
-_assert_contains "et remote session: preserves modifiers" \
-  "SSH_STDIN=dev --share-via upterm --no-attach" "$remote_log"
+_assert_contains "et remote session: preserves session" "SSH_STDIN[0]=dev" "$remote_log"
+_assert_contains "et remote session: preserves share modifier" "SSH_STDIN[1]=--share-via" "$remote_log"
+_assert_contains "et remote session: preserves share value" "SSH_STDIN[2]=upterm" "$remote_log"
+_assert_contains "et remote session: preserves no-attach modifier" "SSH_STDIN[3]=--no-attach" "$remote_log"
 
 result=$(_run_remote "export MOCK_SSH_READ_STDIN=1; HOST=server1 ACTION=list CONNECT_OVERRIDE=et")
 remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
-_assert_contains "et remote list: seeds list action" "SSH_STDIN=-l" "$remote_log"
+_assert_contains "et remote list: seeds list action" "SSH_STDIN[0]=-l" "$remote_log"
 
 result=$(_run_remote "export MOCK_SSH_READ_STDIN=1; HOST=server1 ACTION=kill SESSION=dev-work CONNECT_OVERRIDE=et")
 remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
-_assert_contains "et remote kill: seeds kill action and target" "SSH_STDIN=-k dev-work" "$remote_log"
+_assert_contains "et remote kill: seeds kill action" "SSH_STDIN[0]=-k" "$remote_log"
+_assert_contains "et remote kill: preserves target" "SSH_STDIN[1]=dev-work" "$remote_log"
+
+result=$(_run_remote "export MOCK_SSH_READ_STDIN=1; HOST=server1 ACTION=kill SESSION='dev work*' CONNECT_OVERRIDE=et")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "et remote kill: keeps spaced target in one argument" \
+  "SSH_STDIN[1]=dev work*" "$remote_log"
+
+result=$(_run_remote "HOST=server1 ACTION=kill SESSION=\$'dev\\nwork' CONNECT_OVERRIDE=et")
+_assert_contains "et remote kill: rejects newline-delimited target" \
+  "ET handoff arguments cannot contain newlines" "$result"
 
 result=$(_run_remote "export MOCK_SSH_READ_STDIN=1; HOST=server1 ACTION=killall CONNECT_OVERRIDE=et")
 remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
-_assert_contains "et remote killall: seeds killall action" "SSH_STDIN=--killall" "$remote_log"
+_assert_contains "et remote killall: seeds killall action" "SSH_STDIN[0]=--killall" "$remote_log"
 
 result=$(_run_remote "export MOCK_SSH_READ_STDIN=1; FORWARDS=(3011:3012); R_FORWARDS=(4011:4012); HOST=server1 ACTION=session SESSION=dev CONNECT_OVERRIDE=et")
 remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
