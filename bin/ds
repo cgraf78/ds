@@ -24,11 +24,17 @@
 #               e.g. a tunnel/command session, is skipped even when interactive)
 
 _xdg_dir() {
-  local value="$1" fallback="$2" suffix="$3"
+  local value="$1" fallback="$2" suffix="$3" variable="$4"
 
   case "$value" in
     /*) printf '%s/%s\n' "${value%/}" "$suffix" ;;
-    *) printf '%s/%s\n' "${fallback%/}" "$suffix" ;;
+    *)
+      if [[ -z "${HOME:-}" ]]; then
+        printf 'ds: HOME is required when %s is unset or relative\n' "$variable" >&2
+        return 1
+      fi
+      printf '%s/%s/%s\n' "${HOME%/}" "${fallback#/}" "$suffix"
+      ;;
   esac
 }
 
@@ -56,7 +62,12 @@ if [[ -z "${DS_LIB_DIR:-}" ]]; then
   fi
   unset _ds_self _ds_lib_dir
 fi
-CONF_DIR="$(_xdg_dir "${XDG_CONFIG_HOME:-}" "$HOME/.config" ds)"
+if ! CONF_DIR="$(_xdg_dir "${XDG_CONFIG_HOME:-}" .config ds XDG_CONFIG_HOME)"; then
+  if [[ -n "${DS_SOURCED:-}" ]]; then
+    return 1
+  fi
+  exit 1
+fi
 ACTION="session"
 PROFILE=""
 SESSION=""
@@ -67,7 +78,14 @@ INIT_SHELL=""
 DS_SHARE_VIA="${DS_SHARE_VIA:-}"
 DS_NO_ATTACH="${DS_NO_ATTACH:-0}"
 DS_SHARE_INFO_FILE="${DS_SHARE_INFO_FILE:-}"
-DS_STATE_DIR="${DS_STATE_DIR:-$(_xdg_dir "${XDG_STATE_HOME:-}" "$HOME/.local/state" ds)}"
+if [[ -z "${DS_STATE_DIR:-}" ]]; then
+  if ! DS_STATE_DIR="$(_xdg_dir "${XDG_STATE_HOME:-}" .local/state ds XDG_STATE_HOME)"; then
+    if [[ -n "${DS_SOURCED:-}" ]]; then
+      return 1
+    fi
+    exit 1
+  fi
+fi
 FORWARDS=()
 R_FORWARDS=()
 
@@ -232,7 +250,13 @@ _ds_state_dir=${DS_STATE_DIR:-}
 if [ -z "$_ds_state_dir" ]; then
   case ${XDG_STATE_HOME:-} in
     /*) _ds_state_dir=${XDG_STATE_HOME%/}/ds ;;
-    *) _ds_state_dir=$HOME/.local/state/ds ;;
+    *)
+      if [ -z "${HOME:-}" ]; then
+        echo "ds: HOME is required when XDG_STATE_HOME is unset or relative" >&2
+        exit 1
+      fi
+      _ds_state_dir=$HOME/.local/state/ds
+      ;;
   esac
 fi
 EOF

@@ -9,7 +9,8 @@
 #   _share_current_session   — print name of currently shared session
 #   _share_load_config       — load backend-specific config from share-upterm.conf
 #
-# Config: ${XDG_CONFIG_HOME:-$HOME/.config}/ds/share-upterm.conf
+# Config: $XDG_CONFIG_HOME/ds/share-upterm.conf when the XDG root is absolute;
+#         $HOME/.config/ds/share-upterm.conf otherwise
 #         (key=value, env vars override config)
 #   server             upterm server host:port (default: uptermd.upterm.dev:22)
 #   known-hosts        known_hosts file for server verification
@@ -128,6 +129,20 @@ _upterm_read_info_from_log() {
   return 1
 }
 
+_upterm_source_host() {
+  local host
+  if command -v hostname >/dev/null 2>&1; then
+    host=$(hostname -s 2>/dev/null || hostname) || return 1
+  elif command -v uname >/dev/null 2>&1; then
+    host=$(uname -n) || return 1
+    host="${host%%.*}"
+  else
+    return 1
+  fi
+  [[ -n "$host" ]] || return 1
+  printf '%s\n' "$host"
+}
+
 # Push share info to the state directory selected on the remote host.
 _upterm_push_share_info() {
   local session="$1"
@@ -135,7 +150,10 @@ _upterm_push_share_info() {
   [[ -n "${DS_SHARE_INFO_FILE:-}" && -f "$DS_SHARE_INFO_FILE" ]] || return 0
 
   local src_host
-  src_host=$(hostname -s 2>/dev/null || hostname)
+  src_host=$(_upterm_source_host) || {
+    echo "ds: cannot determine the source host for Upterm share state" >&2
+    return 1
+  }
   local remote_file="ds.upterm-${src_host}-${session}.share"
   local remote_cmd
   remote_cmd="$(_remote_state_write_command "$remote_file")"
@@ -153,7 +171,7 @@ _upterm_unpush_share_info() {
   local session="$1"
   [[ -n "$DS_UPTERM_PUSH" ]] || return 0
   local src_host
-  src_host=$(hostname -s 2>/dev/null || hostname)
+  src_host=$(_upterm_source_host) || return 0
   local remote_cmd
   remote_cmd="$(_remote_state_remove_command "ds.upterm-${src_host}-${session}.share")"
   # shellcheck disable=SC2029 # remote policy is deliberately expanded by the peer shell.

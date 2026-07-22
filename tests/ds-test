@@ -1316,6 +1316,24 @@ result=$(HOME="$TEST_HOME" XDG_STATE_HOME="$xdg_state_home" DS_STATE_DIR="$expli
 ' bash "$SCRIPT_DIR/../bin/ds")
 _assert_eq "runtime state: DS_STATE_DIR overrides XDG_STATE_HOME" "$explicit_state" "$result"
 
+# shellcheck disable=SC2016 # Runtime paths expand inside the isolated shell.
+result=$(env -u HOME XDG_CONFIG_HOME="$xdg_config_home" XDG_STATE_HOME="$xdg_state_home" \
+  DS_STATE_DIR='' DS_SOURCED=1 bash -c '
+  source "$1"
+  printf "%s\n%s" "$CONF_DIR" "$DS_STATE_DIR"
+' bash "$SCRIPT_DIR/../bin/ds")
+_assert_eq "runtime paths: absolute XDG roots do not require HOME" \
+  "$xdg_config_home/ds
+$xdg_state_home/ds" "$result"
+
+# shellcheck disable=SC2016 # Runtime paths expand inside the isolated shell.
+result=$(env -u HOME XDG_CONFIG_HOME="$xdg_config_home" DS_STATE_DIR="$explicit_state" \
+  DS_SOURCED=1 bash -c '
+  source "$1"
+  printf "%s" "$DS_STATE_DIR"
+' bash "$SCRIPT_DIR/../bin/ds")
+_assert_eq "runtime state: explicit override does not require HOME" "$explicit_state" "$result"
+
 # init bash advertises bash and zsh completions
 result=$("$SCRIPT_DIR/../bin/ds" init bash 2>&1)
 _assert_contains "ds init bash: wraps ds invocation" 'DS_SHELL_NAME=bash command ds "$@"' "$result"
@@ -1751,6 +1769,16 @@ _assert_not_contains "upterm remote state: does not leak local state path" \
 _assert_contains "upterm remote state: streams share info" \
   'SSH_STDIN[0]=ssh: ssh test@example' "$remote_log"
 
+fallback_host_bin=$(_tmpdir)
+cat >"$fallback_host_bin/uname" <<'EOF'
+#!/bin/sh
+printf '%s\n' fallback.example
+EOF
+chmod +x "$fallback_host_bin/uname"
+result=$(PATH="$fallback_host_bin" _upterm_source_host)
+_assert_eq "upterm remote state: falls back to uname when hostname is unavailable" \
+  "fallback" "$result"
+
 result=$(_run_remote "export MOCK_SSH_READ_STDIN=1; HOST=server1 ACTION=session SESSION=dev CONNECT_OVERRIDE=et")
 remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
 _assert_contains "et remote session: seeds session action" "SSH_STDIN[0]=dev" "$remote_log"
@@ -1765,6 +1793,11 @@ printf '%s\n' dev --no-attach | HOME="$remote_home" XDG_STATE_HOME="$remote_xdg_
   DS_STATE_DIR='' sh -c "$remote_handoff_cmd"
 _assert_file_content "remote state writer: honors peer XDG_STATE_HOME" \
   $'dev\n--no-attach' "$remote_xdg_state/ds/attach-next"
+
+printf '%s\n' dev | env -u HOME XDG_STATE_HOME="$remote_xdg_state" DS_STATE_DIR='' \
+  sh -c "$remote_handoff_cmd"
+_assert_file_content "remote state writer: absolute XDG state does not require peer HOME" \
+  "dev" "$remote_xdg_state/ds/attach-next"
 
 remote_fallback_home=$(_tmpdir)
 printf '%s\n' dev | HOME="$remote_fallback_home" XDG_STATE_HOME=relative/state \
