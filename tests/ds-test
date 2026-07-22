@@ -1811,6 +1811,93 @@ printf '%s\n' dev | HOME="$remote_home" XDG_STATE_HOME="$remote_xdg_state" \
 _assert_file_content "remote state writer: honors peer DS_STATE_DIR override" \
   "dev" "$remote_explicit_state/attach-next"
 
+remote_tricky_state=$(_tmpdir)/tricky-ds
+remote_tricky_file=$'share\'s\nstate'
+remote_tricky_cmd=$(_remote_state_write_command "$remote_tricky_file")
+sh -n -c "$remote_tricky_cmd"
+_assert_exit "remote state writer: POSIX command parses with apostrophe and newline" 0 "$?"
+printf '%s\n' shared | DS_STATE_DIR="$remote_tricky_state" sh -c "$remote_tricky_cmd"
+_assert_file_content "remote state writer: preserves apostrophe and newline in filename" \
+  "shared" "$remote_tricky_state/$remote_tricky_file"
+remote_tricky_remove_cmd=$(_remote_state_remove_command "$remote_tricky_file")
+sh -n -c "$remote_tricky_remove_cmd"
+_assert_exit "remote state remover: POSIX command parses with apostrophe and newline" 0 "$?"
+DS_STATE_DIR="$remote_tricky_state" sh -c "$remote_tricky_remove_cmd"
+_assert_file_missing "remote state remover: preserves apostrophe and newline in filename" \
+  "$remote_tricky_state/$remote_tricky_file"
+
+attack_remote_state=$(_tmpdir)/attack-ds
+attack_victim=$(_tmpdir)/victim
+printf '%s\n' untouched >"$attack_victim"
+mkdir -p "$attack_remote_state"
+set +e
+printf '%s\n' published | DS_STATE_DIR="$attack_remote_state" VICTIM="$attack_victim" \
+  REMOTE_CMD="$remote_handoff_cmd" sh -c '
+    ln -s "$VICTIM" "$DS_STATE_DIR/attach-next.$$" || exit
+    eval "$REMOTE_CMD"
+  '
+rc=$?
+set -e
+_assert_exit "remote state writer: planted legacy temp symlink does not block publish" 0 "$rc"
+_assert_file_content "remote state writer: planted legacy temp symlink cannot overwrite victim" \
+  "untouched" "$attack_victim"
+_assert_file_content "remote state writer: planted legacy temp symlink publishes payload" \
+  "published" "$attack_remote_state/attach-next"
+if [[ -L "$attack_remote_state/attach-next" ]]; then
+  _fail "remote state writer: destination is a regular file"
+else
+  _pass "remote state writer: destination is a regular file"
+fi
+
+collision_remote_state=$(_tmpdir)/collision-ds
+mkdir -p "$collision_remote_state"
+set +e
+printf '%s\n' blocked | DS_STATE_DIR="$collision_remote_state" REMOTE_CMD="$remote_handoff_cmd" \
+  sh -c '
+    mkdir "$DS_STATE_DIR/.ds-state.$$" || exit
+    eval "$REMOTE_CMD"
+  ' >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "remote state writer: planted private temp directory fails closed" 1 "$rc"
+_assert_file_missing "remote state writer: temp collision does not publish payload" \
+  "$collision_remote_state/attach-next"
+
+chmod_remote_state=$(_tmpdir)/chmod-ds
+chmod_remote_bin=$(_tmpdir)
+cat >"$chmod_remote_bin/chmod" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod +x "$chmod_remote_bin/chmod"
+set +e
+printf '%s\n' private | DS_STATE_DIR="$chmod_remote_state" \
+  PATH="$chmod_remote_bin:$PATH" sh -c "$remote_handoff_cmd" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "remote state writer: state-directory chmod failure propagates" 1 "$rc"
+_assert_file_missing "remote state writer: state-directory chmod failure does not publish" \
+  "$chmod_remote_state/attach-next"
+
+payload_chmod_remote_state=$(_tmpdir)/payload-chmod-ds
+payload_chmod_remote_bin=$(_tmpdir)
+cat >"$payload_chmod_remote_bin/chmod" <<'EOF'
+#!/bin/sh
+if [ "$1" = 600 ]; then
+  exit 1
+fi
+exec "$REAL_CHMOD" "$@"
+EOF
+chmod +x "$payload_chmod_remote_bin/chmod"
+set +e
+printf '%s\n' private | DS_STATE_DIR="$payload_chmod_remote_state" REAL_CHMOD="$(command -v chmod)" \
+PATH="$payload_chmod_remote_bin:$PATH" sh -c "$remote_handoff_cmd" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "remote state writer: payload chmod failure propagates" 1 "$rc"
+_assert_file_missing "remote state writer: payload chmod failure does not publish" \
+  "$payload_chmod_remote_state/attach-next"
+
 failed_remote_home=$(_tmpdir)
 failed_remote_bin=$(_tmpdir)
 cat >"$failed_remote_bin/mv" <<'EOF'
@@ -1826,9 +1913,9 @@ set -e
 _assert_exit "remote state writer: replacement failure propagates" 1 "$rc"
 _assert_file_missing "remote state writer: replacement failure leaves no handoff" \
   "$failed_remote_home/.local/state/ds/attach-next"
-failed_remote_residue=$(printf '%s\n' "$failed_remote_home/.local/state/ds"/.attach-next.*)
-_assert_eq "remote state writer: replacement failure removes temp file" \
-  "$failed_remote_home/.local/state/ds/.attach-next.*" "$failed_remote_residue"
+failed_remote_residue=$(printf '%s\n' "$failed_remote_home/.local/state/ds"/.ds-state.*)
+_assert_eq "remote state writer: replacement failure removes temp directory" \
+  "$failed_remote_home/.local/state/ds/.ds-state.*" "$failed_remote_residue"
 
 result=$(_run_remote "export MOCK_SSH_FAIL=1; HOST=server1 ACTION=session SESSION=dev CONNECT_OVERRIDE=et")
 remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)

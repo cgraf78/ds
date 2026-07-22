@@ -244,6 +244,11 @@ _shell_literal() {
   printf '%q' "$1"
 }
 
+_posix_shell_literal() {
+  local escaped=${1//\'/\'\\\'\'}
+  printf "'%s'" "$escaped"
+}
+
 _remote_state_dir_prelude() {
   cat <<'EOF'
 _ds_state_dir=${DS_STATE_DIR:-}
@@ -264,25 +269,28 @@ EOF
 
 _remote_state_write_command() {
   local file_q
-  printf -v file_q '%q' "$1"
+  file_q=$(_posix_shell_literal "$1")
   _remote_state_dir_prelude
   cat <<EOF
 umask 077
 mkdir -p "\$_ds_state_dir" || exit
-chmod 700 "\$_ds_state_dir" 2>/dev/null || :
+chmod 700 "\$_ds_state_dir" || exit
 _ds_file=\$_ds_state_dir/$file_q
-_ds_tmp=\${_ds_file}.\$\$
-trap 'rm -f "\$_ds_tmp"' 0 1 2 15
+_ds_tmp_dir=\$_ds_state_dir/.ds-state.\$\$
+mkdir "\$_ds_tmp_dir" || exit
+trap 'rm -rf "\$_ds_tmp_dir"' 0 1 2 15
+_ds_tmp=\$_ds_tmp_dir/payload
 cat >"\$_ds_tmp" || exit
-chmod 600 "\$_ds_tmp" 2>/dev/null || :
+chmod 600 "\$_ds_tmp" || exit
 mv -f "\$_ds_tmp" "\$_ds_file" || exit
+rmdir "\$_ds_tmp_dir" || exit
 trap - 0 1 2 15
 EOF
 }
 
 _remote_state_remove_command() {
   local file_q
-  printf -v file_q '%q' "$1"
+  file_q=$(_posix_shell_literal "$1")
   _remote_state_dir_prelude
   # shellcheck disable=SC2016 # The state directory expands on the remote host.
   printf 'rm -f "$_ds_state_dir"/%s\n' "$file_q"
