@@ -1769,6 +1769,31 @@ _assert_not_contains "upterm remote state: does not leak local state path" \
 _assert_contains "upterm remote state: streams share info" \
   'SSH_STDIN[0]=ssh: ssh test@example' "$remote_log"
 
+: >"$REMOTE_LOG"
+if result=$(DS_UPTERM_PUSH=sharehost DS_SHARE_INFO_FILE="$upterm_remote_info" \
+  _upterm_push_share_info '../outside' 2>&1); then
+  rc=0
+else
+  rc=$?
+fi
+_assert_exit "upterm remote state: traversal session blocks push" 2 "$rc"
+_assert_contains "upterm remote state: traversal push rejection is actionable" \
+  "must be one non-empty basename component" "$result"
+_assert_eq "upterm remote state: traversal push does not reach ssh" "" \
+  "$(cat "$REMOTE_LOG" 2>/dev/null || true)"
+
+: >"$REMOTE_LOG"
+if result=$(DS_UPTERM_PUSH=sharehost _upterm_unpush_share_info '../outside' 2>&1); then
+  rc=0
+else
+  rc=$?
+fi
+_assert_exit "upterm remote state: traversal session blocks remover" 2 "$rc"
+_assert_contains "upterm remote state: traversal remover rejection is actionable" \
+  "must be one non-empty basename component" "$result"
+_assert_eq "upterm remote state: traversal remover does not reach ssh" "" \
+  "$(cat "$REMOTE_LOG" 2>/dev/null || true)"
+
 fallback_host_bin=$(_tmpdir)
 cat >"$fallback_host_bin/uname" <<'EOF'
 #!/bin/sh
@@ -1811,6 +1836,39 @@ printf '%s\n' dev | HOME="$remote_home" XDG_STATE_HOME="$remote_xdg_state" \
 _assert_file_content "remote state writer: honors peer DS_STATE_DIR override" \
   "dev" "$remote_explicit_state/attach-next"
 
+directory_remote_state=$(_tmpdir)/directory-ds
+mkdir -p "$directory_remote_state/attach-next"
+if output=$(printf '%s\n' blocked | DS_STATE_DIR="$directory_remote_state" \
+  sh -c "$remote_handoff_cmd" 2>&1); then
+  rc=0
+else
+  rc=$?
+fi
+_assert_exit "remote state writer: destination directory fails closed" 1 "$rc"
+_assert_contains "remote state writer: destination directory failure is actionable" \
+  "remote state destination is a directory" "$output"
+_assert_file_missing "remote state writer: payload is not moved inside destination directory" \
+  "$directory_remote_state/attach-next/payload"
+
+symlink_directory_remote_state=$(_tmpdir)/symlink-directory-ds
+symlink_directory_target=$(_tmpdir)/symlink-target
+mkdir -p "$symlink_directory_remote_state" "$symlink_directory_target"
+ln -s "$symlink_directory_target" "$symlink_directory_remote_state/attach-next"
+if output=$(printf '%s\n' blocked | DS_STATE_DIR="$symlink_directory_remote_state" \
+  sh -c "$remote_handoff_cmd" 2>&1); then
+  rc=0
+else
+  rc=$?
+fi
+_assert_exit "remote state writer: symlink-to-directory destination fails closed" 1 "$rc"
+_assert_file_missing "remote state writer: payload is not moved through directory symlink" \
+  "$symlink_directory_target/payload"
+if [[ -L "$symlink_directory_remote_state/attach-next" ]]; then
+  _pass "remote state writer: rejected directory symlink remains unchanged"
+else
+  _fail "remote state writer: rejected directory symlink remains unchanged"
+fi
+
 remote_tricky_state=$(_tmpdir)/tricky-ds
 remote_tricky_file=$'share\'s\nstate'
 remote_tricky_cmd=$(_remote_state_write_command "$remote_tricky_file")
@@ -1825,6 +1883,24 @@ _assert_exit "remote state remover: POSIX command parses with apostrophe and new
 DS_STATE_DIR="$remote_tricky_state" sh -c "$remote_tricky_remove_cmd"
 _assert_file_missing "remote state remover: preserves apostrophe and newline in filename" \
   "$remote_tricky_state/$remote_tricky_file"
+
+if output=$(_remote_state_write_command '../outside' 2>&1); then
+  rc=0
+else
+  rc=$?
+fi
+_assert_exit "remote state writer: traversal filename is rejected" 2 "$rc"
+_assert_contains "remote state writer: traversal rejection is actionable" \
+  "must be one non-empty basename component" "$output"
+
+if output=$(_remote_state_remove_command 'nested/outside' 2>&1); then
+  rc=0
+else
+  rc=$?
+fi
+_assert_exit "remote state remover: traversal filename is rejected" 2 "$rc"
+_assert_contains "remote state remover: traversal rejection is actionable" \
+  "must be one non-empty basename component" "$output"
 
 attack_remote_state=$(_tmpdir)/attack-ds
 attack_victim=$(_tmpdir)/victim

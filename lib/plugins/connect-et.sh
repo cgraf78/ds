@@ -14,7 +14,7 @@ _connect_et() {
       return 2
     fi
   done
-  remote_cmd="$(_remote_state_write_command attach-next)"
+  remote_cmd="$(_remote_state_write_command attach-next)" || return
   # shellcheck disable=SC2029 # remote policy is deliberately expanded by the peer shell.
   if ! printf '%s\n' "${args[@]}" | ssh "$host" "$remote_cmd"; then
     echo "ds: failed to seed ET handoff state on $host" >&2

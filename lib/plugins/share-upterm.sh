@@ -156,7 +156,7 @@ _upterm_push_share_info() {
   }
   local remote_file="ds.upterm-${src_host}-${session}.share"
   local remote_cmd
-  remote_cmd="$(_remote_state_write_command "$remote_file")"
+  remote_cmd="$(_remote_state_write_command "$remote_file")" || return
 
   # shellcheck disable=SC2029 # remote policy is deliberately expanded by the peer shell.
   ssh -o BatchMode=yes -o ConnectTimeout=5 "$DS_UPTERM_PUSH" "$remote_cmd" \
@@ -173,7 +173,7 @@ _upterm_unpush_share_info() {
   local src_host
   src_host=$(_upterm_source_host) || return 0
   local remote_cmd
-  remote_cmd="$(_remote_state_remove_command "ds.upterm-${src_host}-${session}.share")"
+  remote_cmd="$(_remote_state_remove_command "ds.upterm-${src_host}-${session}.share")" || return
   # shellcheck disable=SC2029 # remote policy is deliberately expanded by the peer shell.
   ssh -o BatchMode=yes -o ConnectTimeout=5 "$DS_UPTERM_PUSH" "$remote_cmd" 2>/dev/null || true
 }

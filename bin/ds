@@ -249,6 +249,16 @@ _posix_shell_literal() {
   printf "'%s'" "$escaped"
 }
 
+_remote_state_file_literal() {
+  case "$1" in
+    "" | . | .. | */*)
+      echo "ds: remote state filename must be one non-empty basename component" >&2
+      return 2
+      ;;
+  esac
+  _posix_shell_literal "$1"
+}
+
 _remote_state_dir_prelude() {
   cat <<'EOF'
 _ds_state_dir=${DS_STATE_DIR:-}
@@ -269,13 +279,17 @@ EOF
 
 _remote_state_write_command() {
   local file_q
-  file_q=$(_posix_shell_literal "$1")
+  file_q=$(_remote_state_file_literal "$1") || return
   _remote_state_dir_prelude
   cat <<EOF
 umask 077
 mkdir -p "\$_ds_state_dir" || exit
 chmod 700 "\$_ds_state_dir" || exit
 _ds_file=\$_ds_state_dir/$file_q
+if [ -d "\$_ds_file" ]; then
+  echo "ds: remote state destination is a directory: \$_ds_file" >&2
+  exit 1
+fi
 _ds_tmp_dir=\$_ds_state_dir/.ds-state.\$\$
 mkdir "\$_ds_tmp_dir" || exit
 trap 'rm -rf "\$_ds_tmp_dir"' 0 1 2 15
@@ -290,7 +304,7 @@ EOF
 
 _remote_state_remove_command() {
   local file_q
-  file_q=$(_posix_shell_literal "$1")
+  file_q=$(_remote_state_file_literal "$1") || return
   _remote_state_dir_prelude
   # shellcheck disable=SC2016 # The state directory expands on the remote host.
   printf 'rm -f "$_ds_state_dir"/%s\n' "$file_q"
