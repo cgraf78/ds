@@ -1511,6 +1511,7 @@ echo "=== Remote command building ==="
 # shellcheck disable=SC2016  # intentional — writing literal $1/$2 to file
 cp "$SCRIPT_DIR/../lib/plugins/connect-autossh.sh" "$CONF_DIR/" 2>/dev/null ||
   printf '_connect_autossh() { exec autossh -M0 "$1" -t "$2"; }\n' >"$CONF_DIR/connect-autossh.sh"
+cp "$SCRIPT_DIR/../lib/plugins/connect-et.sh" "$CONF_DIR/"
 
 # Mock ssh/autossh to capture args instead of connecting
 cat >"$MOCK_BIN/ssh" <<'MOCK'
@@ -1525,6 +1526,10 @@ for _a in "$@"; do
 done
 echo "SSH_HOST=$_host" > "${REMOTE_LOG:-/dev/null}"
 echo "SSH_ARGS=$*" >> "${REMOTE_LOG:-/dev/null}"
+if [[ "${MOCK_SSH_READ_STDIN:-0}" == "1" ]]; then
+    IFS= read -r _stdin || true
+    echo "SSH_STDIN=$_stdin" >> "${REMOTE_LOG:-/dev/null}"
+fi
 MOCK
 chmod +x "$MOCK_BIN/ssh"
 
@@ -1533,6 +1538,12 @@ cat >"$MOCK_BIN/autossh" <<'MOCK'
 echo "AUTOSSH_ARGS=$*" > "${REMOTE_LOG:-/dev/null}"
 MOCK
 chmod +x "$MOCK_BIN/autossh"
+
+cat >"$MOCK_BIN/et" <<'MOCK'
+#!/usr/bin/env bash
+echo "ET_ARGS=$*" >> "${REMOTE_LOG:-/dev/null}"
+MOCK
+chmod +x "$MOCK_BIN/et"
 
 REMOTE_LOG="$MOCK_BIN/remote.log"
 export REMOTE_LOG
@@ -1653,6 +1664,35 @@ result=$(_run_remote "HOST=server1 ACTION=killall CONNECT_OVERRIDE=capture")
 remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
 _assert_contains "plugin remote killall: keeps empty session handoff" "PLUGIN_SESSION=" "$remote_log"
 _assert_contains "plugin remote killall: passes killall args" "PLUGIN_ARGS=--killall" "$remote_log"
+
+# The bundled ET plugin hands the normalized ds arguments to the remote shell
+# through attach-next. ET itself only opens the persistent interactive transport.
+result=$(_run_remote "export MOCK_SSH_READ_STDIN=1; HOST=server1 ACTION=session SESSION=dev CONNECT_OVERRIDE=et")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "et remote session: seeds session action" "SSH_STDIN=dev" "$remote_log"
+_assert_contains "et remote session: opens ET transport" "ET_ARGS=server1" "$remote_log"
+
+result=$(_run_remote "export MOCK_SSH_READ_STDIN=1; HOST=server1 ACTION=session SESSION=dev CONNECT_OVERRIDE=et DS_SHARE_VIA=upterm DS_NO_ATTACH=1")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "et remote session: preserves modifiers" \
+  "SSH_STDIN=dev --share-via upterm --no-attach" "$remote_log"
+
+result=$(_run_remote "export MOCK_SSH_READ_STDIN=1; HOST=server1 ACTION=list CONNECT_OVERRIDE=et")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "et remote list: seeds list action" "SSH_STDIN=-l" "$remote_log"
+
+result=$(_run_remote "export MOCK_SSH_READ_STDIN=1; HOST=server1 ACTION=kill SESSION=dev-work CONNECT_OVERRIDE=et")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "et remote kill: seeds kill action and target" "SSH_STDIN=-k dev-work" "$remote_log"
+
+result=$(_run_remote "export MOCK_SSH_READ_STDIN=1; HOST=server1 ACTION=killall CONNECT_OVERRIDE=et")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "et remote killall: seeds killall action" "SSH_STDIN=--killall" "$remote_log"
+
+result=$(_run_remote "export MOCK_SSH_READ_STDIN=1; FORWARDS=(3011:3012); R_FORWARDS=(4011:4012); HOST=server1 ACTION=session SESSION=dev CONNECT_OVERRIDE=et")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "et forward: preserves local forward" "ET_ARGS=-t 3011:3012" "$remote_log"
+_assert_contains "et forward: preserves reverse forward" "-r 4011:4012 server1" "$remote_log"
 
 # Test autossh connection method
 result=$(_run_remote "HOST=fileserver ACTION=session SESSION=ds \
