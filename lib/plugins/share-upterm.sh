@@ -9,7 +9,8 @@
 #   _share_current_session   — print name of currently shared session
 #   _share_load_config       — load backend-specific config from share-upterm.conf
 #
-# Config: ${XDG_CONFIG_HOME:-$HOME/.config}/ds/share-upterm.conf
+# Config: $XDG_CONFIG_HOME/ds/share-upterm.conf when the XDG root is absolute;
+#         $HOME/.config/ds/share-upterm.conf otherwise
 #         (key=value, env vars override config)
 #   server             upterm server host:port (default: uptermd.upterm.dev:22)
 #   known-hosts        known_hosts file for server verification
@@ -44,8 +45,6 @@ DS_UPTERM_PID_FILE="${DS_UPTERM_PID_FILE:-}"
 DS_UPTERM_PUSH="${DS_UPTERM_PUSH:-}"
 DS_UPTERM_PROXY_SESSION="${DS_UPTERM_PROXY_SESSION:-}"
 DS_UPTERM_SHARE_TTL="${DS_UPTERM_SHARE_TTL:-}"
-
-_UPTERM_REMOTE_STATE_DIR=".local/state/ds"
 
 # --- State file helpers ---
 
@@ -130,38 +129,53 @@ _upterm_read_info_from_log() {
   return 1
 }
 
-# Push share info to a remote host via SCP.
+_upterm_source_host() {
+  local host
+  if command -v hostname >/dev/null 2>&1; then
+    host=$(hostname -s 2>/dev/null || hostname) || return 1
+  elif command -v uname >/dev/null 2>&1; then
+    host=$(uname -n) || return 1
+    host="${host%%.*}"
+  else
+    return 1
+  fi
+  [[ -n "$host" ]] || return 1
+  printf '%s\n' "$host"
+}
+
+# Push share info to the state directory selected on the remote host.
 _upterm_push_share_info() {
   local session="$1"
   [[ -n "$DS_UPTERM_PUSH" ]] || return 0
   [[ -n "${DS_SHARE_INFO_FILE:-}" && -f "$DS_SHARE_INFO_FILE" ]] || return 0
 
   local src_host
-  src_host=$(hostname -s 2>/dev/null || hostname)
-  local remote_file="ds.upterm-${src_host}-${session}.share"
-  local escaped_dir
-  escaped_dir=$(printf '%q' "$_UPTERM_REMOTE_STATE_DIR")
-
-  ssh -o BatchMode=yes -o ConnectTimeout=5 "$DS_UPTERM_PUSH" "mkdir -p ~/$escaped_dir" 2>/dev/null || {
-    echo "ds: failed to create remote state dir on $DS_UPTERM_PUSH" >&2
+  src_host=$(_upterm_source_host) || {
+    echo "ds: cannot determine the source host for Upterm share state" >&2
     return 1
   }
-  scp -o BatchMode=yes -o ConnectTimeout=5 -q \
-    "$DS_SHARE_INFO_FILE" "$DS_UPTERM_PUSH:~/$_UPTERM_REMOTE_STATE_DIR/$remote_file" 2>/dev/null || {
+  local remote_file="ds.upterm-${src_host}-${session}.share"
+  local remote_cmd
+  remote_cmd="$(_remote_state_write_command "$remote_file")" || return
+
+  # shellcheck disable=SC2029 # remote policy is deliberately expanded by the peer shell.
+  ssh -o BatchMode=yes -o ConnectTimeout=5 "$DS_UPTERM_PUSH" "$remote_cmd" \
+    <"$DS_SHARE_INFO_FILE" 2>/dev/null || {
     echo "ds: failed to push share info to $DS_UPTERM_PUSH" >&2
     return 1
   }
-  echo "ds: pushed share info to $DS_UPTERM_PUSH:~/$_UPTERM_REMOTE_STATE_DIR/$remote_file"
+  echo "ds: pushed share info to $DS_UPTERM_PUSH:$remote_file"
 }
 
 _upterm_unpush_share_info() {
   local session="$1"
   [[ -n "$DS_UPTERM_PUSH" ]] || return 0
   local src_host
-  src_host=$(hostname -s 2>/dev/null || hostname)
-  local escaped_file
-  escaped_file=$(printf '%q' "$_UPTERM_REMOTE_STATE_DIR/ds.upterm-${src_host}-${session}.share")
-  ssh -o BatchMode=yes -o ConnectTimeout=5 "$DS_UPTERM_PUSH" "rm -f ~/$escaped_file" 2>/dev/null || true
+  src_host=$(_upterm_source_host) || return 0
+  local remote_cmd
+  remote_cmd="$(_remote_state_remove_command "ds.upterm-${src_host}-${session}.share")" || return
+  # shellcheck disable=SC2029 # remote policy is deliberately expanded by the peer shell.
+  ssh -o BatchMode=yes -o ConnectTimeout=5 "$DS_UPTERM_PUSH" "$remote_cmd" 2>/dev/null || true
 }
 
 # --- Required interface ---

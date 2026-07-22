@@ -33,9 +33,13 @@ Single-file CLI (`bin/ds`) with a plugin system. Everything is pure bash (4+).
 
 **Session naming**: session name = profile name, `profile-instance` (split on first `-`), or any arbitrary name (uses `ds` profile). Default session is `ds` with `ds` profile.
 
-**Host resolution**: `${XDG_CONFIG_HOME:-$HOME/.config}/ds/connect*.conf` files map hostname globs to connect methods. First match wins.
+**Host resolution**: `connect*.conf` files under the resolved config directory
+map hostname globs to connect methods. Absolute `XDG_CONFIG_HOME` values select
+that root; other values fall back to `$HOME/.config`. First match wins.
 
-**State**: runtime files (PID, share info, admin socket) live under `~/.local/state/ds/` with mode 0700.
+**State**: runtime files (PID, share info, admin socket) live under
+`${XDG_STATE_HOME:-$HOME/.local/state}/ds/` with mode 0700. Only absolute XDG
+roots are used; `DS_STATE_DIR` overrides the complete directory.
 
 **Testing**: `tests/ds-test` sources `bin/ds` with `DS_SOURCED=1` to test internal functions in isolation, using mock `tmux`/`upterm` binaries. Test framework lives in `tests/test-helpers.sh` (assertions: `_assert_eq`, `_assert_contains`, `_assert_not_contains`, etc.).
 

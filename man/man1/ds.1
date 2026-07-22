@@ -101,8 +101,17 @@ User share backend plugins.
 .SH ENVIRONMENT
 .TP
 .B XDG_CONFIG_HOME
-Base directory for user configuration. When unset or empty, defaults to
+Absolute base directory for user configuration. When unset, empty, or relative, defaults to
 .IR ~/.config .
+.TP
+.B XDG_STATE_HOME
+Absolute base directory for runtime state. When unset, empty, or relative,
+defaults to
+.IR ~/.local/state .
+.TP
+.B DS_STATE_DIR
+Complete runtime state directory. Overrides
+.BR XDG_STATE_HOME .
 .TP
 .B DS_INSTALL_DIR
 Destination for the installed

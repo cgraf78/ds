@@ -21,6 +21,7 @@ REAL_ZSH=$(command -v zsh || true)
 TEST_HOME=$(_tmpdir)
 export HOME="$TEST_HOME"
 unset XDG_CONFIG_HOME
+unset XDG_STATE_HOME
 export CONF_DIR="$TEST_HOME/.config/ds"
 mkdir -p "$CONF_DIR"
 
@@ -1288,6 +1289,51 @@ result=$(HOME="$TEST_HOME" XDG_CONFIG_HOME="$xdg_config_home" DS_SOURCED=1 bash 
 ' bash "$SCRIPT_DIR/../bin/ds")
 _assert_eq "runtime config: honors XDG_CONFIG_HOME" "$xdg_config_home/ds" "$result"
 
+result=$(HOME="$TEST_HOME" XDG_CONFIG_HOME=relative/config DS_SOURCED=1 bash -c '
+  source "$1"
+  printf "%s" "$CONF_DIR"
+' bash "$SCRIPT_DIR/../bin/ds")
+_assert_eq "runtime config: ignores relative XDG_CONFIG_HOME" "$TEST_HOME/.config/ds" "$result"
+
+xdg_state_home=$(_tmpdir)
+result=$(HOME="$TEST_HOME" XDG_STATE_HOME="$xdg_state_home" DS_SOURCED=1 bash -c '
+  source "$1"
+  printf "%s" "$DS_STATE_DIR"
+' bash "$SCRIPT_DIR/../bin/ds")
+_assert_eq "runtime state: honors XDG_STATE_HOME" "$xdg_state_home/ds" "$result"
+
+result=$(HOME="$TEST_HOME" XDG_STATE_HOME=relative/state DS_SOURCED=1 bash -c '
+  source "$1"
+  printf "%s" "$DS_STATE_DIR"
+' bash "$SCRIPT_DIR/../bin/ds")
+_assert_eq "runtime state: ignores relative XDG_STATE_HOME" "$TEST_HOME/.local/state/ds" "$result"
+
+explicit_state=$(_tmpdir)/explicit-ds
+result=$(HOME="$TEST_HOME" XDG_STATE_HOME="$xdg_state_home" DS_STATE_DIR="$explicit_state" \
+  DS_SOURCED=1 bash -c '
+  source "$1"
+  printf "%s" "$DS_STATE_DIR"
+' bash "$SCRIPT_DIR/../bin/ds")
+_assert_eq "runtime state: DS_STATE_DIR overrides XDG_STATE_HOME" "$explicit_state" "$result"
+
+# shellcheck disable=SC2016 # Runtime paths expand inside the isolated shell.
+result=$(env -u HOME XDG_CONFIG_HOME="$xdg_config_home" XDG_STATE_HOME="$xdg_state_home" \
+  DS_STATE_DIR='' DS_SOURCED=1 bash -c '
+  source "$1"
+  printf "%s\n%s" "$CONF_DIR" "$DS_STATE_DIR"
+' bash "$SCRIPT_DIR/../bin/ds")
+_assert_eq "runtime paths: absolute XDG roots do not require HOME" \
+  "$xdg_config_home/ds
+$xdg_state_home/ds" "$result"
+
+# shellcheck disable=SC2016 # Runtime paths expand inside the isolated shell.
+result=$(env -u HOME XDG_CONFIG_HOME="$xdg_config_home" DS_STATE_DIR="$explicit_state" \
+  DS_SOURCED=1 bash -c '
+  source "$1"
+  printf "%s" "$DS_STATE_DIR"
+' bash "$SCRIPT_DIR/../bin/ds")
+_assert_eq "runtime state: explicit override does not require HOME" "$explicit_state" "$result"
+
 # init bash advertises bash and zsh completions
 result=$("$SCRIPT_DIR/../bin/ds" init bash 2>&1)
 _assert_contains "ds init bash: wraps ds invocation" 'DS_SHELL_NAME=bash command ds "$@"' "$result"
@@ -1299,9 +1345,10 @@ _assert_contains "ds init bash: emits shared profile config glob" \
   "local profile_config_glob=$(_shell_literal "$_DS_PROFILE_CONFIG_GLOB")" "$result"
 _assert_contains "ds init bash: emits shared profile script glob" \
   "local profile_script_glob=$(_shell_literal "$_DS_PROFILE_SCRIPT_GLOB")" "$result"
-# shellcheck disable=SC2016 # Assert that generated code defers XDG expansion.
-_assert_contains "ds init bash: emits XDG config directory contract" \
-  'local conf_dir="${XDG_CONFIG_HOME:-$HOME/.config}/ds"' "$result"
+_assert_contains "ds init bash: emits resolved config directory contract" \
+  "local conf_dir=$(_shell_literal "$CONF_DIR")" "$result"
+_assert_contains "ds init bash: emits resolved state handoff contract" \
+  "_ds_f=$(_shell_literal "$DS_STATE_DIR/attach-next")" "$result"
 _assert_contains "ds init bash: host completion uses shared connect glob" \
   "for f in \"\$conf_dir\"/\$connect_config_glob; do" "$result"
 _assert_contains "ds init bash: script profile completion uses shared profile glob" \
@@ -1319,7 +1366,8 @@ _assert_exit "ds init bash: generated snippet parses" 0 "$rc"
 handoff_bin=$(_tmpdir)
 handoff_home=$(_tmpdir)
 handoff_log=$(_tmpdir)/args.log
-mkdir -p "$handoff_home/.local/state/ds"
+handoff_state="$(_tmpdir)/state dir/ds"
+mkdir -p "$handoff_state"
 cat >"$handoff_bin/ds" <<'EOF'
 #!/usr/bin/env bash
 printf 'COUNT=%s\n' "$#" >"${DS_HANDOFF_LOG:?}"
@@ -1328,7 +1376,9 @@ for arg in "$@"; do
 done
 EOF
 chmod +x "$handoff_bin/ds"
-printf '%s\n' -k 'dev work' 'dev*' >"$handoff_home/.local/state/ds/attach-next"
+printf '%s\n' -k 'dev work' 'dev*' >"$handoff_state/attach-next"
+HOME="$handoff_home" DS_STATE_DIR="$handoff_state" "$SCRIPT_DIR/../bin/ds" init bash \
+  >"$bash_init_file"
 HOME="$handoff_home" DS_HANDOFF_LOG="$handoff_log" PATH="$handoff_bin:$PATH" \
   bash --noprofile --norc -ic 'source "$1"' bash "$bash_init_file" >/dev/null 2>&1
 _assert_eq "ds init bash: connect handoff preserves argument boundaries" \
@@ -1336,6 +1386,8 @@ _assert_eq "ds init bash: connect handoff preserves argument boundaries" \
 
 bash_completion_home=$(_tmpdir)
 bash_completion_xdg=$(_tmpdir)
+HOME="$bash_completion_home" XDG_CONFIG_HOME="$bash_completion_xdg" \
+  "$SCRIPT_DIR/../bin/ds" init bash >"$bash_init_file"
 mkdir -p "$bash_completion_xdg/ds"
 cat >"$bash_completion_xdg/ds/connect.conf" <<'EOF'
 workhost ssh workhost.example
@@ -1365,9 +1417,10 @@ _assert_contains "ds init zsh: emits shared profile config glob" \
   "local profile_config_glob=$(_shell_literal "$_DS_PROFILE_CONFIG_GLOB")" "$result"
 _assert_contains "ds init zsh: emits shared profile script glob" \
   "local profile_script_glob=$(_shell_literal "$_DS_PROFILE_SCRIPT_GLOB")" "$result"
-# shellcheck disable=SC2016 # Assert that generated code defers XDG expansion.
-_assert_contains "ds init zsh: emits XDG config directory contract" \
-  'local conf_dir="${XDG_CONFIG_HOME:-$HOME/.config}/ds"' "$result"
+_assert_contains "ds init zsh: emits resolved config directory contract" \
+  "local conf_dir=$(_shell_literal "$CONF_DIR")" "$result"
+_assert_contains "ds init zsh: emits resolved state handoff contract" \
+  "_ds_f=$(_shell_literal "$DS_STATE_DIR/attach-next")" "$result"
 _assert_contains "ds init zsh: host completion uses shared connect glob" \
   "for f in \"\$conf_dir\"/\${~connect_config_glob}(N); do" "$result"
 _assert_contains "ds init zsh: script profile completion uses shared profile glob" \
@@ -1384,7 +1437,9 @@ if [[ -n "$REAL_ZSH" ]]; then
   _assert_exit "ds init zsh: generated snippet parses" 0 "$rc"
 
   : >"$handoff_log"
-  printf '%s\n' -k 'dev work' 'dev*' >"$handoff_home/.local/state/ds/attach-next"
+  printf '%s\n' -k 'dev work' 'dev*' >"$handoff_state/attach-next"
+  HOME="$handoff_home" DS_STATE_DIR="$handoff_state" "$SCRIPT_DIR/../bin/ds" init zsh \
+    >"$zsh_init_file"
   # shellcheck disable=SC2016 # $1 expands inside the zsh program.
   HOME="$handoff_home" DS_HANDOFF_LOG="$handoff_log" PATH="$handoff_bin:$PATH" \
     "$REAL_ZSH" -fic 'source "$1"' zsh "$zsh_init_file" >/dev/null 2>&1
@@ -1393,6 +1448,8 @@ if [[ -n "$REAL_ZSH" ]]; then
 
   zsh_completion_home=$(_tmpdir)
   zsh_completion_xdg=$(_tmpdir)
+  HOME="$zsh_completion_home" XDG_CONFIG_HOME="$zsh_completion_xdg" \
+    "$SCRIPT_DIR/../bin/ds" init zsh >"$zsh_init_file"
   mkdir -p "$zsh_completion_xdg/ds"
   cat >"$zsh_completion_xdg/ds/connect.conf" <<'EOF'
 workhost ssh workhost.example
@@ -1552,6 +1609,9 @@ for _a in "$@"; do
 done
 echo "SSH_HOST=$_host" > "${REMOTE_LOG:-/dev/null}"
 echo "SSH_ARGS=$*" >> "${REMOTE_LOG:-/dev/null}"
+if [[ "${MOCK_SSH_FAIL:-0}" == "1" ]]; then
+    exit 42
+fi
 if [[ "${MOCK_SSH_READ_STDIN:-0}" == "1" ]]; then
     _stdin_index=0
     while IFS= read -r _stdin; do
@@ -1696,10 +1756,257 @@ _assert_contains "plugin remote killall: passes killall args" "PLUGIN_ARGS=--kil
 
 # The bundled ET plugin hands the normalized ds arguments to the remote shell
 # through attach-next. ET itself only opens the persistent interactive transport.
+upterm_remote_info=$(_tmpdir)/share-info
+printf '%s\n' 'ssh: ssh test@example' >"$upterm_remote_info"
+: >"$REMOTE_LOG"
+DS_UPTERM_PUSH=sharehost DS_SHARE_INFO_FILE="$upterm_remote_info" \
+  MOCK_SSH_READ_STDIN=1 _upterm_push_share_info dev >/dev/null
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "upterm remote state: resolves XDG state on the peer" \
+  'XDG_STATE_HOME' "$remote_log"
+_assert_not_contains "upterm remote state: does not leak local state path" \
+  "$DS_STATE_DIR" "$remote_log"
+_assert_contains "upterm remote state: streams share info" \
+  'SSH_STDIN[0]=ssh: ssh test@example' "$remote_log"
+
+: >"$REMOTE_LOG"
+if result=$(DS_UPTERM_PUSH=sharehost DS_SHARE_INFO_FILE="$upterm_remote_info" \
+  _upterm_push_share_info '../outside' 2>&1); then
+  rc=0
+else
+  rc=$?
+fi
+_assert_exit "upterm remote state: traversal session blocks push" 2 "$rc"
+_assert_contains "upterm remote state: traversal push rejection is actionable" \
+  "must be one non-empty basename component" "$result"
+_assert_eq "upterm remote state: traversal push does not reach ssh" "" \
+  "$(cat "$REMOTE_LOG" 2>/dev/null || true)"
+
+: >"$REMOTE_LOG"
+if result=$(DS_UPTERM_PUSH=sharehost _upterm_unpush_share_info '../outside' 2>&1); then
+  rc=0
+else
+  rc=$?
+fi
+_assert_exit "upterm remote state: traversal session blocks remover" 2 "$rc"
+_assert_contains "upterm remote state: traversal remover rejection is actionable" \
+  "must be one non-empty basename component" "$result"
+_assert_eq "upterm remote state: traversal remover does not reach ssh" "" \
+  "$(cat "$REMOTE_LOG" 2>/dev/null || true)"
+
+fallback_host_bin=$(_tmpdir)
+cat >"$fallback_host_bin/uname" <<'EOF'
+#!/bin/sh
+printf '%s\n' fallback.example
+EOF
+chmod +x "$fallback_host_bin/uname"
+result=$(PATH="$fallback_host_bin" _upterm_source_host)
+_assert_eq "upterm remote state: falls back to uname when hostname is unavailable" \
+  "fallback" "$result"
+
 result=$(_run_remote "export MOCK_SSH_READ_STDIN=1; HOST=server1 ACTION=session SESSION=dev CONNECT_OVERRIDE=et")
 remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
 _assert_contains "et remote session: seeds session action" "SSH_STDIN[0]=dev" "$remote_log"
 _assert_contains "et remote session: opens ET transport" "ET_ARGS=server1" "$remote_log"
+_assert_contains "et remote session: resolves XDG state on the peer" 'XDG_STATE_HOME' "$remote_log"
+_assert_not_contains "et remote session: does not leak local state path" "$DS_STATE_DIR" "$remote_log"
+
+remote_home=$(_tmpdir)
+remote_xdg_state=$(_tmpdir)
+remote_handoff_cmd=$(_remote_state_write_command attach-next)
+printf '%s\n' dev --no-attach | HOME="$remote_home" XDG_STATE_HOME="$remote_xdg_state" \
+  DS_STATE_DIR='' sh -c "$remote_handoff_cmd"
+_assert_file_content "remote state writer: honors peer XDG_STATE_HOME" \
+  $'dev\n--no-attach' "$remote_xdg_state/ds/attach-next"
+
+printf '%s\n' dev | env -u HOME XDG_STATE_HOME="$remote_xdg_state" DS_STATE_DIR='' \
+  sh -c "$remote_handoff_cmd"
+_assert_file_content "remote state writer: absolute XDG state does not require peer HOME" \
+  "dev" "$remote_xdg_state/ds/attach-next"
+
+remote_fallback_home=$(_tmpdir)
+printf '%s\n' dev | HOME="$remote_fallback_home" XDG_STATE_HOME=relative/state \
+  DS_STATE_DIR='' sh -c "$remote_handoff_cmd"
+_assert_file_content "remote state writer: ignores relative peer XDG_STATE_HOME" \
+  "dev" "$remote_fallback_home/.local/state/ds/attach-next"
+
+remote_explicit_state=$(_tmpdir)/explicit-ds
+printf '%s\n' dev | HOME="$remote_home" XDG_STATE_HOME="$remote_xdg_state" \
+  DS_STATE_DIR="$remote_explicit_state" sh -c "$remote_handoff_cmd"
+_assert_file_content "remote state writer: honors peer DS_STATE_DIR override" \
+  "dev" "$remote_explicit_state/attach-next"
+
+directory_remote_state=$(_tmpdir)/directory-ds
+mkdir -p "$directory_remote_state/attach-next"
+if output=$(printf '%s\n' blocked | DS_STATE_DIR="$directory_remote_state" \
+  sh -c "$remote_handoff_cmd" 2>&1); then
+  rc=0
+else
+  rc=$?
+fi
+_assert_exit "remote state writer: destination directory fails closed" 1 "$rc"
+_assert_contains "remote state writer: destination directory failure is actionable" \
+  "remote state destination is a directory" "$output"
+_assert_file_missing "remote state writer: payload is not moved inside destination directory" \
+  "$directory_remote_state/attach-next/payload"
+
+symlink_directory_remote_state=$(_tmpdir)/symlink-directory-ds
+symlink_directory_target=$(_tmpdir)/symlink-target
+mkdir -p "$symlink_directory_remote_state" "$symlink_directory_target"
+ln -s "$symlink_directory_target" "$symlink_directory_remote_state/attach-next"
+if output=$(printf '%s\n' blocked | DS_STATE_DIR="$symlink_directory_remote_state" \
+  sh -c "$remote_handoff_cmd" 2>&1); then
+  rc=0
+else
+  rc=$?
+fi
+_assert_exit "remote state writer: symlink-to-directory destination fails closed" 1 "$rc"
+_assert_file_missing "remote state writer: payload is not moved through directory symlink" \
+  "$symlink_directory_target/payload"
+if [[ -L "$symlink_directory_remote_state/attach-next" ]]; then
+  _pass "remote state writer: rejected directory symlink remains unchanged"
+else
+  _fail "remote state writer: rejected directory symlink remains unchanged"
+fi
+
+remote_tricky_state=$(_tmpdir)/tricky-ds
+remote_tricky_file=$'share\'s\nstate'
+remote_tricky_cmd=$(_remote_state_write_command "$remote_tricky_file")
+sh -n -c "$remote_tricky_cmd"
+_assert_exit "remote state writer: POSIX command parses with apostrophe and newline" 0 "$?"
+printf '%s\n' shared | DS_STATE_DIR="$remote_tricky_state" sh -c "$remote_tricky_cmd"
+_assert_file_content "remote state writer: preserves apostrophe and newline in filename" \
+  "shared" "$remote_tricky_state/$remote_tricky_file"
+remote_tricky_remove_cmd=$(_remote_state_remove_command "$remote_tricky_file")
+sh -n -c "$remote_tricky_remove_cmd"
+_assert_exit "remote state remover: POSIX command parses with apostrophe and newline" 0 "$?"
+DS_STATE_DIR="$remote_tricky_state" sh -c "$remote_tricky_remove_cmd"
+_assert_file_missing "remote state remover: preserves apostrophe and newline in filename" \
+  "$remote_tricky_state/$remote_tricky_file"
+
+if output=$(_remote_state_write_command '../outside' 2>&1); then
+  rc=0
+else
+  rc=$?
+fi
+_assert_exit "remote state writer: traversal filename is rejected" 2 "$rc"
+_assert_contains "remote state writer: traversal rejection is actionable" \
+  "must be one non-empty basename component" "$output"
+
+if output=$(_remote_state_remove_command 'nested/outside' 2>&1); then
+  rc=0
+else
+  rc=$?
+fi
+_assert_exit "remote state remover: traversal filename is rejected" 2 "$rc"
+_assert_contains "remote state remover: traversal rejection is actionable" \
+  "must be one non-empty basename component" "$output"
+
+attack_remote_state=$(_tmpdir)/attack-ds
+attack_victim=$(_tmpdir)/victim
+printf '%s\n' untouched >"$attack_victim"
+mkdir -p "$attack_remote_state"
+set +e
+printf '%s\n' published | DS_STATE_DIR="$attack_remote_state" VICTIM="$attack_victim" \
+  REMOTE_CMD="$remote_handoff_cmd" sh -c '
+    ln -s "$VICTIM" "$DS_STATE_DIR/attach-next.$$" || exit
+    eval "$REMOTE_CMD"
+  '
+rc=$?
+set -e
+_assert_exit "remote state writer: planted legacy temp symlink does not block publish" 0 "$rc"
+_assert_file_content "remote state writer: planted legacy temp symlink cannot overwrite victim" \
+  "untouched" "$attack_victim"
+_assert_file_content "remote state writer: planted legacy temp symlink publishes payload" \
+  "published" "$attack_remote_state/attach-next"
+if [[ -L "$attack_remote_state/attach-next" ]]; then
+  _fail "remote state writer: destination is a regular file"
+else
+  _pass "remote state writer: destination is a regular file"
+fi
+
+collision_remote_state=$(_tmpdir)/collision-ds
+mkdir -p "$collision_remote_state"
+set +e
+printf '%s\n' blocked | DS_STATE_DIR="$collision_remote_state" REMOTE_CMD="$remote_handoff_cmd" \
+  sh -c '
+    mkdir "$DS_STATE_DIR/.ds-state.$$" || exit
+    eval "$REMOTE_CMD"
+  ' >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "remote state writer: planted private temp directory fails closed" 1 "$rc"
+_assert_file_missing "remote state writer: temp collision does not publish payload" \
+  "$collision_remote_state/attach-next"
+
+chmod_remote_state=$(_tmpdir)/chmod-ds
+chmod_remote_bin=$(_tmpdir)
+cat >"$chmod_remote_bin/chmod" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod +x "$chmod_remote_bin/chmod"
+set +e
+printf '%s\n' private | DS_STATE_DIR="$chmod_remote_state" \
+  PATH="$chmod_remote_bin:$PATH" sh -c "$remote_handoff_cmd" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "remote state writer: state-directory chmod failure propagates" 1 "$rc"
+_assert_file_missing "remote state writer: state-directory chmod failure does not publish" \
+  "$chmod_remote_state/attach-next"
+
+payload_chmod_remote_state=$(_tmpdir)/payload-chmod-ds
+payload_chmod_remote_bin=$(_tmpdir)
+cat >"$payload_chmod_remote_bin/chmod" <<'EOF'
+#!/bin/sh
+if [ "$1" = 600 ]; then
+  exit 1
+fi
+exec "$REAL_CHMOD" "$@"
+EOF
+chmod +x "$payload_chmod_remote_bin/chmod"
+set +e
+printf '%s\n' private | DS_STATE_DIR="$payload_chmod_remote_state" REAL_CHMOD="$(command -v chmod)" \
+PATH="$payload_chmod_remote_bin:$PATH" sh -c "$remote_handoff_cmd" >/dev/null 2>&1
+rc=$?
+set -e
+_assert_exit "remote state writer: payload chmod failure propagates" 1 "$rc"
+_assert_file_missing "remote state writer: payload chmod failure does not publish" \
+  "$payload_chmod_remote_state/attach-next"
+
+failed_remote_home=$(_tmpdir)
+failed_remote_bin=$(_tmpdir)
+cat >"$failed_remote_bin/mv" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod +x "$failed_remote_bin/mv"
+set +e
+printf '%s\n' partial | HOME="$failed_remote_home" XDG_STATE_HOME='' DS_STATE_DIR='' \
+  PATH="$failed_remote_bin:$PATH" sh -c "$remote_handoff_cmd"
+rc=$?
+set -e
+_assert_exit "remote state writer: replacement failure propagates" 1 "$rc"
+_assert_file_missing "remote state writer: replacement failure leaves no handoff" \
+  "$failed_remote_home/.local/state/ds/attach-next"
+failed_remote_residue=$(printf '%s\n' "$failed_remote_home/.local/state/ds"/.ds-state.*)
+_assert_eq "remote state writer: replacement failure removes temp directory" \
+  "$failed_remote_home/.local/state/ds/.ds-state.*" "$failed_remote_residue"
+
+result=$(_run_remote "export MOCK_SSH_FAIL=1; HOST=server1 ACTION=session SESSION=dev CONNECT_OVERRIDE=et")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "et remote session: handoff failure is actionable" \
+  "failed to seed ET handoff state on server1" "$result"
+_assert_not_contains "et remote session: handoff failure does not open ET" \
+  "ET_ARGS=" "$remote_log"
+set +e
+result=$(HOME="$TEST_HOME" DS_LIB_DIR="$CONF_DIR" DS_STATE_DIR="$DS_STATE_DIR" \
+  DS_SOURCED='' MOCK_SSH_FAIL=1 "$SCRIPT_DIR/../bin/ds" dev @server1 -c et 2>&1)
+rc=$?
+set -e
+_assert_exit "et remote session: handoff failure propagates" 1 "$rc"
+_assert_contains "et remote session: propagated failure stays actionable" \
+  "failed to seed ET handoff state on server1" "$result"
 
 result=$(_run_remote "export MOCK_SSH_READ_STDIN=1; HOST=server1 ACTION=session SESSION=dev CONNECT_OVERRIDE=et DS_SHARE_VIA=upterm DS_NO_ATTACH=1")
 remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)

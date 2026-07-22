@@ -10,7 +10,7 @@
 #        ds init <bash|zsh>            print shell integration snippet
 #
 # Sessions:    profile name, profile-instance, or any name (e.g., dev, dev-work, myproject)
-# User config: ${XDG_CONFIG_HOME:-$HOME/.config}/ds
+# User config: $XDG_CONFIG_HOME/ds (absolute XDG root; ~/.config fallback)
 # Profiles:    profile-<name>.sh   (define _profile_<name>)
 # Connections: connect-<method>.sh (define _connect_<method>)
 # Share:       share-<backend>.sh   (define _share_start, _share_stop, etc.)
@@ -22,6 +22,21 @@
 #              NO_TMUX=1                  → skip for one login
 #              (also requires a real terminal: a login with no controlling tty,
 #               e.g. a tunnel/command session, is skipped even when interactive)
+
+_xdg_dir() {
+  local value="$1" fallback="$2" suffix="$3" variable="$4"
+
+  case "$value" in
+    /*) printf '%s/%s\n' "${value%/}" "$suffix" ;;
+    *)
+      if [[ -z "${HOME:-}" ]]; then
+        printf 'ds: HOME is required when %s is unset or relative\n' "$variable" >&2
+        return 1
+      fi
+      printf '%s/%s/%s\n' "${HOME%/}" "${fallback#/}" "$suffix"
+      ;;
+  esac
+}
 
 if [[ -z "${DS_LIB_DIR:-}" ]]; then
   # A normal install keeps bundled plugins next to the binary, but packagers and
@@ -47,7 +62,12 @@ if [[ -z "${DS_LIB_DIR:-}" ]]; then
   fi
   unset _ds_self _ds_lib_dir
 fi
-CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ds"
+if ! CONF_DIR="$(_xdg_dir "${XDG_CONFIG_HOME:-}" .config ds XDG_CONFIG_HOME)"; then
+  if [[ -n "${DS_SOURCED:-}" ]]; then
+    return 1
+  fi
+  exit 1
+fi
 ACTION="session"
 PROFILE=""
 SESSION=""
@@ -58,7 +78,14 @@ INIT_SHELL=""
 DS_SHARE_VIA="${DS_SHARE_VIA:-}"
 DS_NO_ATTACH="${DS_NO_ATTACH:-0}"
 DS_SHARE_INFO_FILE="${DS_SHARE_INFO_FILE:-}"
-DS_STATE_DIR="${DS_STATE_DIR:-$HOME/.local/state/ds}"
+if [[ -z "${DS_STATE_DIR:-}" ]]; then
+  if ! DS_STATE_DIR="$(_xdg_dir "${XDG_STATE_HOME:-}" .local/state ds XDG_STATE_HOME)"; then
+    if [[ -n "${DS_SOURCED:-}" ]]; then
+      return 1
+    fi
+    exit 1
+  fi
+fi
 FORWARDS=()
 R_FORWARDS=()
 
@@ -217,17 +244,85 @@ _shell_literal() {
   printf '%q' "$1"
 }
 
+_posix_shell_literal() {
+  local escaped=${1//\'/\'\\\'\'}
+  printf "'%s'" "$escaped"
+}
+
+_remote_state_file_literal() {
+  case "$1" in
+    "" | . | .. | */*)
+      echo "ds: remote state filename must be one non-empty basename component" >&2
+      return 2
+      ;;
+  esac
+  _posix_shell_literal "$1"
+}
+
+_remote_state_dir_prelude() {
+  cat <<'EOF'
+_ds_state_dir=${DS_STATE_DIR:-}
+if [ -z "$_ds_state_dir" ]; then
+  case ${XDG_STATE_HOME:-} in
+    /*) _ds_state_dir=${XDG_STATE_HOME%/}/ds ;;
+    *)
+      if [ -z "${HOME:-}" ]; then
+        echo "ds: HOME is required when XDG_STATE_HOME is unset or relative" >&2
+        exit 1
+      fi
+      _ds_state_dir=$HOME/.local/state/ds
+      ;;
+  esac
+fi
+EOF
+}
+
+_remote_state_write_command() {
+  local file_q
+  file_q=$(_remote_state_file_literal "$1") || return
+  _remote_state_dir_prelude
+  cat <<EOF
+umask 077
+mkdir -p "\$_ds_state_dir" || exit
+chmod 700 "\$_ds_state_dir" || exit
+_ds_file=\$_ds_state_dir/$file_q
+if [ -d "\$_ds_file" ]; then
+  echo "ds: remote state destination is a directory: \$_ds_file" >&2
+  exit 1
+fi
+_ds_tmp_dir=\$_ds_state_dir/.ds-state.\$\$
+mkdir "\$_ds_tmp_dir" || exit
+trap 'rm -rf "\$_ds_tmp_dir"' 0 1 2 15
+_ds_tmp=\$_ds_tmp_dir/payload
+cat >"\$_ds_tmp" || exit
+chmod 600 "\$_ds_tmp" || exit
+mv -f "\$_ds_tmp" "\$_ds_file" || exit
+rmdir "\$_ds_tmp_dir" || exit
+trap - 0 1 2 15
+EOF
+}
+
+_remote_state_remove_command() {
+  local file_q
+  file_q=$(_remote_state_file_literal "$1") || return
+  _remote_state_dir_prelude
+  # shellcheck disable=SC2016 # The state directory expands on the remote host.
+  printf 'rm -f "$_ds_state_dir"/%s\n' "$file_q"
+}
+
 _emit_completion_file_contract() {
   local indent="${1:-}"
 
-  # Completion snippets run in the user's shell, but their file discovery
-  # contract belongs to ds itself. Emit the runtime constants here so changing
-  # config location or naming conventions does not leave completions behind.
-  # shellcheck disable=SC2016 # XDG variables expand when the generated snippet runs.
-  printf '%slocal conf_dir="${XDG_CONFIG_HOME:-$HOME/.config}/ds"\n' "$indent"
+  # Shell snippets must consume the same paths the generating ds process chose.
+  # Emitting literals keeps Bash and Zsh from reimplementing XDG precedence.
+  printf '%slocal conf_dir=%s\n' "$indent" "$(_shell_literal "$CONF_DIR")"
   printf '%slocal connect_config_glob=%s\n' "$indent" "$(_shell_literal "$_DS_CONNECT_CONFIG_GLOB")"
   printf '%slocal profile_config_glob=%s\n' "$indent" "$(_shell_literal "$_DS_PROFILE_CONFIG_GLOB")"
   printf '%slocal profile_script_glob=%s\n' "$indent" "$(_shell_literal "$_DS_PROFILE_SCRIPT_GLOB")"
+}
+
+_emit_handoff_file_contract() {
+  printf '_ds_f=%s\n' "$(_shell_literal "$DS_STATE_DIR/attach-next")"
 }
 
 # --- Profile layouts ---
@@ -709,7 +804,9 @@ ds() {
 }
 
 # Connect handoff: attach-next lets connect plugins request a session
-_ds_f="$HOME/.local/state/ds/attach-next"
+INIT_EOF
+      _emit_handoff_file_contract
+      cat <<'INIT_EOF'
 if [[ $- == *i* && -f "$_ds_f" ]]; then
     _ds_args=()
     while IFS= read -r _ds_arg; do
@@ -809,7 +906,9 @@ ds() {
 }
 
 # Connect handoff: attach-next lets connect plugins request a session
-_ds_f="$HOME/.local/state/ds/attach-next"
+INIT_EOF
+      _emit_handoff_file_contract
+      cat <<'INIT_EOF'
 if [[ -o interactive && -f "$_ds_f" ]]; then
     _ds_args=()
     while IFS= read -r _ds_arg; do
@@ -1192,7 +1291,7 @@ esac
 
 if [[ -n "$HOST" ]]; then
   _remote
-  exit 0
+  exit $?
 fi
 
 case "$ACTION" in
