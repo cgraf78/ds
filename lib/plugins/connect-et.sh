@@ -1,7 +1,7 @@
 # shellcheck shell=bash
 # ds connect method: et — persistent eternal terminal connection
 _connect_et() {
-  local host="$1" arg
+  local host="$1" arg remote_cmd
   shift 5
   local -a args=("$@")
   # Seed attach-next so the shell snippet (ds init bash) execs into the
@@ -14,8 +14,12 @@ _connect_et() {
       return 2
     fi
   done
-  printf '%s\n' "${args[@]}" |
-    ssh "$host" "umask 077; mkdir -p ~/.local/state/ds && cat > ~/.local/state/ds/attach-next"
+  remote_cmd="$(_remote_state_write_command attach-next)"
+  # shellcheck disable=SC2029 # remote policy is deliberately expanded by the peer shell.
+  if ! printf '%s\n' "${args[@]}" | ssh "$host" "$remote_cmd"; then
+    echo "ds: failed to seed ET handoff state on $host" >&2
+    return 1
+  fi
   local -a fwd=()
   # et's `-t local:remote` matches our DS_FORWARDS spec directly.
   # et's `-r source:destination` (bind-on-remote : target-on-client)

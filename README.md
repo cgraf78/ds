@@ -69,8 +69,8 @@ The profile is resolved from the session name: split on the first `-`, and if th
 
 ## Profiles
 
-User configuration lives in `$XDG_CONFIG_HOME/ds`, falling back to
-`~/.config/ds` when `XDG_CONFIG_HOME` is unset or empty. Profiles define the
+User configuration lives in `$XDG_CONFIG_HOME/ds` when `XDG_CONFIG_HOME` is an
+absolute path, falling back to `~/.config/ds` otherwise. Profiles define the
 tmux window/pane layout. Bundled profiles live in `lib/plugins/`. User profiles
 go in the configuration directory as `profile-<name>.sh` and take priority.
 
@@ -218,7 +218,10 @@ Skip auto-attach for a single login with `NO_TMUX=1`.
 
 ## State
 
-Runtime state lives under `~/.local/state/ds/` (mode `0700`).
+Runtime state lives under `$XDG_STATE_HOME/ds/` when `XDG_STATE_HOME` is an
+absolute path, falling back to `~/.local/state/ds/`. Set `DS_STATE_DIR` to
+override the complete state directory. State directories use mode `0700`, and
+handoff files use mode `0600`.
 
 ## License
 

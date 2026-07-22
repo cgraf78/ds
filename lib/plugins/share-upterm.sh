@@ -45,8 +45,6 @@ DS_UPTERM_PUSH="${DS_UPTERM_PUSH:-}"
 DS_UPTERM_PROXY_SESSION="${DS_UPTERM_PROXY_SESSION:-}"
 DS_UPTERM_SHARE_TTL="${DS_UPTERM_SHARE_TTL:-}"
 
-_UPTERM_REMOTE_STATE_DIR=".local/state/ds"
-
 # --- State file helpers ---
 
 _upterm_pid_file() {
@@ -130,7 +128,7 @@ _upterm_read_info_from_log() {
   return 1
 }
 
-# Push share info to a remote host via SCP.
+# Push share info to the state directory selected on the remote host.
 _upterm_push_share_info() {
   local session="$1"
   [[ -n "$DS_UPTERM_PUSH" ]] || return 0
@@ -139,19 +137,16 @@ _upterm_push_share_info() {
   local src_host
   src_host=$(hostname -s 2>/dev/null || hostname)
   local remote_file="ds.upterm-${src_host}-${session}.share"
-  local escaped_dir
-  escaped_dir=$(printf '%q' "$_UPTERM_REMOTE_STATE_DIR")
+  local remote_cmd
+  remote_cmd="$(_remote_state_write_command "$remote_file")"
 
-  ssh -o BatchMode=yes -o ConnectTimeout=5 "$DS_UPTERM_PUSH" "mkdir -p ~/$escaped_dir" 2>/dev/null || {
-    echo "ds: failed to create remote state dir on $DS_UPTERM_PUSH" >&2
-    return 1
-  }
-  scp -o BatchMode=yes -o ConnectTimeout=5 -q \
-    "$DS_SHARE_INFO_FILE" "$DS_UPTERM_PUSH:~/$_UPTERM_REMOTE_STATE_DIR/$remote_file" 2>/dev/null || {
+  # shellcheck disable=SC2029 # remote policy is deliberately expanded by the peer shell.
+  ssh -o BatchMode=yes -o ConnectTimeout=5 "$DS_UPTERM_PUSH" "$remote_cmd" \
+    <"$DS_SHARE_INFO_FILE" 2>/dev/null || {
     echo "ds: failed to push share info to $DS_UPTERM_PUSH" >&2
     return 1
   }
-  echo "ds: pushed share info to $DS_UPTERM_PUSH:~/$_UPTERM_REMOTE_STATE_DIR/$remote_file"
+  echo "ds: pushed share info to $DS_UPTERM_PUSH:$remote_file"
 }
 
 _upterm_unpush_share_info() {
@@ -159,9 +154,10 @@ _upterm_unpush_share_info() {
   [[ -n "$DS_UPTERM_PUSH" ]] || return 0
   local src_host
   src_host=$(hostname -s 2>/dev/null || hostname)
-  local escaped_file
-  escaped_file=$(printf '%q' "$_UPTERM_REMOTE_STATE_DIR/ds.upterm-${src_host}-${session}.share")
-  ssh -o BatchMode=yes -o ConnectTimeout=5 "$DS_UPTERM_PUSH" "rm -f ~/$escaped_file" 2>/dev/null || true
+  local remote_cmd
+  remote_cmd="$(_remote_state_remove_command "ds.upterm-${src_host}-${session}.share")"
+  # shellcheck disable=SC2029 # remote policy is deliberately expanded by the peer shell.
+  ssh -o BatchMode=yes -o ConnectTimeout=5 "$DS_UPTERM_PUSH" "$remote_cmd" 2>/dev/null || true
 }
 
 # --- Required interface ---
