@@ -457,8 +457,8 @@ _share_start() {
   fi
 
   # Wait for admin socket, then collect share info.
-  local admin_sock content
-  for _ in $(seq 1 30); do
+  local admin_sock content attempt
+  for ((attempt = 0; attempt < 30; attempt++)); do
     if [[ -s "$admin_file" ]]; then
       admin_sock=$(cat "$admin_file")
       break
@@ -478,7 +478,7 @@ _share_start() {
     return 1
   fi
 
-  for _ in $(seq 1 30); do
+  for ((attempt = 0; attempt < 30; attempt++)); do
     content=$(upterm session current --admin-socket "$admin_sock" 2>/dev/null || true)
     if [[ -n "$content" ]]; then
       content=$(_upterm_normalize_info "$content")

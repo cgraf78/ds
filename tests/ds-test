@@ -620,6 +620,15 @@ fi
 
 # Test --share action with existing session
 _reset_tmux_log
+SEQ_LOG="$MOCK_BIN/seq.log"
+: >"$SEQ_LOG"
+cat >"$MOCK_BIN/seq" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$SEQ_LOG"
+exit 127
+MOCK
+chmod +x "$MOCK_BIN/seq"
+export SEQ_LOG
 export MOCK_SESSIONS="ds"
 DS_SHARE_VIA="upterm"
 DS_UPTERM_GITHUB_USER="testuser"
@@ -629,6 +638,8 @@ HOST=""
 # _do_share calls _share_start, which runs the full share flow with mock upterm
 result=$(_do_share 2>&1) || true
 _assert_not_contains "share action: no 'no session' error for existing session" "no session" "$result"
+_assert_eq "share action: polling does not require external seq" "" "$(cat "$SEQ_LOG")"
+rm -f "$MOCK_BIN/seq"
 
 # Test --share action with nonexistent session
 _reset_tmux_log
