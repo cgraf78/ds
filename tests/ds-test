@@ -10,6 +10,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REAL_ZSH=$(command -v zsh || true)
+REAL_SSH_KEYGEN=$(command -v ssh-keygen || true)
 
 # shellcheck source=test-helpers.sh
 . "$SCRIPT_DIR/test-helpers.sh"
@@ -177,7 +178,29 @@ chmod +x "$MOCK_BIN/tmux"
 cat >"$MOCK_BIN/upterm" <<'MOCK'
 #!/usr/bin/env bash
 echo "upterm $*" >> "${TMUX_LOG:-/dev/null}"
+if [[ "${MOCK_UPTERM_FAIL:-}" == 1 ]]; then
+  exit 7
+fi
 if [[ "$1" == "host" ]]; then
+  if [[ -n "${MOCK_UPTERM_PID_FILE:-}" ]]; then
+    printf '%s\n' "$$" >"$MOCK_UPTERM_PID_FILE"
+  fi
+  if [[ "${MOCK_UPTERM_IGNORE_TERM:-}" == 1 ]]; then
+    trap '[[ -z "${MOCK_UPTERM_TERM_FILE:-}" ]] || printf "term\n" >"$MOCK_UPTERM_TERM_FILE"' TERM
+  fi
+  known_hosts_file=""
+  previous=""
+  for arg; do
+    if [[ "$previous" == "--known-hosts" ]]; then
+      known_hosts_file="$arg"
+      break
+    fi
+    previous="$arg"
+  done
+  if [[ -n "${MOCK_UPTERM_KNOWN_HOSTS_CAPTURE:-}" && -n "$known_hosts_file" ]]; then
+    cat "$known_hosts_file" >"$MOCK_UPTERM_KNOWN_HOSTS_CAPTURE"
+    printf 'upterm-known-hosts-path=%s\n' "$known_hosts_file" >>"${TMUX_LOG:-/dev/null}"
+  fi
   # Execute the hosted command (bash -c "...") that writes the admin socket file.
   # Find args after "--" and run them so _share_start's admin socket polling works.
   found_dashdash=0
@@ -194,12 +217,79 @@ if [[ "$1" == "host" ]]; then
     export UPTERM_ADMIN_SOCKET="/tmp/mock-upterm-admin.sock"
     "${hosted_args[@]}" &
     hosted_pid=$!
-    trap "kill $hosted_pid 2>/dev/null" EXIT
+    _mock_upterm_record_pid() {
+      local recorded_pid="$1" weekday month day clock year extra temporary
+      if [[ -n "${DS_TEST_PID_LEDGER:-}" && -d "$DS_TEST_PID_LEDGER" &&
+        ! -L "$DS_TEST_PID_LEDGER" ]]; then
+        read -r weekday month day clock year extra \
+          < <(LC_ALL=C ps -o lstart= -p "$recorded_pid")
+        [[ -n "$weekday" && -n "$month" && -n "$day" &&
+          -n "$clock" && -n "$year" && -z "${extra:-}" ]] || return 1
+        temporary="$DS_TEST_PID_LEDGER/$recorded_pid.new.$$.$RANDOM"
+        if ! (
+          set -o noclobber
+          printf '%s %s %s %s %s\n' \
+            "$weekday" "$month" "$day" "$clock" "$year" \
+            >"$temporary"
+        ) 2>/dev/null || ! chmod 600 "$temporary" ||
+          ! mv -f "$temporary" "$DS_TEST_PID_LEDGER/$recorded_pid"; then
+          rm -f "$temporary"
+          return 1
+        fi
+      fi
+    }
+    _mock_upterm_record_pid "$hosted_pid"
+    hosted_child=""
+    hosted_deadline=$((SECONDS + 10))
+    while ((SECONDS < hosted_deadline)); do
+      while read -r child parent; do
+        [[ "$child" =~ ^[0-9]+$ && "$parent" == "$hosted_pid" ]] || continue
+        hosted_child="$child"
+        break
+      done < <(ps -axo pid=,ppid=)
+      [[ -z "$hosted_child" ]] || break
+      sleep 0.01
+    done
+    if [[ -z "$hosted_child" ]] || ! _mock_upterm_record_pid "$hosted_child"; then
+      kill -KILL "$hosted_pid" 2>/dev/null || true
+      wait "$hosted_pid" 2>/dev/null || true
+      exit 1
+    fi
+    if [[ -n "${MOCK_UPTERM_HOSTED_PID_FILE:-}" ]]; then
+      printf '%s\n' "$hosted_pid" >"$MOCK_UPTERM_HOSTED_PID_FILE"
+    fi
+    _mock_upterm_cleanup_hosted() {
+      local child parent
+      local -a hosted_children=()
+      while read -r child parent; do
+        [[ "$child" =~ ^[0-9]+$ && "$parent" == "$hosted_pid" ]] || continue
+        hosted_children+=("$child")
+      done < <(ps -axo pid=,ppid=)
+      kill -KILL "$hosted_pid" 2>/dev/null || true
+      for child in "${hosted_children[@]+"${hosted_children[@]}"}"; do
+        kill -KILL "$child" 2>/dev/null || true
+      done
+      wait "$hosted_pid" 2>/dev/null || true
+    }
+    trap _mock_upterm_cleanup_hosted EXIT
   fi
   # Write share info to stdout (goes to log file)
   printf '%s\n' "ssh session: ssh test@upterm.example"
-  # Keep background process alive briefly if launched with & so kill -0 works.
-  sleep "${MOCK_UPTERM_SLEEP:-1}"
+  if [[ -n "${MOCK_UPTERM_EXIT_FILE:-}" ]]; then
+    while [[ ! -e "$MOCK_UPTERM_EXIT_FILE" ]]; do
+      sleep 0.01
+    done
+  else
+    # Keep background process alive briefly if launched with & so kill -0 works.
+    if [[ "${MOCK_UPTERM_IGNORE_TERM:-}" == 1 ]]; then
+      mock_upterm_deadline=$((SECONDS + ${MOCK_UPTERM_SLEEP:-5}))
+      while ((SECONDS < mock_upterm_deadline)); do
+        sleep 1
+      done
+    else
+      sleep "${MOCK_UPTERM_SLEEP:-5}"
+    fi
+  fi
   exit 0
 fi
 if [[ "$1" == "session" && "$2" == "current" ]]; then
@@ -226,6 +316,448 @@ _reset_tmux_log() {
 _tmux_log() {
   cat "$TMUX_LOG" 2>/dev/null || true
 }
+
+set +e
+(
+  CLEANUP_PIDS=()
+  CLEANUP_PID_IDENTITIES=()
+  reuse_identity="Mon Jan 1 00:00:00 2026"
+  # shellcheck disable=SC2329 # The cleanup tracker invokes this test double.
+  _test_pid_identity() {
+    # shellcheck disable=SC2034 # Branches assign the caller's dynamic local.
+    case "$2" in
+      _ttp_identity) _ttp_identity="$reuse_identity" ;;
+      current) current="$reuse_identity" ;;
+      *) return 1 ;;
+    esac
+  }
+  _track_test_pid 4242 || exit 1
+  reuse_identity="Tue Jan 2 00:00:00 2026"
+  _track_test_pid 4242 || exit 1
+  [[ "${#CLEANUP_PIDS[@]}" -eq 1 &&
+    "${CLEANUP_PID_IDENTITIES[0]}" == "$reuse_identity" ]] || exit 1
+  reuse_identity="Wed Jan 3 00:00:00 2026"
+  printf '%s\n' "$reuse_identity" >"$TEST_PID_LEDGER/4242"
+  chmod 600 "$TEST_PID_LEDGER/4242"
+  _ingest_test_pid_ledger
+  [[ "${CLEANUP_PID_IDENTITIES[0]}" == "$reuse_identity" ]] || exit 1
+  printf 'Mon Jan 1 00:00:00 2026\n' >"$TEST_PID_LEDGER/4242"
+  reuse_identity="Thu Jan 4 00:00:00 2026"
+  _track_test_pid 4242 || exit 1
+  _ingest_test_pid_ledger
+  reuse_status=1
+  [[ "${#CLEANUP_PIDS[@]}" -eq 1 &&
+    "${CLEANUP_PID_IDENTITIES[0]}" == "$reuse_identity" ]] && reuse_status=0
+  rm -f "$TEST_PID_LEDGER/4242"
+  exit "$reuse_status"
+)
+cleanup_reuse_rc=$?
+set -e
+_assert_exit "test cleanup: PID reuse replaces stale tracked lifetimes" \
+  0 "$cleanup_reuse_rc"
+
+# Prove invocation cleanup can terminate a tracked nested background tree
+# without signaling the process group shared with the test runner.
+cleanup_tree_dir=$(_tmpdir)
+cleanup_tree_child_file="$cleanup_tree_dir/child"
+bash -c 'sleep 300 & printf "%s\n" "$!" >"$1"; wait' \
+  bash "$cleanup_tree_child_file" &
+cleanup_tree_root=$!
+_track_test_pid "$cleanup_tree_root"
+for ((cleanup_tree_attempt = 0; cleanup_tree_attempt < 500; cleanup_tree_attempt++)); do
+  [[ -s "$cleanup_tree_child_file" ]] && break
+  sleep 0.01
+done
+cleanup_tree_child=$(<"$cleanup_tree_child_file")
+cleanup_tree_child_identity=""
+_test_pid_identity "$cleanup_tree_child" cleanup_tree_child_identity
+_terminate_test_tree "$cleanup_tree_root" TERM
+wait "$cleanup_tree_root" 2>/dev/null || true
+if _wait_for_test_pid_exit "$cleanup_tree_child" "$cleanup_tree_child_identity"; then
+  _pass "test cleanup: tracked nested child is terminated"
+else
+  _fail "test cleanup: tracked nested child is terminated"
+fi
+
+cleanup_order_dir=$(_tmpdir)
+cleanup_order_child_file="$cleanup_order_dir/child"
+cleanup_order_parent_file="$cleanup_order_dir/parent"
+cleanup_order_log="$cleanup_order_dir/signals"
+bash -c '
+  set -euo pipefail
+  . "$1"
+  bash -c '\''
+    trap "exit 0" TERM
+    sleep 300 &
+    printf "%s\n" "$!" >"$1"
+    while :; do sleep 1; done
+  '\'' bash "$2" &
+  parent=$!
+  printf "%s\n" "$parent" >"$3"
+  for ((attempt = 0; attempt < 500; attempt++)); do
+    [[ -s "$2" ]] && break
+    sleep 0.01
+  done
+  child=$(<"$2")
+  signal_log=$4
+  _track_test_pid "$child"
+  _track_test_pid "$parent"
+  kill() {
+    printf "%s %s\n" "$1" "$2" >>"$signal_log"
+    builtin kill "$@"
+  }
+  _cleanup_test_pids
+' bash "$SCRIPT_DIR/test-helpers.sh" "$cleanup_order_child_file" \
+  "$cleanup_order_parent_file" "$cleanup_order_log"
+cleanup_order_first_term=$(awk '$1 == "-TERM" { print $2; exit }' "$cleanup_order_log")
+_assert_file_content "test cleanup: child-first registration still signals parent first" \
+  "$cleanup_order_first_term" "$cleanup_order_parent_file"
+
+cleanup_identity_dir=$(_tmpdir)
+cleanup_identity_trigger_file="$cleanup_identity_dir/trigger"
+cleanup_identity_victim_file="$cleanup_identity_dir/victim"
+cleanup_identity_log="$cleanup_identity_dir/signals"
+bash -c '
+  set -euo pipefail
+  . "$1"
+  bash -c '\''sleep 300 </dev/null >/dev/null 2>&1 & printf "%s\n" "$!" >"$1"'\'' \
+    bash "$2"
+  bash -c '\''sleep 300 </dev/null >/dev/null 2>&1 & printf "%s\n" "$!" >"$1"'\'' \
+    bash "$3"
+  trigger=$(<"$2")
+  victim=$(<"$3")
+  cleanup_identity_probe() {
+    local rc=$?
+    builtin kill -KILL "${trigger:-}" "${victim:-}" 2>/dev/null || true
+    _cleanup || true
+    return "$rc"
+  }
+  trap cleanup_identity_probe EXIT
+  signal_log=$4
+  marker="$signal_log.identity-changed"
+  _track_test_pid "$trigger"
+  _track_test_pid "$victim"
+  _test_pid_still_live() {
+    local pid="$1" expected="$2" status
+    [[ "$pid" == "$victim" && -e "$marker" ]] && return 1
+    _test_pid_still_owned "$pid" "$expected" || return 1
+    status=$(LC_ALL=C command ps -o stat= -p "$pid" 2>/dev/null) || return 1
+    [[ "$status" != *Z* ]]
+  }
+  kill() {
+    printf "%s %s\n" "$1" "$2" >>"$signal_log"
+    [[ "$2" != "$trigger" || "$1" != -TERM ]] || : >"$marker"
+    builtin kill "$@"
+  }
+  _cleanup_test_pids
+  builtin kill -KILL "$victim" 2>/dev/null || true
+  trigger=""
+  victim=""
+' bash "$SCRIPT_DIR/test-helpers.sh" "$cleanup_identity_trigger_file" \
+  "$cleanup_identity_victim_file" "$cleanup_identity_log"
+cleanup_identity_victim=$(<"$cleanup_identity_victim_file")
+if awk -v victim="$cleanup_identity_victim" '$2 == victim { found = 1 } END { exit !found }' \
+  "$cleanup_identity_log"; then
+  _fail "test cleanup: signal boundaries revalidate exact PID identity"
+else
+  _pass "test cleanup: signal boundaries revalidate exact PID identity"
+fi
+
+cleanup_exit_dir=$(_tmpdir)
+cleanup_exit_child_file="$cleanup_exit_dir/child"
+cleanup_exit_identity_file="$cleanup_exit_dir/identity"
+bash -c '
+  set -euo pipefail
+  . "$1"
+  bash -c '\''sleep 300 & printf "%s\n" "$!" >"$1"; wait'\'' \
+    bash "$2" &
+  root=$!
+  _track_test_pid "$root"
+  for ((attempt = 0; attempt < 500; attempt++)); do
+    [[ -s "$2" ]] && break
+    sleep 0.01
+  done
+  child=$(<"$2")
+  identity=""
+  _test_pid_identity "$child" identity
+  printf "%s\n" "$identity" >"$3"
+' bash "$SCRIPT_DIR/test-helpers.sh" "$cleanup_exit_child_file" \
+  "$cleanup_exit_identity_file" &
+cleanup_exit_probe=$!
+_track_test_pid "$cleanup_exit_probe"
+cleanup_exit_deadline=$((SECONDS + 20))
+while ((SECONDS < cleanup_exit_deadline)); do
+  kill -0 "$cleanup_exit_probe" 2>/dev/null || break
+  sleep 0.01
+done
+if kill -0 "$cleanup_exit_probe" 2>/dev/null; then
+  _fail "test cleanup: EXIT cleanup completes under a bounded condition"
+  _terminate_test_tree "$cleanup_exit_probe" KILL
+else
+  _pass "test cleanup: EXIT cleanup completes under a bounded condition"
+fi
+wait "$cleanup_exit_probe" 2>/dev/null || true
+cleanup_exit_child=$(<"$cleanup_exit_child_file")
+cleanup_exit_identity=$(<"$cleanup_exit_identity_file")
+if _wait_for_test_pid_exit "$cleanup_exit_child" "$cleanup_exit_identity"; then
+  _pass "test cleanup: EXIT cleanup removes its tracked descendant"
+else
+  _fail "test cleanup: EXIT cleanup removes its tracked descendant"
+fi
+
+ledger_exit_dir=$(_tmpdir)
+ledger_exit_child_file="$ledger_exit_dir/child"
+ledger_exit_mode_file="$ledger_exit_dir/mode"
+bash -c '
+  set -euo pipefail
+  umask 000
+  . "$1"
+  sleep 86400 &
+  child=$!
+  read -r weekday month day clock year extra \
+    < <(LC_ALL=C ps -o lstart= -p "$child")
+  printf "%s %s %s %s %s\n" \
+    "$weekday" "$month" "$day" "$clock" "$year" \
+    >"$DS_TEST_PID_LEDGER/$child"
+  chmod 600 "$DS_TEST_PID_LEDGER/$child"
+  if stat -c "%a" "$DS_TEST_PID_LEDGER/$child" >"$3" 2>/dev/null; then :; else
+    stat -f "%Lp" "$DS_TEST_PID_LEDGER/$child" >"$3"
+  fi
+  printf "%s\n" "$child" >"$2"
+' bash "$SCRIPT_DIR/test-helpers.sh" "$ledger_exit_child_file" \
+  "$ledger_exit_mode_file"
+ledger_exit_child=$(<"$ledger_exit_child_file")
+_assert_file_content "test cleanup: ledger entry is private under umask 000" \
+  "600" "$ledger_exit_mode_file"
+if kill -0 "$ledger_exit_child" 2>/dev/null; then
+  _fail "test cleanup: EXIT reaps an exact ledger-owned adopted child"
+else
+  _pass "test cleanup: EXIT reaps an exact ledger-owned adopted child"
+fi
+
+ps_security_root=$(_tmpdir)
+ps_security_victim="$ps_security_root/victim"
+ps_security_link="$ps_security_root/planted"
+ps_security_result="$ps_security_root/result"
+printf 'unchanged\n' >"$ps_security_victim"
+ln -s "$ps_security_victim" "$ps_security_link"
+bash -c '
+  set -euo pipefail
+  . "$1"
+  umask 000
+  TEST_PS_DIR="$2"
+  TEST_PS_FILE="$TEST_PS_DIR/processes"
+  _test_ps_output_file
+  if stat -c "%a" "$TEST_PS_DIR" >"$3.dir" 2>/dev/null; then :; else
+    stat -f "%Lp" "$TEST_PS_DIR" >"$3.dir"
+  fi
+  if stat -c "%a" "$TEST_PS_FILE" >"$3.file" 2>/dev/null; then :; else
+    stat -f "%Lp" "$TEST_PS_FILE" >"$3.file"
+  fi
+  IFS= read -r dir_mode <"$3.dir"
+  IFS= read -r file_mode <"$3.file"
+  replaced=no
+  [[ "$TEST_PS_DIR" == "$2" ]] || replaced=yes
+  printf "dir=%s\nfile=%s\nreplaced=%s\n" \
+    "$dir_mode" "$file_mode" "$replaced" \
+    >"$3"
+' bash "$SCRIPT_DIR/test-helpers.sh" "$ps_security_link" "$ps_security_result"
+_assert_contains "test cleanup: process snapshot rejects planted symlink state" \
+  "replaced=yes" "$(<"$ps_security_result")"
+_assert_contains "test cleanup: process snapshot directory is private under umask 000" \
+  "dir=700" "$(<"$ps_security_result")"
+_assert_contains "test cleanup: process snapshot file is private under umask 000" \
+  "file=600" "$(<"$ps_security_result")"
+_assert_file_content "test cleanup: planted symlink target remains unchanged" \
+  "unchanged" "$ps_security_victim"
+rm -rf "$ps_security_root"
+
+suite_cleanup_base=$(_tmpdir)
+suite_cleanup_result="$suite_cleanup_base/normal-result"
+suite_cleanup_root_file="$suite_cleanup_base/normal-root"
+suite_cleanup_fixture_file="$suite_cleanup_base/normal-fixture"
+TMPDIR="$suite_cleanup_base" bash -c '
+  set -euo pipefail
+  umask 000
+  . "$1"
+  fixture=$(_tmpdir)
+  printf "%s\n" "$TEST_SUITE_TMP_ROOT" >"$2"
+  printf "%s\n" "$fixture" >"$3"
+  if stat -c "%a" "$TEST_SUITE_TMP_ROOT" >"$4.root" 2>/dev/null; then :; else
+    stat -f "%Lp" "$TEST_SUITE_TMP_ROOT" >"$4.root"
+  fi
+  if stat -c "%a" "$fixture" >"$4.fixture" 2>/dev/null; then :; else
+    stat -f "%Lp" "$fixture" >"$4.fixture"
+  fi
+  if stat -c "%a" "$TEST_PID_LEDGER" >"$4.ledger" 2>/dev/null; then :; else
+    stat -f "%Lp" "$TEST_PID_LEDGER" >"$4.ledger"
+  fi
+' bash "$SCRIPT_DIR/test-helpers.sh" "$suite_cleanup_root_file" \
+  "$suite_cleanup_fixture_file" "$suite_cleanup_result"
+suite_cleanup_root=$(<"$suite_cleanup_root_file")
+suite_cleanup_fixture=$(<"$suite_cleanup_fixture_file")
+_assert_file_content "test cleanup: suite root is private under umask 000" \
+  "700" "$suite_cleanup_result.root"
+_assert_file_content "test cleanup: fixture is private under umask 000" \
+  "700" "$suite_cleanup_result.fixture"
+_assert_file_content "test cleanup: process ledger is private under umask 000" \
+  "700" "$suite_cleanup_result.ledger"
+_assert_file_missing "test cleanup: normal exit removes the exact suite root" \
+  "$suite_cleanup_root"
+_assert_file_missing "test cleanup: normal exit removes suite fixtures" \
+  "$suite_cleanup_fixture"
+
+suite_planted_victim="$suite_cleanup_base/planted-victim"
+suite_planted_root="$suite_cleanup_base/ds-test-suite.planted"
+suite_planted_result="$suite_cleanup_base/planted-result"
+printf 'unchanged\n' >"$suite_planted_victim"
+ln -s "$suite_planted_victim" "$suite_planted_root"
+TMPDIR="$suite_cleanup_base" \
+  DS_TEST_SUITE_TMP_ROOT_CANDIDATE="$suite_planted_root" \
+  bash -c '
+    set -euo pipefail
+    . "$1"
+    fixture_link="$TEST_SUITE_TMP_ROOT/fixture.planted"
+    ln -s "$2" "$fixture_link"
+    TEST_TMPDIR_CANDIDATE="$fixture_link"
+    fixture=$(_tmpdir)
+    printf "root=%s\nfixture=%s\n" "$TEST_SUITE_TMP_ROOT" "$fixture" >"$3"
+  ' bash "$SCRIPT_DIR/test-helpers.sh" "$suite_planted_victim" \
+  "$suite_planted_result"
+_assert_not_contains "test cleanup: suite root ignores a planted candidate" \
+  "root=$suite_planted_root" "$(<"$suite_planted_result")"
+_assert_not_contains "test cleanup: fixture ignores a planted candidate" \
+  "fixture=$suite_planted_root/fixture.planted" "$(<"$suite_planted_result")"
+_assert_file_content "test cleanup: planted suite paths preserve their target" \
+  "unchanged" "$suite_planted_victim"
+
+suite_signal_root_file="$suite_cleanup_base/signal-root"
+suite_signal_child_file="$suite_cleanup_base/signal-child"
+TMPDIR="$suite_cleanup_base" bash -c '
+  set -euo pipefail
+  . "$1"
+  sleep 86400 &
+  child=$!
+  read -r weekday month day clock year extra \
+    < <(LC_ALL=C ps -o lstart= -p "$child")
+  printf "%s %s %s %s %s\n" \
+    "$weekday" "$month" "$day" "$clock" "$year" \
+    >"$DS_TEST_PID_LEDGER/$child"
+  chmod 600 "$DS_TEST_PID_LEDGER/$child"
+  printf "%s\n" "$TEST_SUITE_TMP_ROOT" >"$2"
+  printf "%s\n" "$child" >"$3"
+  while :; do sleep 1; done
+' bash "$SCRIPT_DIR/test-helpers.sh" "$suite_signal_root_file" \
+  "$suite_signal_child_file" &
+suite_signal_probe=$!
+_track_test_pid "$suite_signal_probe"
+for ((suite_signal_attempt = 0; suite_signal_attempt < 500; suite_signal_attempt++)); do
+  [[ -s "$suite_signal_root_file" && -s "$suite_signal_child_file" ]] && break
+  sleep 0.01
+done
+suite_signal_root=$(<"$suite_signal_root_file")
+suite_signal_child=$(<"$suite_signal_child_file")
+# shellcheck disable=SC2218 # A later audit double must not shadow this signal.
+command kill -TERM "$suite_signal_probe"
+set +e
+wait "$suite_signal_probe"
+suite_signal_rc=$?
+set -e
+_assert_exit "test cleanup: TERM cleanup preserves conventional status" \
+  143 "$suite_signal_rc"
+_assert_file_missing "test cleanup: TERM removes the exact suite root" \
+  "$suite_signal_root"
+if kill -0 "$suite_signal_child" 2>/dev/null; then
+  _fail "test cleanup: TERM removes its tracked child"
+else
+  _pass "test cleanup: TERM removes its tracked child"
+fi
+
+hosted_signal_root_file="$suite_cleanup_base/hosted-root"
+hosted_signal_pid_file="$suite_cleanup_base/hosted-pid"
+hosted_signal_sleep_file="$suite_cleanup_base/hosted-sleep"
+hosted_signal_replacement_file="$suite_cleanup_base/hosted-replacement"
+TMPDIR="$suite_cleanup_base" bash -c '
+  set -euo pipefail
+  . "$1"
+  record_pid() {
+    local pid="$1" weekday month day clock year extra
+    read -r weekday month day clock year extra \
+      < <(LC_ALL=C ps -o lstart= -p "$pid")
+    printf "%s %s %s %s %s\n" \
+      "$weekday" "$month" "$day" "$clock" "$year" \
+      >"$DS_TEST_PID_LEDGER/$pid"
+    chmod 600 "$DS_TEST_PID_LEDGER/$pid"
+  }
+  bash -c '\''
+    first=1
+    while :; do
+      sleep 86400 &
+      child=$!
+      if ((first)); then
+        printf "%s\n" "$child" >"$1"
+        first=0
+      else
+        printf "%s\n" "$child" >"$2"
+      fi
+      wait "$child" || true
+    done
+  '\'' bash "$4" "$5" &
+  hosted=$!
+  record_pid "$hosted"
+  deadline=$((SECONDS + 20))
+  while [[ ! -s "$4" && $SECONDS -lt $deadline ]]; do sleep 0.01; done
+  sleep_pid=$(<"$4")
+  record_pid "$sleep_pid"
+  printf "%s\n" "$TEST_SUITE_TMP_ROOT" >"$2"
+  printf "%s\n" "$hosted" >"$3"
+  while :; do sleep 1; done
+' bash "$SCRIPT_DIR/test-helpers.sh" "$hosted_signal_root_file" \
+  "$hosted_signal_pid_file" "$hosted_signal_sleep_file" \
+  "$hosted_signal_replacement_file" &
+hosted_signal_probe=$!
+_track_test_pid "$hosted_signal_probe"
+hosted_signal_deadline=$((SECONDS + 20))
+while [[ (! -s "$hosted_signal_root_file" || ! -s "$hosted_signal_pid_file" ||
+  ! -s "$hosted_signal_sleep_file") && $SECONDS -lt $hosted_signal_deadline ]]; do
+  sleep 0.01
+done
+hosted_signal_root=$(<"$hosted_signal_root_file")
+hosted_signal_pid=$(<"$hosted_signal_pid_file")
+hosted_signal_sleep=$(<"$hosted_signal_sleep_file")
+hosted_signal_pid_identity=""
+hosted_signal_sleep_identity=""
+_test_pid_identity "$hosted_signal_pid" hosted_signal_pid_identity
+_test_pid_identity "$hosted_signal_sleep" hosted_signal_sleep_identity
+# shellcheck disable=SC2218 # A later audit double must not shadow this signal.
+command kill -KILL "$hosted_signal_sleep"
+hosted_signal_deadline=$((SECONDS + 20))
+while [[ ! -s "$hosted_signal_replacement_file" &&
+  $SECONDS -lt $hosted_signal_deadline ]]; do
+  sleep 0.01
+done
+hosted_signal_replacement=$(<"$hosted_signal_replacement_file")
+hosted_signal_replacement_identity=""
+_test_pid_identity "$hosted_signal_replacement" hosted_signal_replacement_identity
+# shellcheck disable=SC2218 # A later audit double must not shadow this signal.
+command kill -TERM "$hosted_signal_probe"
+set +e
+wait "$hosted_signal_probe"
+hosted_signal_rc=$?
+set -e
+_assert_exit "test cleanup: TERM cleanup with a hosted descendant preserves status" \
+  143 "$hosted_signal_rc"
+_assert_file_missing "test cleanup: hosted TERM removes the exact suite root" \
+  "$hosted_signal_root"
+if _wait_for_test_pid_exit "$hosted_signal_pid" "$hosted_signal_pid_identity" &&
+  _wait_for_test_pid_exit "$hosted_signal_sleep" "$hosted_signal_sleep_identity" &&
+  _wait_for_test_pid_exit \
+    "$hosted_signal_replacement" "$hosted_signal_replacement_identity"; then
+  _pass "test cleanup: hosted TERM removes the parent and replacement child"
+else
+  _fail "test cleanup: hosted TERM removes the parent and replacement child"
+fi
+rm -rf "$suite_cleanup_base"
 
 # ---------------------------------------------------------------------------
 # Tests: Discovery contracts
@@ -649,19 +1181,25 @@ HOST=""
 result=$(_do_share 2>&1) || true
 _assert_contains "share action: error for nonexistent session" "no session" "$result"
 
-# Clean up state from share test (kill mock upterm, remove PID/state files)
-_pid_f=$(_upterm_pid_file)
-if [[ -f "$_pid_f" ]]; then
-  _pid=$(cat "$_pid_f" 2>/dev/null || true)
-  if [[ "$_pid" =~ ^[0-9]+$ ]]; then kill "$_pid" 2>/dev/null || true; fi
-  rm -f "$_pid_f"
+# Clean up state from the share test through the token-owning lifecycle path.
+set +e
+initial_share_stop_output=$(_share_stop "ds" 2>&1)
+initial_share_stop_rc=$?
+set -e
+if ((initial_share_stop_rc == 0)); then
+  _pass "unshare: initial share cleanup succeeds"
+else
+  _fail "unshare: initial share cleanup failed: $initial_share_stop_output"
 fi
-rm -f "$DS_SHARE_INFO_FILE" "$(_upterm_admin_file)" "$(_upterm_session_file)" "$(_upterm_log_file)"
 
 # Test --unshare action (no daemon running)
 SESSION="ds"
 HOST=""
+set +e
 result=$(_do_unshare 2>&1)
+unshare_rc=$?
+set -e
+_assert_exit "unshare: no daemon is successful" 0 "$unshare_rc"
 _assert_contains "unshare: reports not sharing" "not currently sharing" "$result"
 
 # Test normalization of upterm host output variants (e.g., WSL fallback log parse)
@@ -772,6 +1310,3277 @@ _assert_eq "missing config: server empty" "" "$DS_UPTERM_HOST"
 _assert_eq "missing config: push empty" "" "$DS_UPTERM_PUSH"
 _assert_eq "missing config: share-ttl empty" "" "$DS_UPTERM_SHARE_TTL"
 
+# Host-key preflight must verify existing trust, never replace it with
+# unauthenticated ssh-keyscan output.
+echo ""
+echo "=== Upterm host-key verification ==="
+if ! declare -F _upterm_verify_known_host >/dev/null; then
+  _fail "host key: verification helper is available"
+else
+  _pass "host key: verification helper is available"
+
+  # Exercise OpenSSH's real key parser for semantics that a fingerprint mock
+  # cannot represent: certificates, revoked keys, and malformed CA entries.
+  if [[ -n "$REAL_SSH_KEYGEN" ]]; then
+    real_key_dir=$(_tmpdir)
+    real_host_bin=$(_tmpdir)
+    real_scan_log="$real_key_dir/ssh-keyscan.log"
+    "$REAL_SSH_KEYGEN" -q -t ed25519 -N '' -f "$real_key_dir/host"
+    "$REAL_SSH_KEYGEN" -q -t ed25519 -N '' -f "$real_key_dir/old-host"
+    "$REAL_SSH_KEYGEN" -q -t rsa -b 2048 -N '' -f "$real_key_dir/rsa-host"
+    "$REAL_SSH_KEYGEN" -q -t ed25519 -N '' -f "$real_key_dir/ca"
+    "$REAL_SSH_KEYGEN" -q -t ecdsa -b 256 -N '' -f "$real_key_dir/ecdsa-host"
+    "$REAL_SSH_KEYGEN" -q -s "$real_key_dir/ca" -I ds-test -h \
+      -n example.test -V -1m:+1h "$real_key_dir/host.pub"
+    "$REAL_SSH_KEYGEN" -q -s "$real_key_dir/ca" -I ds-test-rsa -h \
+      -n example.test -V -1m:+1h "$real_key_dir/rsa-host.pub"
+    real_host_key=$(awk '{print $1, $2}' "$real_key_dir/host.pub")
+    real_old_host_key=$(awk '{print $1, $2}' "$real_key_dir/old-host.pub")
+    real_rsa_host_key=$(awk '{print $1, $2}' "$real_key_dir/rsa-host.pub")
+    real_host_cert=$(awk '{print $1, $2}' "$real_key_dir/host-cert.pub")
+    real_rsa_host_cert=$(awk '{print $1, $2}' "$real_key_dir/rsa-host-cert.pub")
+    real_ca_key=$(awk '{print $1, $2}' "$real_key_dir/ca.pub")
+    real_ecdsa_key=$(awk '{print $1, $2}' "$real_key_dir/ecdsa-host.pub")
+
+    cat >"$real_host_bin/ssh-keyscan" <<'MOCK'
+#!/usr/bin/env bash
+printf 'ssh-keyscan %s\n' "$*" >>"$REAL_SCAN_LOG"
+for arg; do
+  if [[ "$arg" == "-c" ]]; then
+    printf '%s\n' "${REAL_SCAN_CERT:-}"
+    exit 0
+  fi
+done
+printf '%s\n' "${REAL_SCAN_DEFAULT:-}"
+MOCK
+    chmod +x "$real_host_bin/ssh-keyscan"
+    export REAL_SCAN_LOG="$real_scan_log" REAL_SCAN_DEFAULT REAL_SCAN_CERT
+
+    real_known_hosts="$real_key_dir/known_hosts"
+    printf 'example.test %s\n' "$real_host_cert" >"$real_known_hosts"
+    REAL_SCAN_DEFAULT="example.test $real_host_key"
+    REAL_SCAN_CERT=""
+    if PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>/dev/null; then
+      _fail "host key: a raw key cannot satisfy a direct certificate pin"
+    else
+      _pass "host key: a raw key cannot satisfy a direct certificate pin"
+    fi
+
+    : >"$real_scan_log"
+    REAL_SCAN_CERT="$real_host_cert"
+    set +e
+    output=$(PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: direct certificate pins are rejected" 1 "$rc"
+    _assert_contains "host key: direct certificate rejection is actionable" \
+      "direct certificate pins are not supported" "$output"
+    _assert_not_contains "host key: rejected direct certificates are not scanned" \
+      "ssh-keyscan" "$(cat "$real_scan_log")"
+
+    printf 'example.test %s\n' "$real_host_key" >"$real_known_hosts"
+    REAL_SCAN_CERT="$real_host_cert"
+    REAL_SCAN_DEFAULT="example.test $real_host_key"
+    set +e
+    output=$(PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: negotiated certificates fail before launch" 1 "$rc"
+    _assert_contains "host key: negotiated certificate failure is actionable" \
+      "host certificates are not supported" "$output"
+    _assert_contains "host key: negotiated certificate names supported remediation" \
+      "raw ED25519 host key" "$output"
+
+    REAL_SCAN_CERT="$real_rsa_host_cert"
+    set +e
+    output=$(PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: negotiated RSA certificates fail before launch" 1 "$rc"
+    _assert_contains "host key: negotiated RSA certificate failure is actionable" \
+      "host certificates are not supported" "$output"
+
+    printf 'example.test %s\n' "$real_ecdsa_key" >"$real_known_hosts"
+    REAL_SCAN_DEFAULT="example.test $real_ecdsa_key"
+    set +e
+    output=$(PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: unsupported direct algorithms are rejected" 1 "$rc"
+    _assert_contains "host key: unsupported direct algorithm is actionable" \
+      "unsupported direct host key type: ecdsa-sha2-nistp256" "$output"
+
+    printf 'example.test %s\nother.test ssh-ed25519 NOTBASE64\n' \
+      "$real_host_key" >"$real_known_hosts"
+    REAL_SCAN_DEFAULT="example.test $real_host_key"
+    set +e
+    output=$(PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: malformed unrelated records fail closed" 1 "$rc"
+    _assert_contains "host key: malformed unrelated record identifies its line" \
+      "$real_known_hosts:2" "$output"
+    _assert_contains "host key: malformed unrelated record is actionable" \
+      "malformed known-hosts key" "$output"
+
+    printf 'example.test %s\n@unknown other.test %s\n' \
+      "$real_host_key" "$real_host_key" >"$real_known_hosts"
+    set +e
+    output=$(PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: unknown markers fail closed" 1 "$rc"
+    _assert_contains "host key: unknown marker identifies its line" \
+      "$real_known_hosts:2" "$output"
+    _assert_contains "host key: unknown marker is actionable" \
+      "unsupported known-hosts marker" "$output"
+
+    printf 'example.test %s\n[other.test %s\n' \
+      "$real_host_key" "$real_host_key" >"$real_known_hosts"
+    set +e
+    output=$(PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: malformed host patterns fail closed" 1 "$rc"
+    _assert_contains "host key: malformed host pattern identifies its line" \
+      "$real_known_hosts:2" "$output"
+    _assert_contains "host key: malformed host pattern is actionable" \
+      "malformed known-hosts pattern" "$output"
+
+    printf '# other.test ssh-ed25519 NOTBASE64\n\nexample.test %s\n' \
+      "$real_host_key" >"$real_known_hosts"
+    REAL_SCAN_CERT=""
+    REAL_SCAN_DEFAULT="example.test $real_host_key"
+    if PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>/dev/null; then
+      _pass "host key: blank lines and comments are ignored"
+    else
+      _fail "host key: blank lines and comments are ignored"
+    fi
+
+    printf 'example.test %s\r\n' "$real_host_key" >"$real_known_hosts"
+    if PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>/dev/null; then
+      _pass "host key: CRLF records match Upterm parsing"
+    else
+      _fail "host key: CRLF records match Upterm parsing"
+    fi
+
+    for invalid_pattern in '|2|QUFBQQ==|QUFBQQ==' '|1|NOT!BASE64|QUFBQQ==' \
+      '[other.test]junk]:22'; do
+      printf 'example.test %s\n%s %s\n' \
+        "$real_host_key" "$invalid_pattern" "$real_host_key" >"$real_known_hosts"
+      if PATH="$real_host_bin:$PATH" \
+        _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>/dev/null; then
+        _fail "host key: malformed pattern grammar is rejected: $invalid_pattern"
+      else
+        _pass "host key: malformed pattern grammar is rejected: $invalid_pattern"
+      fi
+    done
+
+    printf 'other.test %s\nexample.test %s\n' \
+      "$real_ecdsa_key" "$real_host_key" >"$real_known_hosts"
+    if PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>/dev/null; then
+      _pass "host key: unsupported direct types for other hosts remain valid records"
+    else
+      _fail "host key: unsupported direct types for other hosts remain valid records"
+    fi
+
+    printf '@cert-authority example.test %s\n' "$real_ecdsa_key" >"$real_known_hosts"
+    set +e
+    output=$(PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: certificate-authority trust is rejected" 1 "$rc"
+    _assert_contains "host key: CA rejection is actionable" \
+      "certificate-authority verification is not supported" "$output"
+
+    real_hashed_hosts="$real_key_dir/hashed-known-hosts"
+    printf 'example.test %s\n' "$real_host_key" >"$real_hashed_hosts"
+    "$REAL_SSH_KEYGEN" -q -H -f "$real_hashed_hosts" >/dev/null 2>&1
+    if PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_hashed_hosts" 2>/dev/null; then
+      _pass "host key: valid hashed host records verify"
+    else
+      _fail "host key: valid hashed host records verify"
+    fi
+
+    printf '[example.test]:22 %s\n' "$real_host_key" >"$real_known_hosts"
+    if PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>/dev/null; then
+      _pass "host key: bracketed default-port records follow Upterm matching"
+    else
+      _fail "host key: bracketed default-port records follow Upterm matching"
+    fi
+
+    printf 'example.test:2222 %s\n' "$real_host_key" >"$real_known_hosts"
+    if PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:2222" "$real_known_hosts" 2>/dev/null; then
+      _pass "host key: unbracketed nondefault-port records follow Upterm matching"
+    else
+      _fail "host key: unbracketed nondefault-port records follow Upterm matching"
+    fi
+
+    printf 'example.test %s\n' "$real_host_key" >"$real_known_hosts"
+    set +e
+    output=$(PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "EXAMPLE.TEST:22" "$real_known_hosts" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: hostname matching is case-sensitive like Upterm" 1 "$rc"
+    _assert_contains "host key: case mismatch reports missing trust" \
+      "no trusted host key entry" "$output"
+
+    printf '*,!example.test %s\n' "$real_host_key" >"$real_known_hosts"
+    set +e
+    output=$(PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: a matching negated pattern overrides a wildcard" 1 "$rc"
+
+    printf 'example.test* %s\n' "$real_host_key" >"$real_known_hosts"
+    set +e
+    output=$(PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: terminal star does not match an empty suffix like Upterm" 1 "$rc"
+    _assert_contains "host key: terminal-star mismatch reports missing trust" \
+      "no trusted host key entry" "$output"
+
+    printf 'example* %s\n' "$real_host_key" >"$real_known_hosts"
+    if PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>/dev/null; then
+      _pass "host key: terminal star still matches a nonempty suffix like Upterm"
+    else
+      _fail "host key: terminal star still matches a nonempty suffix like Upterm"
+    fi
+
+    printf '@revoked [ignored-pattern %s\nexample.test %s\n' \
+      "$real_old_host_key" "$real_host_key" >"$real_known_hosts"
+    if PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>/dev/null; then
+      _pass "host key: revoked host patterns are ignored like Upterm"
+    else
+      _fail "host key: revoked host patterns are ignored like Upterm"
+    fi
+
+    printf '[2001:db8::1]:22 %s\n' "$real_host_key" >"$real_known_hosts"
+    if PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "[2001:db8::1]:22" "$real_known_hosts" 2>/dev/null; then
+      _pass "host key: bracketed default-port IPv6 records match"
+    else
+      _fail "host key: bracketed default-port IPv6 records match"
+    fi
+
+    printf '[2001:db8::1]:2222 %s\n' "$real_host_key" >"$real_known_hosts"
+    if PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "[2001:db8::1]:2222" "$real_known_hosts" 2>/dev/null; then
+      _pass "host key: bracketed nondefault-port IPv6 records match"
+    else
+      _fail "host key: bracketed nondefault-port IPv6 records match"
+    fi
+
+    {
+      printf '#'
+      head -c 65534 /dev/zero | tr '\0' x
+      printf '\nexample.test %s\n' "$real_host_key"
+    } >"$real_known_hosts"
+    if PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>/dev/null; then
+      _pass "host key: maximum Upterm scanner line length is accepted"
+    else
+      _fail "host key: maximum Upterm scanner line length is accepted"
+    fi
+
+    {
+      printf '#'
+      head -c 65535 /dev/zero | tr '\0' x
+      printf '\nexample.test %s\n' "$real_host_key"
+    } >"$real_known_hosts"
+    set +e
+    output=$(PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: overlong comments fail before consumer launch" 1 "$rc"
+    _assert_contains "host key: overlong line identifies its line" \
+      "$real_known_hosts:1" "$output"
+
+    {
+      printf 'example.test %s\n' "$real_host_key"
+      printf '@revoked\0 other.test %s\n' "$real_old_host_key"
+    } >"$real_known_hosts"
+    set +e
+    output=$(PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: embedded NUL bytes fail before consumer launch" 1 "$rc"
+    _assert_contains "host key: embedded NUL is actionable" \
+      "contains a NUL byte" "$output"
+
+    printf '@revoked example.test %s\nexample.test %s\n' \
+      "$real_old_host_key" "$real_host_key" >"$real_known_hosts"
+    REAL_SCAN_DEFAULT="example.test $real_host_key"
+    REAL_SCAN_CERT=""
+    if PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>/dev/null; then
+      _pass "host key: an unrelated revoked key does not revoke the host"
+    else
+      _fail "host key: an unrelated revoked key does not revoke the host"
+    fi
+
+    printf '@revoked other.test %s\r\nexample.test %s\r\n' \
+      "$real_host_key" "$real_host_key" >"$real_known_hosts"
+    REAL_SCAN_DEFAULT="example.test $real_host_key"
+    if PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>/dev/null; then
+      _fail "host key: Upterm-global revocation rejects the same key"
+    else
+      _pass "host key: Upterm-global revocation rejects the same key"
+    fi
+
+    printf '@revoked example.test %s\nexample.test %s\n' \
+      "$real_host_key" "$real_host_key" >"$real_known_hosts"
+    if PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>/dev/null; then
+      _fail "host key: a presented revoked key is rejected"
+    else
+      _pass "host key: a presented revoked key is rejected"
+    fi
+
+    printf 'example.test %s\n@revoked other.test %s\n' \
+      "$real_host_key" "$real_rsa_host_key" >"$real_known_hosts"
+    REAL_SCAN_CERT=""
+    REAL_SCAN_DEFAULT="example.test $real_host_key"
+    if PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>/dev/null; then
+      _pass "host key: an ED25519 pin ignores an unrelated revoked RSA key"
+    else
+      _fail "host key: an ED25519 pin ignores an unrelated revoked RSA key"
+    fi
+
+    printf 'example.test %s\n' "$real_rsa_host_key" >"$real_known_hosts"
+    REAL_SCAN_DEFAULT="example.test $real_rsa_host_key"
+    for rsa_mode in legacy-rsa rsa-sha2; do
+      : >"$real_scan_log"
+      set +e
+      output=$(PATH="$real_host_bin:$PATH" \
+        _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>&1)
+      rc=$?
+      set -e
+      _assert_exit "host key: $rsa_mode direct trust is rejected" 1 "$rc"
+      _assert_contains "host key: $rsa_mode rejection is actionable" \
+        "only ssh-ed25519 can be verified before launch" "$output"
+      _assert_not_contains "host key: $rsa_mode rejection starts no network probe" \
+        "ssh-keyscan" "$(cat "$real_scan_log")"
+    done
+
+    printf '@cert-authority example.test ssh-ed25519 NOTBASE64\n' >"$real_known_hosts"
+    REAL_SCAN_DEFAULT=""
+    if PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>/dev/null; then
+      _fail "host key: a malformed certificate authority is rejected"
+    else
+      _pass "host key: a malformed certificate authority is rejected"
+    fi
+
+    printf '@cert-authority example.test %s\n' "$real_host_cert" >"$real_known_hosts"
+    if PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>/dev/null; then
+      _fail "host key: a certificate cannot be used as a certificate authority key"
+    else
+      _pass "host key: a certificate cannot be used as a certificate authority key"
+    fi
+
+    printf '@revoked other.test %s\n@cert-authority example.test %s\n' \
+      "$real_old_host_key" "$real_host_cert" >"$real_known_hosts"
+    set +e
+    output=$(PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: unusable CA with unrelated revocation fails" 1 "$rc"
+    _assert_contains "host key: unrelated revocation does not distort CA diagnostics" \
+      "certificate-authority verification is not supported" "$output"
+
+    printf '@cert-authority example.test %s\n' "$real_ca_key" >"$real_known_hosts"
+    set +e
+    output=$(PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: a parseable certificate authority is not partially verified" 1 "$rc"
+    _assert_contains "host key: parseable CA rejection is actionable" \
+      "certificate-authority verification is not supported" "$output"
+
+    for subset_record in \
+      "[other.test]:ssh $real_host_key" \
+      "@other $real_host_key" \
+      "other.test ssh-rsa ${real_host_key#* }"; do
+      printf 'example.test %s\n%s\n' "$real_host_key" "$subset_record" >"$real_known_hosts"
+      set +e
+      output=$(PATH="$real_host_bin:$PATH" \
+        _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>&1)
+      rc=$?
+      set -e
+      _assert_exit "host key: Upterm-parseable records outside the DS subset fail closed" 1 "$rc"
+      _assert_contains "host key: unsupported subset records are actionable" \
+        "outside DS's supported known-hosts subset" "$output"
+    done
+    printf '\f# Upterm trims this comment\nexample.test %s\n' \
+      "$real_host_key" >"$real_known_hosts"
+    set +e
+    output=$(PATH="$real_host_bin:$PATH" \
+      _upterm_verify_known_host "example.test:22" "$real_known_hosts" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: non-subset comment whitespace fails closed" 1 "$rc"
+    _assert_contains "host key: non-subset comment whitespace is actionable" \
+      "outside DS's supported known-hosts subset" "$output"
+  else
+    _fail "host key: real ssh-keygen is available for integration coverage"
+  fi
+
+  HOST_KEY_LOG="$MOCK_BIN/host-key.log"
+  export HOST_KEY_LOG MOCK_STORED_LINES MOCK_LIVE_LINES MOCK_CERT_LINES MOCK_CERT_STATUS
+  export MOCK_LIVE_STATUS MOCK_KEY_PARSE_FAIL
+  cat >"$MOCK_BIN/ssh-keygen" <<'MOCK'
+#!/usr/bin/env bash
+printf 'ssh-keygen %s\n' "$*" >>"$HOST_KEY_LOG"
+if [[ "$1" == -lf && "$2" == - ]]; then
+  [[ "${MOCK_KEY_PARSE_FAIL:-}" != 1 ]] || exit 1
+  while IFS= read -r line; do
+    [[ -n "$line" && "$line" != \#* ]] || continue
+    printf '256 SHA256:%s fixture\n' "${line##* }"
+  done
+else
+  exit 2
+fi
+MOCK
+  cat >"$MOCK_BIN/ssh-keyscan" <<'MOCK'
+#!/usr/bin/env bash
+printf 'ssh-keyscan %s\n' "$*" >>"$HOST_KEY_LOG"
+for arg; do
+  if [[ "$arg" == "-c" ]]; then
+    printf '%s\n' "$MOCK_CERT_LINES"
+    exit "${MOCK_CERT_STATUS:-0}"
+  fi
+done
+printf '%s\n' "$MOCK_LIVE_LINES"
+exit "${MOCK_LIVE_STATUS:-0}"
+MOCK
+  chmod +x "$MOCK_BIN/ssh-keygen" "$MOCK_BIN/ssh-keyscan"
+
+  known_hosts="$(_tmpdir)/known_hosts"
+  _set_mock_stored_lines() {
+    printf '%s\n' "$MOCK_STORED_LINES" >"$known_hosts"
+  }
+  MOCK_KEY_PARSE_FAIL=""
+  MOCK_CERT_LINES=""
+  MOCK_CERT_STATUS=0
+  MOCK_LIVE_STATUS=0
+
+  : >"$HOST_KEY_LOG"
+  MOCK_STORED_LINES=$'other.test ssh-rsa OLD\nexample.test ssh-ed25519 PINNED'
+  _set_mock_stored_lines
+  MOCK_LIVE_LINES='example.test ssh-ed25519 PINNED'
+  if _upterm_verify_known_host "example.test:22" "$known_hosts"; then
+    _pass "host key: the selected ED25519 fingerprint verifies"
+  else
+    _fail "host key: the selected ED25519 fingerprint verifies"
+  fi
+
+  MOCK_STORED_LINES=$'@revoked example.test ecdsa-sha2-nistp256 REVOKED\nexample.test ssh-ed25519 CURRENT'
+  _set_mock_stored_lines
+  MOCK_LIVE_LINES='example.test ssh-ed25519 CURRENT'
+  if _upterm_verify_known_host "example.test:22" "$known_hosts" 2>/dev/null; then
+    _pass "host key: a revoked key sorting first does not reject a distinct current pin"
+  else
+    _fail "host key: a revoked key sorting first does not reject a distinct current pin"
+  fi
+
+  MOCK_STORED_LINES=$'example.test ssh-ed25519 CURRENT\n@revoked example.test ssh-rsa REVOKED'
+  _set_mock_stored_lines
+  MOCK_LIVE_LINES='example.test ssh-ed25519 CURRENT'
+  if _upterm_verify_known_host "example.test:22" "$known_hosts" 2>/dev/null; then
+    _pass "host key: a revoked key sorting last does not reject a distinct current pin"
+  else
+    _fail "host key: a revoked key sorting last does not reject a distinct current pin"
+  fi
+
+  MOCK_STORED_LINES=$'example.test ssh-ed25519 OVERLAP\n@revoked example.test ssh-ed25519 OVERLAP'
+  _set_mock_stored_lines
+  MOCK_LIVE_LINES='example.test ssh-ed25519 OVERLAP'
+  set +e
+  output=$(_upterm_verify_known_host "example.test:22" "$known_hosts" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "host key: a pin that is also revoked cannot verify" 1 "$rc"
+  _assert_contains "host key: an overlapping revoked pin is actionable" "is revoked" "$output"
+
+  : >"$HOST_KEY_LOG"
+  MOCK_STORED_LINES='example.test ssh-ed25519 PINNED'
+  _set_mock_stored_lines
+  MOCK_LIVE_LINES='example.test ssh-ed25519 ATTACKER'
+  before=$(cat "$known_hosts")
+  set +e
+  output=$(_upterm_verify_known_host "example.test:22" "$known_hosts" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "host key: mismatch fails closed" 1 "$rc"
+  _assert_contains "host key: mismatch is actionable" "do not match" "$output"
+  _assert_eq "host key: mismatch never rewrites trust" "$before" "$(cat "$known_hosts")"
+
+  MOCK_LIVE_LINES=$'example.test ssh-ed25519 PINNED\nexample.test ssh-ed25519 SECOND'
+  set +e
+  output=$(_upterm_verify_known_host "example.test:22" "$known_hosts" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "host key: ambiguous selected-algorithm keys fail closed" 1 "$rc"
+  _assert_contains "host key: ambiguous selected keys are actionable" \
+    "multiple host keys" "$output"
+
+  MOCK_LIVE_LINES='malformed-scan-output'
+  set +e
+  output=$(_upterm_verify_known_host "example.test:22" "$known_hosts" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "host key: malformed scan output fails closed" 1 "$rc"
+  _assert_contains "host key: malformed scan output is actionable" \
+    "could not parse the scanned host keys" "$output"
+
+  MOCK_STORED_LINES=""
+  _set_mock_stored_lines
+  MOCK_LIVE_LINES='example.test ssh-ed25519 PINNED'
+  set +e
+  output=$(_upterm_verify_known_host "example.test:22" "$known_hosts" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "host key: missing trust entry fails closed" 1 "$rc"
+  _assert_contains "host key: missing trust entry is actionable" "no trusted host key entry" "$output"
+
+  MOCK_STORED_LINES='@revoked example.test ssh-ed25519 PINNED'
+  _set_mock_stored_lines
+  set +e
+  output=$(_upterm_verify_known_host "example.test:22" "$known_hosts" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "host key: revoked trust entry fails closed" 1 "$rc"
+  _assert_contains "host key: revoked-only trust is reported as unavailable" \
+    "no trusted host key entry" "$output"
+
+  : >"$HOST_KEY_LOG"
+  MOCK_STORED_LINES='@cert-authority example.test ssh-ed25519 CAKEY'
+  _set_mock_stored_lines
+  MOCK_LIVE_LINES=''
+  set +e
+  output=$(_upterm_verify_known_host "example.test:22" "$known_hosts" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "host key: configured certificate authority is rejected" 1 "$rc"
+  _assert_contains "host key: configured CA rejection is actionable" \
+    "certificate-authority verification is not supported" "$output"
+  _assert_not_contains "host key: rejected CA does not start a network probe" \
+    "ssh-keyscan" "$(cat "$HOST_KEY_LOG")"
+
+  : >"$HOST_KEY_LOG"
+  MOCK_STORED_LINES=$'@cert-authority other.test ssh-ed25519 CAKEY\nexample.test ssh-ed25519 PINNED'
+  _set_mock_stored_lines
+  MOCK_LIVE_LINES='example.test ssh-ed25519 PINNED'
+  if _upterm_verify_known_host "example.test:22" "$known_hosts" 2>/dev/null; then
+    _pass "host key: an unrelated certificate authority preserves direct trust"
+  else
+    _fail "host key: an unrelated certificate authority preserves direct trust"
+  fi
+
+  : >"$HOST_KEY_LOG"
+  MOCK_STORED_LINES=$'@cert-authority example.test ssh-ed25519 CAKEY\nexample.test ssh-ed25519 PINNED'
+  _set_mock_stored_lines
+  MOCK_LIVE_LINES='example.test ssh-ed25519 PINNED'
+  set +e
+  output=$(_upterm_verify_known_host "example.test:22" "$known_hosts" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "host key: mixed CA and direct trust is rejected" 1 "$rc"
+  _assert_contains "host key: mixed CA rejection is actionable" \
+    "certificate-authority verification is not supported" "$output"
+  _assert_not_contains "host key: mixed CA rejection starts no network probe" \
+    "ssh-keyscan" "$(cat "$HOST_KEY_LOG")"
+
+  : >"$HOST_KEY_LOG"
+  MOCK_STORED_LINES='[example.test]:2222 ssh-ed25519 PINNED'
+  _set_mock_stored_lines
+  MOCK_LIVE_LINES='[example.test]:2222 ssh-ed25519 PINNED'
+  if _upterm_verify_known_host "example.test:2222" "$known_hosts" 2>/dev/null; then
+    _pass "host key: bracketed nondefault port matches without OpenSSH lookup semantics"
+  else
+    _fail "host key: bracketed nondefault port matches without OpenSSH lookup semantics"
+  fi
+
+  : >"$HOST_KEY_LOG"
+  MOCK_STORED_LINES='example.test ssh-ed25519 PINNED'
+  _set_mock_stored_lines
+  MOCK_LIVE_LINES=''
+  set +e
+  output=$(_upterm_verify_known_host "example.test:22" "$known_hosts" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "host key: unreachable scan fails closed" 1 "$rc"
+  _assert_contains "host key: unreachable scan is actionable" "could not scan" "$output"
+
+  MOCK_CERT_STATUS=2
+  MOCK_LIVE_LINES='example.test ssh-ed25519 PINNED'
+  set +e
+  output=$(_upterm_verify_known_host "example.test:22" "$known_hosts" 2>&1)
+  rc=$?
+  set -e
+  MOCK_CERT_STATUS=0
+  _assert_exit "host key: certificate probe operational failures fail closed" 1 "$rc"
+  _assert_contains "host key: certificate probe failure is actionable" \
+    "ssh-keyscan failed while probing certificate" "$output"
+
+  MOCK_STORED_LINES='example.test ssh-ed25519 PINNED'
+  _set_mock_stored_lines
+  MOCK_LIVE_LINES='example.test ssh-ed25519 PINNED'
+  MOCK_KEY_PARSE_FAIL=1
+  set +e
+  output=$(_upterm_verify_known_host "example.test:22" "$known_hosts" 2>&1)
+  rc=$?
+  set -e
+  MOCK_KEY_PARSE_FAIL=""
+  _assert_exit "host key: key parse failure fails closed" 1 "$rc"
+  _assert_contains "host key: key parse failure is actionable" "malformed known-hosts key" "$output"
+  unset -f _set_mock_stored_lines
+
+  parsed_host=""
+  parsed_port=""
+  _upterm_parse_server '[2001:db8::1]:2200' parsed_host parsed_port
+  _assert_eq "host key: bracketed IPv6 host is parsed" "2001:db8::1" "$parsed_host"
+  _assert_eq "host key: bracketed IPv6 port is parsed" "2200" "$parsed_port"
+  for valid_server in '[::]:22' '[::1]:22' '[1::]:22' \
+    '[2001:db8:0:1:1:1:1:1]:22' '[::ffff:192.0.2.1]:22'; do
+    if _upterm_parse_server "$valid_server" parsed_host parsed_port; then
+      _pass "host key: valid IPv6 literal is accepted: $valid_server"
+    else
+      _fail "host key: valid IPv6 literal is accepted: $valid_server"
+    fi
+  done
+  if _upterm_parse_server '2001:db8::1' parsed_host parsed_port; then
+    _fail "host key: ambiguous unbracketed IPv6 is rejected"
+  else
+    _pass "host key: ambiguous unbracketed IPv6 is rejected"
+  fi
+  _upterm_parse_server 'example.test:00022' parsed_host parsed_port
+  _assert_eq "host key: leading-zero port is normalized" "22" "$parsed_port"
+  _upterm_parse_server 'xn--example.test:22' parsed_host parsed_port
+  _assert_eq "host key: punycode-style server names are accepted" "xn--example.test" "$parsed_host"
+  REPLY=preserved
+  _upterm_parse_server '[::1]:22' parsed_host parsed_port
+  _assert_eq "host key: IPv6 parsing preserves the caller's REPLY" "preserved" "$REPLY"
+  for invalid_server in 'example.test:0' 'example.test:65536' \
+    'example.test:999999999999999999999999999999' 'example.test:not-a-port' \
+    'bad host:22' '-option:22' 'user@example.test:22' 'example.test/path:22' \
+    'example.test?query:22' 'example.test#fragment:22' 'example%2etest:22' \
+    'foo[bar]:22' 'foo]bar:22' 'foo\bar:22' 'foo"bar:22' 'foo<bar:22' \
+    'foo>bar:22' 'foo^bar:22' 'foo`bar:22' 'foo{bar:22' 'foo|bar:22' \
+    'foo}bar:22' '[example.test]:22' '[not:ipv6]:22' '[2001:db8:::1]:22' \
+    '[::ffff:192.0.002.1]:22' 'café.test:22'; do
+    if _upterm_parse_server "$invalid_server" parsed_host parsed_port; then
+      _fail "host key: invalid server is rejected: $invalid_server"
+    else
+      _pass "host key: invalid server is rejected: $invalid_server"
+    fi
+  done
+  for invalid_server in $'bad\001host:22' $'bad\177host:22' $'bad\302\205host:22'; do
+    if _upterm_parse_server "$invalid_server" parsed_host parsed_port; then
+      _fail "host key: non-printable authority bytes are rejected"
+    else
+      _pass "host key: non-printable authority bytes are rejected"
+    fi
+  done
+
+  real_process_identity=""
+  _upterm_process_identity "$$" real_process_identity
+  if _upterm_pid_matches_identity "$$" "$real_process_identity"; then
+    _pass "host key: process identity matches the live local shell"
+  else
+    _fail "host key: process identity matches the live local shell"
+  fi
+  mock_ps_output='Wed Jul  3 09:08:07 2024    '
+  mock_ps_called="$(_tmpdir)/mock-ps-called"
+  # shellcheck disable=SC2329 # process identity invokes this BSD-ps test double.
+  ps() {
+    : >"$mock_ps_called"
+    builtin printf '%s\n' "$mock_ps_output"
+  }
+  LC_ALL=POSIX
+  bsd_process_identity=""
+  _upterm_process_identity 42 bsd_process_identity
+  expected_bsd_identity=$(builtin printf '%s' 'Wed Jul  3 09:08:07 2024' | od -An -tx1 | tr -d '[:space:]')
+  _assert_eq "host key: padded BSD ps start time has deterministic identity" \
+    "$expected_bsd_identity" "$bsd_process_identity"
+  _assert_eq "host key: process identity preserves caller locale" "POSIX" "$LC_ALL"
+  rm -f "$mock_ps_called"
+  if _upterm_process_identity not-a-pid ignored_identity; then
+    _fail "host key: process identity rejects nonnumeric PID before ps"
+  else
+    _pass "host key: process identity rejects nonnumeric PID before ps"
+  fi
+  _assert_file_missing "host key: invalid PID never invokes ps" "$mock_ps_called"
+  for mock_ps_output in '' $'Wed Jul  3 09:08:07 2024\nThu Jul  4 09:08:07 2024' \
+    'Jul 3 09:08:07 2024' 'Wed Jul xx 09:08:07 2024'; do
+    set +e
+    _upterm_process_identity 42 ignored_identity
+    malformed_identity_rc=$?
+    set -e
+    _assert_exit "host key: malformed ps identity is an unknown probe" \
+      2 "$malformed_identity_rc"
+  done
+  unset -f ps
+  unset LC_ALL
+
+  identity_locale_dir=$(_tmpdir)
+  identity_locale_marker="$identity_locale_dir/locale"
+  identity_locale_real_ps=$(type -P ps)
+  cat >"$identity_locale_dir/ps" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "${LC_ALL-unset}" >"$DS_TEST_PS_LOCALE_MARKER"
+exec "$DS_TEST_REAL_PS" "$@"
+MOCK
+  chmod +x "$identity_locale_dir/ps"
+  LC_ALL=POSIX
+  export -n LC_ALL
+  # shellcheck disable=SC2034 # The helper writes this caller-owned result.
+  locale_identity=""
+  PATH="$identity_locale_dir:$PATH" \
+    DS_TEST_PS_LOCALE_MARKER="$identity_locale_marker" \
+    DS_TEST_REAL_PS="$identity_locale_real_ps" \
+    _upterm_process_identity "$$" locale_identity
+  _assert_file_content "host key: external ps always receives the C locale" \
+    "C" "$identity_locale_marker"
+  _assert_eq "host key: explicit ps locale preserves the caller variable" \
+    "POSIX" "$LC_ALL"
+  unset LC_ALL
+
+  identity_failure_dir=$(_tmpdir)
+  identity_failure_real_ps=$(type -P ps)
+  cat >"$identity_failure_dir/ps" <<'MOCK'
+#!/usr/bin/env bash
+for argument; do
+  if [[ "$argument" == "$DS_TEST_PS_FAILURE_PID" ]]; then
+    exit 72
+  fi
+done
+exec "$DS_TEST_REAL_PS" "$@"
+MOCK
+  chmod +x "$identity_failure_dir/ps"
+  set +e
+  PATH="$identity_failure_dir:$PATH" \
+    DS_TEST_PS_FAILURE_PID="$$" DS_TEST_REAL_PS="$identity_failure_real_ps" \
+    _upterm_process_identity "$$" ignored_identity
+  identity_failure_rc=$?
+  set -e
+  _assert_exit "host key: live PID ps failure is an unknown probe" \
+    2 "$identity_failure_rc"
+
+  supervisor_race_dir=$(_tmpdir)
+  supervisor_race_child_file="$supervisor_race_dir/child"
+  bash -c 'sleep 30 & printf "%s\n" "$!" >"$1"; wait' \
+    bash "$supervisor_race_child_file" &
+  supervisor_race_root=$!
+  _track_test_pid "$supervisor_race_root"
+  for ((supervisor_race_attempt = 0; supervisor_race_attempt < 500; supervisor_race_attempt++)); do
+    [[ -s "$supervisor_race_child_file" ]] && break
+    sleep 0.01
+  done
+  supervisor_race_child=$(<"$supervisor_race_child_file")
+  supervisor_race_identity=""
+  _upterm_process_identity "$supervisor_race_child" supervisor_race_identity
+  supervisor_race_real_ps=$(type -P ps)
+  # shellcheck disable=SC2329 # Supervisor command inspection invokes this race double.
+  ps() {
+    local argument command_probe=0
+    for argument; do
+      [[ "$argument" != command= ]] || command_probe=1
+    done
+    if ((command_probe)); then
+      command kill -KILL "$supervisor_race_child" 2>/dev/null || true
+      for ((supervisor_race_attempt = 0; supervisor_race_attempt < 500; supervisor_race_attempt++)); do
+        command kill -0 "$supervisor_race_child" 2>/dev/null || break
+        sleep 0.01
+      done
+      return 72
+    fi
+    "$supervisor_race_real_ps" "$@"
+  }
+  set +e
+  _upterm_supervisor_matches \
+    "$supervisor_race_child" "$supervisor_race_identity" \
+    33333333333333333333333333333333
+  supervisor_race_rc=$?
+  set -e
+  unset -f ps
+  wait "$supervisor_race_root" 2>/dev/null || true
+  _assert_exit "host key: supervisor exit during command inspection is confirmed absent" \
+    1 "$supervisor_race_rc"
+
+  rm -f "$MOCK_BIN/ssh-keygen" "$MOCK_BIN/ssh-keyscan"
+
+  # Verification must run before any detached process or state is created.
+  lifecycle_dir=$(_tmpdir)
+  lifecycle_pid="$lifecycle_dir/upterm.pid"
+  lifecycle_info="$lifecycle_dir/share-info"
+  lifecycle_snapshot_base="$(_state_file_prefix).upterm.known_hosts"
+  lifecycle_snapshot_owner="${lifecycle_snapshot_base}.owner"
+  lifecycle_snapshot="$lifecycle_snapshot_base"
+  DS_UPTERM_HOST="example.test:22"
+  DS_UPTERM_KNOWN_HOSTS="$lifecycle_dir/missing-known-hosts"
+  DS_UPTERM_PRIVATE_KEY="$TEST_HOME/.ssh/test_upterm_key"
+  DS_UPTERM_PID_FILE="$lifecycle_pid"
+  DS_SHARE_INFO_FILE="$lifecycle_info"
+  DS_UPTERM_GITHUB_USER="testuser"
+  DS_UPTERM_AUTHORIZED_KEYS=""
+  DS_UPTERM_SHARE_TTL="0"
+  rm -f "$(_upterm_session_file)" "$(_upterm_admin_file)" "$(_upterm_log_file)"
+  _reset_tmux_log
+  set +e
+  output=$(_share_start "verification-failure" 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "host key: share start propagates verification failure" 1 "$rc"
+  _assert_contains "host key: share start reaches trust verification" \
+    "known-hosts source must be a readable non-symlink regular file" "$output"
+  _assert_not_contains "host key: verification failure never invokes Upterm" \
+    "upterm host" "$(_tmux_log)"
+  _assert_file_missing "host key: verification failure creates no pid file" "$lifecycle_pid"
+  _assert_file_missing "host key: verification failure creates no session file" \
+    "$(_upterm_session_file)"
+  _assert_file_missing "host key: verification failure creates no admin file" \
+    "$(_upterm_admin_file)"
+  _assert_file_missing "host key: verification failure creates no log file" \
+    "$(_upterm_log_file)"
+  _assert_file_missing "host key: verification failure creates no share info" "$lifecycle_info"
+  _assert_file_missing "host key: verification failure removes its trust snapshot" \
+    "$lifecycle_snapshot"
+
+  unknown_probe_pid_file="$lifecycle_dir/unknown-probe-pid"
+  sleep 30 &
+  unknown_probe_pid=$!
+  _track_test_pid "$unknown_probe_pid"
+  printf '%s\n' "$unknown_probe_pid" >"$unknown_probe_pid_file"
+  unknown_probe_identity=000000000000000000000000000000000000000000000000
+  unknown_probe_token=$(_upterm_snapshot_token)
+  unknown_probe_snapshot=$(_upterm_known_hosts_snapshot_file "$unknown_probe_token")
+  unknown_probe_control=$(_upterm_control_dir "$unknown_probe_token")
+  unknown_probe_lock=$(_upterm_operation_lock_dir)
+  mkdir "$unknown_probe_lock"
+  printf 'version=1\npid=%s\nidentity=%s\ntoken=%s\n' \
+    "$unknown_probe_pid" "$unknown_probe_identity" "$unknown_probe_token" \
+    >"$unknown_probe_lock/owner"
+  set +e
+  PATH="$identity_failure_dir:$PATH" \
+    DS_TEST_PS_FAILURE_PID="$unknown_probe_pid" \
+    DS_TEST_REAL_PS="$identity_failure_real_ps" \
+    _upterm_acquire_operation_lock ignored_operation_token \
+    >"$lifecycle_dir/unknown-lock-output" 2>&1
+  unknown_lock_rc=$?
+  set -e
+  _assert_exit "host key: unknown lock-owner identity blocks recovery" \
+    1 "$unknown_lock_rc"
+  _assert_file_exists "host key: unknown lock-owner identity retains the lock" \
+    "$unknown_probe_lock/owner"
+  rm -rf "$unknown_probe_lock"
+
+  printf 'unknown-probe\n' >"$unknown_probe_snapshot"
+  printf 'version=2\nphase=starting\npid=%s\nidentity=%s\ntoken=%s\nsnapshot=%s\n' \
+    "$unknown_probe_pid" "$unknown_probe_identity" "$unknown_probe_token" \
+    "${unknown_probe_snapshot##*/}" >"$lifecycle_snapshot_owner"
+  mkdir "$unknown_probe_control"
+  set +e
+  PATH="$identity_failure_dir:$PATH" \
+    DS_TEST_PS_FAILURE_PID="$unknown_probe_pid" \
+    DS_TEST_REAL_PS="$identity_failure_real_ps" \
+    _upterm_request_supervisor_stop \
+    "$unknown_probe_pid" "$unknown_probe_identity" "$unknown_probe_token" \
+    >"$lifecycle_dir/unknown-stop-output" 2>&1
+  unknown_stop_rc=$?
+  set -e
+  _assert_exit "host key: unknown stop-owner identity fails closed" \
+    1 "$unknown_stop_rc"
+  _assert_file_exists "host key: unknown stop-owner identity retains ownership" \
+    "$lifecycle_snapshot_owner"
+  set +e
+  PATH="$identity_failure_dir:$PATH" \
+    DS_TEST_PS_FAILURE_PID="$unknown_probe_pid" \
+    DS_TEST_REAL_PS="$identity_failure_real_ps" \
+    _upterm_reconcile_snapshot_owner \
+    >"$lifecycle_dir/unknown-reconcile-output" 2>&1
+  unknown_reconcile_rc=$?
+  set -e
+  _assert_exit "host key: unknown reconciliation identity fails closed" \
+    1 "$unknown_reconcile_rc"
+  _assert_file_exists "host key: unknown reconciliation retains ownership" \
+    "$lifecycle_snapshot_owner"
+  _assert_file_exists "host key: unknown reconciliation retains trust state" \
+    "$unknown_probe_snapshot"
+  kill "$unknown_probe_pid" 2>/dev/null || true
+  wait "$unknown_probe_pid" 2>/dev/null || true
+  rm -rf "$unknown_probe_control"
+  rm -f "$unknown_probe_snapshot" "$lifecycle_snapshot_owner"
+
+  if [[ -n "$REAL_SSH_KEYGEN" ]]; then
+    # Every failure class must stop before the detached process and state
+    # boundary. These files use real OpenSSH keys; only network access remains
+    # mocked by the surrounding test harness.
+    preflight_cases_dir="$lifecycle_dir/preflight-cases"
+    mkdir -p "$preflight_cases_dir"
+    printf 'example.test %s\nother.test ssh-ed25519 NOTBASE64\n' \
+      "$real_host_key" >"$preflight_cases_dir/malformed-unrelated"
+    printf 'example.test %s\n' "$real_host_cert" >"$preflight_cases_dir/direct-cert"
+    printf 'example.test %s\n' "$real_rsa_host_key" >"$preflight_cases_dir/unsupported-legacy-rsa"
+    printf 'example.test %s\n' "$real_rsa_host_key" >"$preflight_cases_dir/unsupported-rsa-sha2"
+    printf 'example.test %s\n' "$real_ecdsa_key" >"$preflight_cases_dir/unsupported-direct"
+    printf '@cert-authority café.test %s\n' \
+      "$real_ca_key" >"$preflight_cases_dir/non-ascii-authority"
+    printf '@cert-authority example.test %s\n' \
+      "$real_ca_key" >"$preflight_cases_dir/unsupported-ca"
+    printf '@cert-authority example.test %s\nexample.test %s\n' \
+      "$real_ca_key" "$real_host_key" >"$preflight_cases_dir/mixed-ca-direct"
+    {
+      printf '#'
+      head -c 65535 /dev/zero | tr '\0' x
+      printf '\nexample.test %s\n' "$real_host_key"
+    } >"$preflight_cases_dir/overlong-comment"
+    {
+      printf 'example.test %s\n' "$real_host_key"
+      printf '@revoked\0 other.test %s\n' "$real_old_host_key"
+    } >"$preflight_cases_dir/nul-byte"
+
+    preflight_hosts=('example.test:22' 'example.test:22' 'example.test:22' 'example.test:22'
+      'example.test:22' 'café.test:22' 'example.test:22' 'example.test:22'
+      'example.test:22' 'example.test:22')
+    preflight_files=('malformed-unrelated' 'direct-cert' 'unsupported-legacy-rsa'
+      'unsupported-rsa-sha2' 'unsupported-direct' 'non-ascii-authority' 'unsupported-ca'
+      'mixed-ca-direct' 'overlong-comment' 'nul-byte')
+    preflight_errors=('malformed known-hosts key' 'direct certificate pins are not supported'
+      'only ssh-ed25519 can be verified before launch' 'only ssh-ed25519 can be verified before launch'
+      'unsupported direct host key type' 'invalid upterm server address'
+      'certificate-authority verification is not supported'
+      'certificate-authority verification is not supported' 'known-hosts line is too long'
+      'contains a NUL byte')
+    # shellcheck disable=SC2329 # production invokes this network-boundary test double.
+    ssh-keyscan() {
+      printf 'ssh-keyscan %s\n' "$*" >>"$HOST_KEY_LOG"
+      return 1
+    }
+    for ((preflight_index = 0; preflight_index < ${#preflight_files[@]}; preflight_index++)); do
+      DS_UPTERM_HOST="${preflight_hosts[$preflight_index]}"
+      DS_UPTERM_KNOWN_HOSTS="$preflight_cases_dir/${preflight_files[$preflight_index]}"
+      rm -f "$lifecycle_pid" "$lifecycle_info" "$(_upterm_session_file)" \
+        "$(_upterm_admin_file)" "$(_upterm_log_file)"
+      _reset_tmux_log
+      : >"$HOST_KEY_LOG"
+      set +e
+      output=$(_share_start "preflight-${preflight_files[$preflight_index]}" 2>&1)
+      rc=$?
+      set -e
+      _assert_exit "host key: ${preflight_files[$preflight_index]} fails before launch" 1 "$rc"
+      _assert_contains "host key: ${preflight_files[$preflight_index]} is actionable" \
+        "${preflight_errors[$preflight_index]}" "$output"
+      _assert_not_contains "host key: ${preflight_files[$preflight_index]} never invokes Upterm" \
+        "upterm host" "$(_tmux_log)"
+      _assert_not_contains "host key: ${preflight_files[$preflight_index]} starts no network probe" \
+        "ssh-keyscan" "$(cat "$HOST_KEY_LOG")"
+      _assert_file_missing "host key: ${preflight_files[$preflight_index]} creates no pid file" \
+        "$lifecycle_pid"
+      _assert_file_missing "host key: ${preflight_files[$preflight_index]} creates no session file" \
+        "$(_upterm_session_file)"
+      _assert_file_missing "host key: ${preflight_files[$preflight_index]} creates no admin file" \
+        "$(_upterm_admin_file)"
+      _assert_file_missing "host key: ${preflight_files[$preflight_index]} creates no log file" \
+        "$(_upterm_log_file)"
+      _assert_file_missing "host key: ${preflight_files[$preflight_index]} creates no share info" \
+        "$lifecycle_info"
+      _assert_file_missing "host key: ${preflight_files[$preflight_index]} removes its trust snapshot" \
+        "$lifecycle_snapshot"
+    done
+    unset -f ssh-keyscan
+    DS_UPTERM_HOST="example.test:22"
+  fi
+
+  if [[ -n "$REAL_SSH_KEYGEN" ]]; then
+    selected_cert_known_hosts="$lifecycle_dir/selected-cert-known-hosts"
+    printf 'example.test %s\n' "$real_host_key" >"$selected_cert_known_hosts"
+    # shellcheck disable=SC2329 # production invokes this network-boundary test double.
+    ssh-keyscan() {
+      for scan_arg; do
+        if [[ "$scan_arg" == -c ]]; then
+          printf '%s\n' "$real_host_cert"
+          return 0
+        fi
+      done
+      printf 'example.test %s\n' "$real_host_key"
+    }
+
+    DS_UPTERM_KNOWN_HOSTS="$selected_cert_known_hosts"
+    rm -f "$lifecycle_pid" "$lifecycle_info" "$(_upterm_session_file)" \
+      "$(_upterm_admin_file)" "$(_upterm_log_file)"
+    _reset_tmux_log
+    set +e
+    output=$(_share_start "selected-cert" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: selected certificate stops share start" 1 "$rc"
+    _assert_contains "host key: selected certificate failure is actionable" \
+      "host certificates are not supported" "$output"
+    _assert_not_contains "host key: selected certificate never invokes Upterm" \
+      "upterm host" "$(_tmux_log)"
+    _assert_file_missing "host key: selected certificate creates no pid file" "$lifecycle_pid"
+    _assert_file_missing "host key: selected certificate creates no session file" \
+      "$(_upterm_session_file)"
+    _assert_file_missing "host key: selected certificate creates no admin file" \
+      "$(_upterm_admin_file)"
+    _assert_file_missing "host key: selected certificate creates no log file" \
+      "$(_upterm_log_file)"
+    _assert_file_missing "host key: selected certificate creates no share info" \
+      "$lifecycle_info"
+    _assert_file_missing "host key: selected certificate removes its trust snapshot" \
+      "$lifecycle_snapshot"
+    unset -f ssh-keyscan
+    rm -f "$lifecycle_pid" "$lifecycle_info" \
+      "$(_upterm_session_file)" "$(_upterm_admin_file)" "$(_upterm_log_file)"
+  fi
+
+  if [[ -n "$REAL_SSH_KEYGEN" ]]; then
+    snapshot_source="$lifecycle_dir/snapshot-source"
+    snapshot_expected="$lifecycle_dir/snapshot-expected"
+    snapshot_capture="$lifecycle_dir/snapshot-capture"
+    snapshot_original="example.test $real_host_key"
+    snapshot_replacement="@cert-authority example.test $real_ca_key"
+    printf '%s' "$snapshot_original" >"$snapshot_source"
+    printf '%s' "$snapshot_original" >"$snapshot_expected"
+    DS_UPTERM_HOST="example.test:22"
+    DS_UPTERM_KNOWN_HOSTS="$snapshot_source"
+    rm -f "$lifecycle_pid" "$lifecycle_info" "$lifecycle_snapshot_base" \
+      "$lifecycle_snapshot_owner" "${lifecycle_snapshot_base}".* \
+      "$(_upterm_session_file)" "$(_upterm_admin_file)" "$(_upterm_log_file)"
+    _reset_tmux_log
+    # shellcheck disable=SC2329 # production invokes this network-boundary test double.
+    ssh-keyscan() {
+      local snapshot_scan_arg certificate=0
+      for snapshot_scan_arg; do
+        [[ "$snapshot_scan_arg" == -c ]] && certificate=1
+      done
+      printf '%s\n' "$snapshot_replacement" >"$snapshot_source"
+      ((certificate)) && return 1
+      printf '%s\n' "$snapshot_original"
+    }
+
+    old_test_umask=$(umask)
+    umask 000
+    export MOCK_UPTERM_KNOWN_HOSTS_CAPTURE="$snapshot_capture"
+    set +e
+    output=$(_share_start "snapshot-swap" 2>&1)
+    rc=$?
+    set -e
+    umask "$old_test_umask"
+    unset MOCK_UPTERM_KNOWN_HOSTS_CAPTURE
+    _assert_exit "host key: source swaps do not break a verified launch" 0 "$rc"
+    snapshot_basename=$(sed -n 's/^snapshot=//p' "$lifecycle_snapshot_owner" 2>/dev/null || true)
+    lifecycle_snapshot="$(dirname "$lifecycle_snapshot_base")/$snapshot_basename"
+    _assert_file_exists "host key: a successful launch retains snapshot ownership" \
+      "$lifecycle_snapshot_owner"
+    _assert_file_exists "host key: a successful launch retains its trust snapshot" \
+      "$lifecycle_snapshot"
+    _assert_file_content "host key: the retained snapshot has the original trusted bytes" \
+      "$snapshot_original" "$lifecycle_snapshot"
+    if git diff --no-index --quiet -- \
+      "$snapshot_expected" "$lifecycle_snapshot"; then
+      _pass "host key: the retained snapshot is byte-identical to its source"
+    else
+      _fail "host key: the retained snapshot is byte-identical to its source"
+    fi
+    _assert_file_content "host key: the configured source can change independently" \
+      "$snapshot_replacement" "$snapshot_source"
+    _assert_file_content "host key: Upterm consumes the original trusted bytes" \
+      "$snapshot_original" "$snapshot_capture"
+    _assert_contains "host key: Upterm receives the verified snapshot descriptor" \
+      "--known-hosts /dev/fd/3" "$(_tmux_log)"
+    if [[ "$lifecycle_snapshot" != "$lifecycle_snapshot_base" ]]; then
+      _pass "host key: each launch uses a unique trust snapshot"
+    else
+      _fail "host key: each launch uses a unique trust snapshot"
+    fi
+    if [[ -f "$lifecycle_snapshot" && ! -L "$lifecycle_snapshot" ]]; then
+      _pass "host key: the retained snapshot is a regular file"
+    else
+      _fail "host key: the retained snapshot is a regular file"
+    fi
+    snapshot_mode=missing
+    if [[ -f "$lifecycle_snapshot" ]] &&
+      snapshot_mode=$(stat -c '%a' "$lifecycle_snapshot" 2>/dev/null); then
+      :
+    elif [[ -f "$lifecycle_snapshot" ]]; then
+      snapshot_mode=$(stat -f '%Lp' "$lifecycle_snapshot" 2>/dev/null || printf unknown)
+    fi
+    _assert_eq "host key: the trust snapshot stays private under umask 000" \
+      "600" "$snapshot_mode"
+    owner_mode=missing
+    if [[ -f "$lifecycle_snapshot_owner" ]] &&
+      owner_mode=$(stat -c '%a' "$lifecycle_snapshot_owner" 2>/dev/null); then
+      :
+    elif [[ -f "$lifecycle_snapshot_owner" ]]; then
+      owner_mode=$(stat -f '%Lp' "$lifecycle_snapshot_owner" 2>/dev/null || printf unknown)
+    fi
+    _assert_eq "host key: snapshot ownership stays private under umask 000" \
+      "600" "$owner_mode"
+    pid_mode=missing
+    if [[ -f "$lifecycle_pid" ]] &&
+      pid_mode=$(stat -c '%a' "$lifecycle_pid" 2>/dev/null); then
+      :
+    elif [[ -f "$lifecycle_pid" ]]; then
+      pid_mode=$(stat -f '%Lp' "$lifecycle_pid" 2>/dev/null || printf unknown)
+    fi
+    _assert_eq "host key: process state stays private under umask 000" \
+      "600" "$pid_mode"
+    lifecycle_control=$(_upterm_control_dir "${lifecycle_snapshot##*.}")
+    for jobs_name in monitor supervisor; do
+      jobs_mode=missing
+      if [[ -f "$lifecycle_control/$jobs_name.jobs" ]] &&
+        jobs_mode=$(stat -c '%a' "$lifecycle_control/$jobs_name.jobs" 2>/dev/null); then
+        :
+      elif [[ -f "$lifecycle_control/$jobs_name.jobs" ]]; then
+        jobs_mode=$(stat -f '%Lp' "$lifecycle_control/$jobs_name.jobs" \
+          2>/dev/null || printf unknown)
+      fi
+      _assert_eq "host key: $jobs_name job state stays private under umask 000" \
+        "600" "$jobs_mode"
+    done
+    _assert_file_missing "host key: supervisor unlinks its private FIFO after handoff" \
+      "$lifecycle_control/owner.pipe"
+
+    stopped_snapshot_token="${lifecycle_snapshot##*.}"
+    _share_stop "snapshot-swap" >/dev/null
+    _assert_file_missing "host key: stopping removes the retained trust snapshot" \
+      "$lifecycle_snapshot"
+    _assert_file_missing "host key: stopping removes snapshot ownership" \
+      "$lifecycle_snapshot_owner"
+    if _upterm_cleanup_known_hosts_snapshot "$stopped_snapshot_token" "$lifecycle_snapshot"; then
+      _pass "host key: repeated owned snapshot cleanup is idempotent"
+    else
+      _fail "host key: repeated owned snapshot cleanup is idempotent"
+    fi
+
+    scoped_snapshot_token=""
+    scoped_snapshot=""
+    _upterm_acquire_snapshot_owner scoped_snapshot_token scoped_snapshot
+    printf 'owned\n' >"$scoped_snapshot"
+    wrong_snapshot_token=00000000000000000000000000000000
+    [[ "$wrong_snapshot_token" == "$scoped_snapshot_token" ]] &&
+      wrong_snapshot_token=11111111111111111111111111111111
+    wrong_snapshot=$(_upterm_known_hosts_snapshot_file "$wrong_snapshot_token")
+    set +e
+    output=$(_upterm_cleanup_known_hosts_snapshot \
+      "$wrong_snapshot_token" "$wrong_snapshot" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: cleanup cannot cross snapshot ownership" 1 "$rc"
+    _assert_contains "host key: cross-owner cleanup rejection is actionable" \
+      "owned by another start" "$output"
+    _assert_file_exists "host key: cross-owner cleanup preserves the snapshot" \
+      "$scoped_snapshot"
+    _assert_file_exists "host key: cross-owner cleanup preserves ownership" \
+      "$lifecycle_snapshot_owner"
+    _upterm_cleanup_known_hosts_snapshot "$scoped_snapshot_token" "$scoped_snapshot"
+
+    printf '%s' "$snapshot_original" >"$snapshot_source"
+    DS_UPTERM_KNOWN_HOSTS="$snapshot_source"
+    descriptor_sentinel="$lifecycle_dir/descriptor-sentinel"
+    printf 'caller-owned\n' >"$descriptor_sentinel"
+    exec 9<"$descriptor_sentinel"
+    set +e
+    output=$(_share_start "descriptor-preservation" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: an occupied internal descriptor does not block launch" 0 "$rc"
+    IFS= read -r descriptor_value <&9
+    _assert_eq "host key: snapshot handoff preserves caller descriptors" \
+      "caller-owned" "$descriptor_value"
+    exec 9<&-
+    _share_stop "descriptor-preservation" >/dev/null
+
+    child_descriptor_log="$lifecycle_dir/child-descriptors"
+    child_descriptor_parent=""
+    child_descriptor_parent_identity=""
+    child_descriptor_gate="$lifecycle_dir/child-descriptor-gate"
+    _upterm_current_pid child_descriptor_parent
+    _upterm_process_identity "$child_descriptor_parent" child_descriptor_parent_identity
+    : >"$child_descriptor_gate"
+    chmod 600 "$child_descriptor_gate"
+    exec 9<<<"caller-secret"
+    exec 8<<<"trusted-bytes"
+    exec 200<<<"high-read-secret"
+    child_high_write="$lifecycle_dir/child-high-write"
+    exec 201>"$child_high_write"
+    # shellcheck disable=SC2016 # Descriptor checks expand only in the isolated child.
+    _upterm_spawn_with_trust_fd 8 "$child_descriptor_log" \
+      "$child_descriptor_gate" "$child_descriptor_parent" "$child_descriptor_parent_identity" \
+      bash -c '
+      if IFS= read -r inherited <&9 2>/dev/null; then
+        printf "inherited=%s\n" "$inherited"
+      else
+        printf "fd9=closed\n"
+      fi
+      if IFS= read -r inherited <&200 2>/dev/null; then
+        printf "inherited200=%s\n" "$inherited"
+      else
+        printf "fd200=closed\n"
+      fi
+      if printf "child-write\n" >&201 2>/dev/null; then
+        printf "fd201=inherited\n"
+      else
+        printf "fd201=closed\n"
+      fi
+      IFS= read -r trust <&3
+      printf "trust=%s\n" "$trust"
+    '
+    child_descriptor_pid="$_UPTERM_SPAWN_PID"
+    set +e
+    wait "$child_descriptor_pid"
+    child_descriptor_rc=$?
+    set -e
+    _assert_exit "host key: descriptor-isolated child completes" 0 "$child_descriptor_rc"
+    descriptor_value=""
+    high_descriptor_value=""
+    set +e
+    IFS= read -r descriptor_value <&9
+    descriptor_parent_rc=$?
+    IFS= read -r high_descriptor_value <&200
+    high_descriptor_parent_rc=$?
+    set -e
+    _assert_exit "host key: descriptor-isolated launch leaves caller offset untouched" \
+      0 "$descriptor_parent_rc"
+    _assert_eq "host key: descriptor-isolated child preserves trust fd" \
+      "trust=trusted-bytes" "$(sed -n 's/^trust=/trust=/p' "$child_descriptor_log")"
+    _assert_contains "host key: descriptor-isolated child closes unrelated caller fd" \
+      "fd9=closed" "$(<"$child_descriptor_log")"
+    _assert_contains "host key: descriptor-isolated child closes high read fd" \
+      "fd200=closed" "$(<"$child_descriptor_log")"
+    _assert_contains "host key: descriptor-isolated child closes high write fd" \
+      "fd201=closed" "$(<"$child_descriptor_log")"
+    _assert_eq "host key: descriptor-isolated launch preserves caller fd" \
+      "caller-secret" "$descriptor_value"
+    _assert_exit "host key: high caller read offset stays untouched" \
+      0 "$high_descriptor_parent_rc"
+    _assert_eq "host key: high caller read fd preserves bytes" \
+      "high-read-secret" "$high_descriptor_value"
+    printf 'parent-write\n' >&201
+    exec 8<&- 9<&- 200<&- 201>&-
+    _assert_eq "host key: high caller write fd is not used by child" \
+      "parent-write" "$(<"$child_high_write")"
+
+    set +e
+    output=$(
+      exec 3</dev/null 4</dev/null 5</dev/null 6</dev/null \
+        7</dev/null 8</dev/null 9</dev/null
+      _share_start "descriptor-exhaustion" 2>&1
+    )
+    rc=$?
+    set -e
+    _assert_exit "host key: descriptor exhaustion fails before launch" 1 "$rc"
+    _assert_contains "host key: descriptor exhaustion is actionable" \
+      "no free file descriptor is available" "$output"
+    _assert_file_missing "host key: descriptor exhaustion removes snapshot ownership" \
+      "$lifecycle_snapshot_owner"
+
+    creation_token=""
+    creation_snapshot=""
+    creation_fd=""
+    _upterm_acquire_snapshot_owner creation_token creation_snapshot
+    printf 'collision\n' >"${creation_snapshot}.tmp"
+    creation_error="$lifecycle_dir/snapshot-creation-error"
+    set +e
+    _upterm_snapshot_known_hosts \
+      "$snapshot_source" "$creation_snapshot" creation_fd 2>"$creation_error"
+    rc=$?
+    set -e
+    _assert_exit "host key: snapshot creation failure propagates" 1 "$rc"
+    : "$creation_fd"
+    if _upterm_fd_is_open 9 2>/dev/null; then
+      _fail "host key: snapshot creation failure restores exact descriptor occupancy"
+      _upterm_close_fd 9
+    else
+      _pass "host key: snapshot creation failure restores exact descriptor occupancy"
+    fi
+    _upterm_cleanup_known_hosts_snapshot "$creation_token" "$creation_snapshot"
+    _assert_file_missing "host key: creation-failure retry removes the owned temporary" \
+      "${creation_snapshot}.tmp"
+
+    unlink_token=""
+    unlink_snapshot=""
+    unlink_fd=""
+    _upterm_acquire_snapshot_owner unlink_token unlink_snapshot
+    real_rm=$(type -P rm)
+    block_snapshot_temporary_rm=1
+    # shellcheck disable=SC2329 # production snapshot publication invokes this failure double.
+    rm() {
+      local arg blocked=0
+      local -a passthrough=()
+      for arg; do
+        if ((block_snapshot_temporary_rm)) &&
+          [[ "$arg" == "${unlink_snapshot}.tmp" ]]; then
+          blocked=1
+        else
+          passthrough+=("$arg")
+        fi
+      done
+      ((${#passthrough[@]} == 0)) || "$real_rm" "${passthrough[@]}"
+      ((blocked == 0))
+    }
+    set +e
+    output=$(_upterm_snapshot_known_hosts \
+      "$snapshot_source" "$unlink_snapshot" unlink_fd 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: snapshot temporary unlink failure propagates" 1 "$rc"
+    : "$unlink_fd"
+    block_snapshot_temporary_rm=0
+    _upterm_cleanup_known_hosts_snapshot "$unlink_token" "$unlink_snapshot"
+    unset -f rm
+    _assert_file_missing "host key: owned retry removes snapshot temporary residue" \
+      "${unlink_snapshot}.tmp"
+
+    mac_fd_token=""
+    mac_fd_snapshot=""
+    mac_handoff_fd=""
+    mac_validation_path=""
+    mac_expected=$(<"$snapshot_source")
+    _upterm_acquire_snapshot_owner mac_fd_token mac_fd_snapshot
+    real_ln=$(type -P ln)
+    # shellcheck disable=SC2329 # Snapshot publication invokes this compatibility double.
+    ln() {
+      [[ "${1:-}" != "$snapshot_source" ]] || return 88
+      "$real_ln" "$@"
+    }
+    set +e
+    _upterm_snapshot_known_hosts \
+      "$snapshot_source" "$mac_fd_snapshot" mac_handoff_fd mac_validation_path
+    mac_snapshot_rc=$?
+    set -e
+    unset -f ln
+    _assert_exit "host key: source need not be hard-linkable into state" \
+      0 "$mac_snapshot_rc"
+    mac_validation_anchor="${mac_validation_path}.anchor"
+    if [[ -n "$mac_handoff_fd" && -f "$mac_validation_path" &&
+      ! -L "$mac_validation_path" && -f "$mac_validation_anchor" &&
+      ! -L "$mac_validation_anchor" &&
+      "$mac_validation_path" -ef "$mac_validation_anchor" ]]; then
+      _pass "host key: validation and handoff anchors bind the same snapshot"
+    else
+      _fail "host key: validation and handoff anchors bind the same snapshot"
+    fi
+    mac_validation_first="$lifecycle_dir/mac-validation-first"
+    mac_validation_second="$lifecycle_dir/mac-validation-second"
+    cat "$mac_validation_path" >"$mac_validation_first"
+    cat "$mac_validation_path" >"$mac_validation_second"
+    mac_handoff_capture="$lifecycle_dir/mac-handoff-capture"
+    _upterm_copy_fd "$mac_handoff_fd" "$mac_handoff_capture"
+    _assert_file_content "host key: repeated mac-style validation starts at byte zero" \
+      "$mac_expected" "$mac_validation_first"
+    _assert_file_content "host key: a second mac-style validation reads the same bytes" \
+      "$mac_expected" "$mac_validation_second"
+    _assert_file_content "host key: pathname validation leaves handoff bytes untouched" \
+      "$mac_expected" "$mac_handoff_capture"
+    rm -f "$mac_validation_path" "$mac_validation_anchor"
+    _upterm_close_fd "$mac_handoff_fd"
+    _upterm_cleanup_known_hosts_snapshot "$mac_fd_token" "$mac_fd_snapshot"
+
+    copy_token=""
+    copy_snapshot=""
+    copy_fd=""
+    _upterm_acquire_snapshot_owner copy_token copy_snapshot
+    # shellcheck disable=SC2329 # production snapshot copying invokes this failure double.
+    cat() {
+      return 1
+    }
+    set +e
+    _upterm_snapshot_known_hosts \
+      "$snapshot_source" "$copy_snapshot" copy_fd 2>"$lifecycle_dir/copy-error"
+    rc=$?
+    set -e
+    unset -f cat
+    _assert_exit "host key: snapshot copy failure propagates" 1 "$rc"
+    : "$copy_fd"
+    if _upterm_fd_is_open 9 2>/dev/null; then
+      _fail "host key: snapshot copy failure restores exact descriptor occupancy"
+      _upterm_close_fd 9
+    else
+      _pass "host key: snapshot copy failure restores exact descriptor occupancy"
+    fi
+    _upterm_cleanup_known_hosts_snapshot "$copy_token" "$copy_snapshot"
+    _assert_file_missing "host key: copy-failure retry removes the owned temporary" \
+      "${copy_snapshot}.tmp"
+
+    chmod_token=""
+    chmod_snapshot=""
+    chmod_fd=""
+    _upterm_acquire_snapshot_owner chmod_token chmod_snapshot
+    real_chmod=$(type -P chmod)
+    # shellcheck disable=SC2329 # production snapshot hardening invokes this failure double.
+    chmod() {
+      local last=""
+      for last; do :; done
+      if [[ "$last" == "${chmod_snapshot}.tmp" ]]; then
+        return 1
+      fi
+      "$real_chmod" "$@"
+    }
+    set +e
+    output=$(_upterm_snapshot_known_hosts \
+      "$snapshot_source" "$chmod_snapshot" chmod_fd 2>&1)
+    rc=$?
+    set -e
+    unset -f chmod
+    _assert_exit "host key: snapshot permission failure propagates" 1 "$rc"
+    : "$chmod_fd"
+    _upterm_cleanup_known_hosts_snapshot "$chmod_token" "$chmod_snapshot"
+    _assert_file_missing "host key: permission-failure retry removes the owned temporary" \
+      "${chmod_snapshot}.tmp"
+
+    publish_token=""
+    publish_snapshot=""
+    publish_fd=""
+    _upterm_acquire_snapshot_owner publish_token publish_snapshot
+    printf 'collision\n' >"$publish_snapshot"
+    publish_error="$lifecycle_dir/snapshot-publication-error"
+    set +e
+    _upterm_snapshot_known_hosts \
+      "$snapshot_source" "$publish_snapshot" publish_fd 2>"$publish_error"
+    rc=$?
+    set -e
+    _assert_exit "host key: snapshot publication collision propagates" 1 "$rc"
+    : "$publish_fd"
+    if _upterm_fd_is_open 9 2>/dev/null; then
+      _fail "host key: snapshot publication failure restores exact descriptor occupancy"
+      _upterm_close_fd 9
+    else
+      _pass "host key: snapshot publication failure restores exact descriptor occupancy"
+    fi
+    _upterm_cleanup_known_hosts_snapshot "$publish_token" "$publish_snapshot"
+    _assert_file_missing "host key: publication-failure retry removes the final path" \
+      "$publish_snapshot"
+    _assert_file_missing "host key: publication-failure retry removes the temporary path" \
+      "${publish_snapshot}.tmp"
+
+    owner_gap_token=$(_upterm_snapshot_token)
+    owner_gap_snapshot=$(_upterm_known_hosts_snapshot_file "$owner_gap_token")
+    owner_gap_ready="$lifecycle_dir/owner-gap-ready"
+    owner_gap_release="$lifecycle_dir/owner-gap-release"
+    owner_gap_pid_file="$lifecycle_dir/owner-gap-pid"
+    (
+      owner_gap_creator_pid=""
+      _upterm_current_pid owner_gap_creator_pid
+      builtin printf '%s\n' "$owner_gap_creator_pid" >"$owner_gap_pid_file"
+      # shellcheck disable=SC2329 # production owner creation invokes this blocking double.
+      printf() {
+        if [[ "$1" == 'version=2\nphase=%s\npid=%s\nidentity=%s\ntoken=%s\nsnapshot=%s\n' ]]; then
+          : >"$owner_gap_ready"
+          while [[ ! -e "$owner_gap_release" ]]; do
+            sleep 0.01
+          done
+        fi
+        # shellcheck disable=SC2059 # The test double preserves the production format call.
+        builtin printf "$@"
+      }
+      _upterm_write_snapshot_owner create starting "$owner_gap_creator_pid" \
+        "$owner_gap_token" "$owner_gap_snapshot"
+    ) >"$lifecycle_dir/owner-gap-output" 2>&1 &
+    owner_gap_job=$!
+    _track_test_pid "$owner_gap_job"
+    for ((owner_gap_attempt = 0; owner_gap_attempt < 500; owner_gap_attempt++)); do
+      [[ -e "$owner_gap_ready" ]] && break
+      kill -0 "$owner_gap_job" 2>/dev/null || break
+      sleep 0.01
+    done
+    _assert_file_exists "host key: owner preparation reaches the publication boundary" \
+      "$owner_gap_ready"
+    _assert_file_missing "host key: incomplete owner metadata is never published" \
+      "$lifecycle_snapshot_owner"
+    set +e
+    owner_gap_live_output=$(_upterm_reconcile_snapshot_owner 2>&1)
+    owner_gap_live_rc=$?
+    set -e
+    _assert_exit "host key: reconciliation does not steal a live owner preparation" \
+      1 "$owner_gap_live_rc"
+    _assert_contains "host key: live owner preparation rejection is actionable" \
+      "owner preparation is still in progress" "$owner_gap_live_output"
+    owner_gap_pid=$(<"$owner_gap_pid_file")
+    owner_gap_identity=""
+    _upterm_process_identity "$owner_gap_pid" owner_gap_identity
+    _terminate_test_tree "$owner_gap_job" KILL
+    set +e
+    wait "$owner_gap_job" 2>/dev/null
+    set -e
+    set +e
+    owner_gap_dead_output=$(_upterm_reconcile_snapshot_owner 2>&1)
+    owner_gap_dead_rc=$?
+    set -e
+    : "$owner_gap_dead_output"
+    _assert_exit "host key: dead owner preparation is recovered automatically" \
+      0 "$owner_gap_dead_rc"
+    _assert_file_missing "host key: dead preparation leaves no fixed ownership" \
+      "$lifecycle_snapshot_owner"
+    command rm -f "$lifecycle_snapshot_owner" \
+      "${lifecycle_snapshot_owner}.${owner_gap_pid}.${owner_gap_identity}.${owner_gap_token}.new"
+
+    owner_write_token=$(_upterm_snapshot_token)
+    owner_write_snapshot=$(_upterm_known_hosts_snapshot_file "$owner_write_token")
+    owner_write_identity=""
+    _upterm_process_identity "$$" owner_write_identity
+    owner_write_temp="${lifecycle_snapshot_owner}.$$.$owner_write_identity.$owner_write_token.new"
+    # shellcheck disable=SC2329 # production owner creation invokes this failure double.
+    printf() {
+      if [[ "$1" == 'version=2\nphase=%s\npid=%s\nidentity=%s\ntoken=%s\nsnapshot=%s\n' ]]; then
+        return 1
+      fi
+      # shellcheck disable=SC2059 # The test double must preserve every other printf call.
+      builtin printf "$@"
+    }
+    set +e
+    _upterm_write_snapshot_owner create starting "$$" \
+      "$owner_write_token" "$owner_write_snapshot"
+    rc=$?
+    set -e
+    unset -f printf
+    _assert_exit "host key: owner metadata write failure is not a reservation race" 1 "$rc"
+    _assert_file_exists "host key: owner metadata write failure retains token retry state" \
+      "$owner_write_temp"
+    _assert_file_missing "host key: failed owner metadata is never published" \
+      "$lifecycle_snapshot_owner"
+    _upterm_cleanup_known_hosts_snapshot "$owner_write_token" "$owner_write_snapshot"
+    _assert_file_missing "host key: owner metadata write retry removes preparation" \
+      "$owner_write_temp"
+
+    owner_unlink_token=$(_upterm_snapshot_token)
+    owner_unlink_snapshot=$(_upterm_known_hosts_snapshot_file "$owner_unlink_token")
+    owner_unlink_temp="${lifecycle_snapshot_owner}.$$.$owner_write_identity.$owner_unlink_token.new"
+    real_rm=$(type -P rm)
+    block_owner_publish_rm=1
+    # shellcheck disable=SC2329 # production owner publication invokes this failure double.
+    rm() {
+      local arg blocked=0
+      local -a passthrough=()
+      for arg; do
+        if ((block_owner_publish_rm)) && [[ "$arg" == "$owner_unlink_temp" ]]; then
+          blocked=1
+        else
+          passthrough+=("$arg")
+        fi
+      done
+      ((${#passthrough[@]} == 0)) || "$real_rm" "${passthrough[@]}"
+      ((blocked == 0))
+    }
+    set +e
+    _upterm_write_snapshot_owner create starting "$$" \
+      "$owner_unlink_token" "$owner_unlink_snapshot" \
+      2>"$lifecycle_dir/owner-unlink-error"
+    rc=$?
+    set -e
+    _assert_exit "host key: published owner preparation unlink failure propagates" 1 "$rc"
+    _assert_file_exists "host key: unlink failure retains complete published ownership" \
+      "$lifecycle_snapshot_owner"
+    _assert_file_exists "host key: unlink failure retains token preparation for retry" \
+      "$owner_unlink_temp"
+    if [[ "$lifecycle_snapshot_owner" -ef "$owner_unlink_temp" ]]; then
+      _pass "host key: published ownership is the prepared metadata inode"
+    else
+      _fail "host key: published ownership is the prepared metadata inode"
+    fi
+    block_owner_publish_rm=0
+    set +e
+    output=$(_upterm_reconcile_snapshot_owner 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: reconciliation retries a live published preparation" 0 "$rc"
+    _assert_file_missing "host key: reconciliation removes published preparation residue" \
+      "$owner_unlink_temp"
+    _assert_file_exists "host key: reconciliation preserves live fixed ownership" \
+      "$lifecycle_snapshot_owner"
+    _upterm_cleanup_known_hosts_snapshot "$owner_unlink_token" "$owner_unlink_snapshot"
+    unset -f rm
+    _assert_file_missing "host key: published owner retry removes preparation" \
+      "$owner_unlink_temp"
+    _assert_file_missing "host key: published owner retry removes fixed ownership" \
+      "$lifecycle_snapshot_owner"
+
+    owner_create_pid=$$
+    owner_create_token=$(_upterm_snapshot_token)
+    owner_create_snapshot=$(_upterm_known_hosts_snapshot_file "$owner_create_token")
+    owner_create_temp="${lifecycle_snapshot_owner}.${owner_create_pid}.${owner_write_identity}.${owner_create_token}.new"
+    real_chmod=$(type -P chmod)
+    real_rm=$(type -P rm)
+    block_owner_create_rm=1
+    # shellcheck disable=SC2329 # production owner creation invokes this failure double.
+    chmod() {
+      local last=""
+      for last; do :; done
+      if [[ "$last" == "$owner_create_temp" ]]; then
+        return 1
+      fi
+      "$real_chmod" "$@"
+    }
+    # shellcheck disable=SC2329 # production owner cleanup invokes this failure double.
+    rm() {
+      local arg blocked=0
+      local -a passthrough=()
+      for arg; do
+        if ((block_owner_create_rm)) && [[ "$arg" == "$owner_create_temp" ]]; then
+          blocked=1
+        else
+          passthrough+=("$arg")
+        fi
+      done
+      ((${#passthrough[@]} == 0)) || "$real_rm" "${passthrough[@]}"
+      ((blocked == 0))
+    }
+    set +e
+    _upterm_write_snapshot_owner create starting "$owner_create_pid" \
+      "$owner_create_token" "$owner_create_snapshot" \
+      2>"$lifecycle_dir/owner-create-error"
+    rc=$?
+    set -e
+    unset -f chmod
+    _assert_exit "host key: owner permission failure propagates" 1 "$rc"
+    _assert_file_exists "host key: owner permission failure retains token retry state" \
+      "$owner_create_temp"
+    _assert_file_missing "host key: owner permission failure is never published" \
+      "$lifecycle_snapshot_owner"
+    set +e
+    output=$(_upterm_cleanup_known_hosts_snapshot \
+      "$owner_create_token" "$owner_create_snapshot" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: owner preparation cleanup failure propagates" 1 "$rc"
+    _assert_file_exists "host key: owner cleanup failure retains token retry state" \
+      "$owner_create_temp"
+    block_owner_create_rm=0
+    _upterm_cleanup_known_hosts_snapshot "$owner_create_token" "$owner_create_snapshot"
+    unset -f rm
+    _assert_file_missing "host key: owner creation retry removes preparation" \
+      "$owner_create_temp"
+
+    owner_replace_token=""
+    owner_replace_snapshot=""
+    _upterm_acquire_snapshot_owner owner_replace_token owner_replace_snapshot
+    sleep 30 &
+    owner_replace_child=$!
+    _track_test_pid "$owner_replace_child"
+    owner_replace_temp="${lifecycle_snapshot_owner}.$$.$owner_write_identity.${owner_replace_token}.new"
+    printf 'owned\n' >"$owner_replace_snapshot"
+    real_mv=$(type -P mv)
+    # shellcheck disable=SC2329 # production owner publication invokes this failure double.
+    mv() {
+      local last=""
+      for last; do :; done
+      if [[ "$last" == "$lifecycle_snapshot_owner" ]]; then
+        return 1
+      fi
+      "$real_mv" "$@"
+    }
+    set +e
+    _upterm_write_snapshot_owner replace active "$owner_replace_child" \
+      "$owner_replace_token" "$owner_replace_snapshot" \
+      2>"$lifecycle_dir/owner-replace-error"
+    rc=$?
+    set -e
+    unset -f mv
+    _assert_exit "host key: owner replacement publication failure propagates" 1 "$rc"
+    _assert_file_exists "host key: failed owner replacement retains deterministic retry state" \
+      "$owner_replace_temp"
+    real_rm=$(type -P rm)
+    block_owner_replacement_rm=1
+    # shellcheck disable=SC2329 # production owner cleanup invokes this failure double.
+    rm() {
+      local arg blocked=0
+      local -a passthrough=()
+      for arg; do
+        if ((block_owner_replacement_rm)) &&
+          [[ "$arg" == "$owner_replace_temp" ]]; then
+          blocked=1
+        else
+          passthrough+=("$arg")
+        fi
+      done
+      ((${#passthrough[@]} == 0)) || "$real_rm" "${passthrough[@]}"
+      ((blocked == 0))
+    }
+    set +e
+    output=$(_upterm_cleanup_known_hosts_snapshot \
+      "$owner_replace_token" "$owner_replace_snapshot" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: owner replacement unlink failure propagates" 1 "$rc"
+    _assert_file_exists "host key: owner replacement unlink failure retains ownership" \
+      "$lifecycle_snapshot_owner"
+    block_owner_replacement_rm=0
+    _upterm_cleanup_known_hosts_snapshot "$owner_replace_token" "$owner_replace_snapshot"
+    unset -f rm
+    _assert_file_missing "host key: owner replacement retry removes deterministic state" \
+      "$owner_replace_temp"
+    _assert_file_missing "host key: owner replacement retry removes ownership" \
+      "$lifecycle_snapshot_owner"
+    kill "$owner_replace_child" 2>/dev/null || true
+    wait "$owner_replace_child" 2>/dev/null || true
+
+    owner_race_release="$lifecycle_dir/owner-race-release"
+    owner_race_token_one=$(_upterm_snapshot_token)
+    owner_race_token_two=$(_upterm_snapshot_token)
+    owner_race_snapshot_one=$(_upterm_known_hosts_snapshot_file "$owner_race_token_one")
+    owner_race_snapshot_two=$(_upterm_known_hosts_snapshot_file "$owner_race_token_two")
+    owner_race_ready_one="$lifecycle_dir/owner-race-ready-one"
+    owner_race_ready_two="$lifecycle_dir/owner-race-ready-two"
+    owner_race_done_one="$lifecycle_dir/owner-race-done-one"
+    owner_race_done_two="$lifecycle_dir/owner-race-done-two"
+    owner_race_finish="$lifecycle_dir/owner-race-finish"
+    owner_race_pid_one="$lifecycle_dir/owner-race-pid-one"
+    owner_race_pid_two="$lifecycle_dir/owner-race-pid-two"
+    (
+      owner_race_creator_pid="" owner_race_creator_identity=""
+      _upterm_current_pid owner_race_creator_pid
+      _upterm_process_identity "$owner_race_creator_pid" owner_race_creator_identity
+      builtin printf '%s\n' "$owner_race_creator_pid" >"$owner_race_pid_one"
+      owner_race_temp="${lifecycle_snapshot_owner}.${owner_race_creator_pid}.${owner_race_creator_identity}.${owner_race_token_one}.new"
+      owner_race_real_ln=$(type -P ln)
+      owner_race_real_rm=$(type -P rm)
+      # shellcheck disable=SC2329 # production owner publication invokes this barrier.
+      ln() {
+        : >"$owner_race_ready_one"
+        while [[ ! -e "$owner_race_release" ]]; do
+          sleep 0.01
+        done
+        "$owner_race_real_ln" "$@"
+      }
+      # shellcheck disable=SC2329 # production owner publication invokes this failure double.
+      rm() {
+        local arg
+        for arg; do
+          [[ "$arg" == "$owner_race_temp" ]] && return 1
+        done
+        "$owner_race_real_rm" "$@"
+      }
+      set +e
+      _upterm_write_snapshot_owner create starting "$owner_race_creator_pid" \
+        "$owner_race_token_one" "$owner_race_snapshot_one"
+      owner_race_write_rc=$?
+      set -e
+      : >"$owner_race_done_one"
+      while [[ ! -e "$owner_race_finish" ]]; do
+        sleep 0.01
+      done
+      exit "$owner_race_write_rc"
+    ) >"$lifecycle_dir/owner-race-one-output" 2>&1 &
+    owner_race_job_one=$!
+    _track_test_pid "$owner_race_job_one"
+    (
+      owner_race_creator_pid="" owner_race_creator_identity=""
+      _upterm_current_pid owner_race_creator_pid
+      _upterm_process_identity "$owner_race_creator_pid" owner_race_creator_identity
+      builtin printf '%s\n' "$owner_race_creator_pid" >"$owner_race_pid_two"
+      owner_race_temp="${lifecycle_snapshot_owner}.${owner_race_creator_pid}.${owner_race_creator_identity}.${owner_race_token_two}.new"
+      owner_race_real_ln=$(type -P ln)
+      owner_race_real_rm=$(type -P rm)
+      # shellcheck disable=SC2329 # production owner publication invokes this barrier.
+      ln() {
+        : >"$owner_race_ready_two"
+        while [[ ! -e "$owner_race_release" ]]; do
+          sleep 0.01
+        done
+        "$owner_race_real_ln" "$@"
+      }
+      # shellcheck disable=SC2329 # production owner publication invokes this failure double.
+      rm() {
+        local arg
+        for arg; do
+          [[ "$arg" == "$owner_race_temp" ]] && return 1
+        done
+        "$owner_race_real_rm" "$@"
+      }
+      set +e
+      _upterm_write_snapshot_owner create starting "$owner_race_creator_pid" \
+        "$owner_race_token_two" "$owner_race_snapshot_two"
+      owner_race_write_rc=$?
+      set -e
+      : >"$owner_race_done_two"
+      while [[ ! -e "$owner_race_finish" ]]; do
+        sleep 0.01
+      done
+      exit "$owner_race_write_rc"
+    ) >"$lifecycle_dir/owner-race-two-output" 2>&1 &
+    owner_race_job_two=$!
+    _track_test_pid "$owner_race_job_two"
+    for ((owner_race_attempt = 0; owner_race_attempt < 500; owner_race_attempt++)); do
+      [[ -e "$owner_race_ready_one" && -e "$owner_race_ready_two" ]] && break
+      kill -0 "$owner_race_job_one" 2>/dev/null || break
+      kill -0 "$owner_race_job_two" 2>/dev/null || break
+      sleep 0.01
+    done
+    _assert_file_exists "host key: first publisher reaches the exclusive boundary" \
+      "$owner_race_ready_one"
+    _assert_file_exists "host key: second publisher reaches the exclusive boundary" \
+      "$owner_race_ready_two"
+    : >"$owner_race_release"
+    for ((owner_race_attempt = 0; owner_race_attempt < 500; owner_race_attempt++)); do
+      [[ -e "$owner_race_done_one" && -e "$owner_race_done_two" ]] && break
+      kill -0 "$owner_race_job_one" 2>/dev/null || break
+      kill -0 "$owner_race_job_two" 2>/dev/null || break
+      sleep 0.01
+    done
+    _assert_file_exists "host key: first publisher retains unlink failure while live" \
+      "$owner_race_done_one"
+    _assert_file_exists "host key: second publisher retains unlink failure while live" \
+      "$owner_race_done_two"
+    _assert_file_exists "host key: concurrent publication selects one complete owner" \
+      "$lifecycle_snapshot_owner"
+    if _upterm_read_snapshot_owner "$lifecycle_snapshot_owner" &&
+      { [[ "$_UPTERM_SNAPSHOT_TOKEN" == "$owner_race_token_one" ]] ||
+        [[ "$_UPTERM_SNAPSHOT_TOKEN" == "$owner_race_token_two" ]]; }; then
+      _pass "host key: concurrent publication preserves one publisher token"
+    else
+      _fail "host key: concurrent publication preserves one publisher token"
+    fi
+    owner_race_creator_one=$(<"$owner_race_pid_one")
+    owner_race_creator_two=$(<"$owner_race_pid_two")
+    owner_race_identity_one=""
+    owner_race_identity_two=""
+    _upterm_process_identity "$owner_race_creator_one" owner_race_identity_one
+    _upterm_process_identity "$owner_race_creator_two" owner_race_identity_two
+    owner_race_temp_one="${lifecycle_snapshot_owner}.${owner_race_creator_one}.${owner_race_identity_one}.${owner_race_token_one}.new"
+    owner_race_temp_two="${lifecycle_snapshot_owner}.${owner_race_creator_two}.${owner_race_identity_two}.${owner_race_token_two}.new"
+    _assert_file_exists "host key: first failed unlink remains token scoped" \
+      "$owner_race_temp_one"
+    _assert_file_exists "host key: second failed unlink remains token scoped" \
+      "$owner_race_temp_two"
+    _upterm_reconcile_snapshot_owner
+    _assert_file_exists "host key: concurrent reconciliation preserves the live winner" \
+      "$lifecycle_snapshot_owner"
+    _assert_file_missing "host key: first live publication residue is reconciled" \
+      "$owner_race_temp_one"
+    _assert_file_missing "host key: second live publication residue is reconciled" \
+      "$owner_race_temp_two"
+    : >"$owner_race_finish"
+    set +e
+    wait "$owner_race_job_one"
+    owner_race_rc_one=$?
+    wait "$owner_race_job_two"
+    owner_race_rc_two=$?
+    set -e
+    _assert_exit "host key: first publisher reports retained unlink state" 1 "$owner_race_rc_one"
+    _assert_exit "host key: second publisher reports retained unlink state" 1 "$owner_race_rc_two"
+    _upterm_reconcile_snapshot_owner
+    _assert_file_missing "host key: dead concurrent owner is reconciled" \
+      "$lifecycle_snapshot_owner"
+
+    : >"$lifecycle_snapshot_owner"
+    _upterm_reconcile_snapshot_owner
+    _assert_file_missing "host key: legacy empty ownership is recovered safely" \
+      "$lifecycle_snapshot_owner"
+
+    identity_token=$(_upterm_snapshot_token)
+    identity_snapshot=$(_upterm_known_hosts_snapshot_file "$identity_token")
+    printf 'identity-bound\n' >"$identity_snapshot"
+    sleep 30 &
+    identity_unrelated_pid=$!
+    _track_test_pid "$identity_unrelated_pid"
+    printf 'version=1\npid=%s\nidentity=%048d\n' \
+      "$identity_unrelated_pid" 0 >"$lifecycle_pid"
+    printf 'version=2\nphase=active\npid=%s\nidentity=%048d\ntoken=%s\nsnapshot=%s\n' \
+      "$identity_unrelated_pid" 0 "$identity_token" "${identity_snapshot##*/}" \
+      >"$lifecycle_snapshot_owner"
+    set +e
+    output=$(_share_stop "identity-reuse" 2>&1)
+    rc=$?
+    set -e
+    if kill -0 "$identity_unrelated_pid" 2>/dev/null; then
+      _pass "host key: stale PID identity never kills an unrelated process"
+    else
+      _fail "host key: stale PID identity never kills an unrelated process"
+    fi
+    kill "$identity_unrelated_pid" 2>/dev/null || true
+    wait "$identity_unrelated_pid" 2>/dev/null || true
+    command rm -f "$lifecycle_pid" "$lifecycle_snapshot_owner" "$identity_snapshot"
+
+    adopt_token=""
+    adopt_snapshot=""
+    _upterm_acquire_snapshot_owner adopt_token adopt_snapshot
+    printf 'adoptable\n' >"$adopt_snapshot"
+    sleep 30 &
+    adopt_child=$!
+    _track_test_pid "$adopt_child"
+    _upterm_write_snapshot_owner replace active "$adopt_child" \
+      "$adopt_token" "$adopt_snapshot"
+    command rm -f "$lifecycle_pid"
+    set +e
+    adopt_output=$(_share_stop "active-without-pid" 2>&1)
+    adopt_rc=$?
+    set -e
+    _assert_exit "host key: a non-supervisor owner fails closed" 1 "$adopt_rc"
+    _assert_contains "host key: non-supervisor rejection is actionable" \
+      "without verified child completion" "$adopt_output"
+    if kill -0 "$adopt_child" 2>/dev/null; then
+      _pass "host key: non-supervisor state never signals an unrelated process"
+    else
+      _fail "host key: non-supervisor state never signals an unrelated process"
+    fi
+    kill "$adopt_child" 2>/dev/null || true
+    wait "$adopt_child" 2>/dev/null || true
+    _assert_file_exists "host key: rejected non-supervisor cleanup retains ownership" \
+      "$lifecycle_snapshot_owner"
+    _assert_file_exists "host key: rejected non-supervisor cleanup retains snapshot" \
+      "$adopt_snapshot"
+    _upterm_cleanup_known_hosts_snapshot "$adopt_token" "$adopt_snapshot"
+
+    replacement_gap_ready="$lifecycle_dir/replacement-gap-ready"
+    replacement_gap_pid_file="$lifecycle_dir/replacement-gap-publisher"
+    replacement_gap_identity_file="$lifecycle_dir/replacement-gap-identity"
+    replacement_gap_child_file="$lifecycle_dir/replacement-gap-child"
+    replacement_gap_token_file="$lifecycle_dir/replacement-gap-token"
+    (
+      replacement_gap_publisher=""
+      replacement_gap_identity=""
+      replacement_gap_token=""
+      replacement_gap_snapshot=""
+      _upterm_current_pid replacement_gap_publisher
+      _upterm_process_identity "$replacement_gap_publisher" replacement_gap_identity
+      builtin printf '%s\n' "$replacement_gap_publisher" >"$replacement_gap_pid_file"
+      builtin printf '%s\n' "$replacement_gap_identity" >"$replacement_gap_identity_file"
+      _upterm_acquire_snapshot_owner replacement_gap_token replacement_gap_snapshot
+      builtin printf '%s\n' "$replacement_gap_token" >"$replacement_gap_token_file"
+      printf 'replacement-gap\n' >"$replacement_gap_snapshot"
+      sleep 30 &
+      replacement_gap_child=$!
+      builtin printf '%s\n' "$replacement_gap_child" >"$replacement_gap_child_file"
+      replacement_gap_real_mv=$(type -P mv)
+      # shellcheck disable=SC2329 # production replacement publication invokes this barrier.
+      mv() {
+        local last=""
+        for last; do :; done
+        if [[ "$last" == "$lifecycle_snapshot_owner" ]]; then
+          : >"$replacement_gap_ready"
+          while :; do sleep 1; done
+        fi
+        "$replacement_gap_real_mv" "$@"
+      }
+      _upterm_write_snapshot_owner replace active "$replacement_gap_child" \
+        "$replacement_gap_token" "$replacement_gap_snapshot"
+    ) >"$lifecycle_dir/replacement-gap-output" 2>&1 &
+    replacement_gap_job=$!
+    _track_test_pid "$replacement_gap_job"
+    for ((replacement_gap_attempt = 0; replacement_gap_attempt < 500; replacement_gap_attempt++)); do
+      [[ -e "$replacement_gap_ready" ]] && break
+      kill -0 "$replacement_gap_job" 2>/dev/null || break
+      sleep 0.01
+    done
+    _assert_file_exists "host key: replacement publisher reaches pre-publication boundary" \
+      "$replacement_gap_ready"
+    replacement_gap_publisher=$(<"$replacement_gap_pid_file")
+    replacement_gap_identity=$(<"$replacement_gap_identity_file")
+    replacement_gap_token=$(<"$replacement_gap_token_file")
+    replacement_gap_child=$(<"$replacement_gap_child_file")
+    replacement_gap_temp="${lifecycle_snapshot_owner}.${replacement_gap_publisher}.${replacement_gap_identity}.${replacement_gap_token}.new"
+    _assert_file_exists "host key: replacement preparation records publisher identity" \
+      "$replacement_gap_temp"
+    _track_test_tree "$replacement_gap_job"
+    kill -KILL "$replacement_gap_job" 2>/dev/null || true
+    wait "$replacement_gap_job" 2>/dev/null || true
+    _upterm_reconcile_snapshot_owner
+    _assert_file_missing "host key: dead replacement publisher residue is reconciled" \
+      "$replacement_gap_temp"
+    _assert_file_missing "host key: dead replacement publisher ownership is reconciled" \
+      "$lifecycle_snapshot_owner"
+    if kill -0 "$replacement_gap_child" 2>/dev/null; then
+      _pass "host key: replacement reconciliation does not confuse live target with publisher"
+    else
+      _fail "host key: replacement reconciliation does not confuse live target with publisher"
+    fi
+    kill "$replacement_gap_child" 2>/dev/null || true
+
+    preexec_token=$(_upterm_snapshot_token)
+    preexec_gate=$(_upterm_launch_gate_file "$preexec_token")
+    preexec_snapshot=$(_upterm_known_hosts_snapshot_file "$preexec_token")
+    preexec_log="$lifecycle_dir/preexec-log"
+    preexec_exec="$lifecycle_dir/preexec-child"
+    preexec_barrier_entered="$lifecycle_dir/preexec-entered"
+    preexec_barrier_release="$lifecycle_dir/preexec-release"
+    preexec_wait_started="$lifecycle_dir/preexec-wait-started"
+    preexec_wait_result="$lifecycle_dir/preexec-wait-result"
+    preexec_parent=""
+    preexec_parent_identity=""
+    _upterm_current_pid preexec_parent
+    _upterm_process_identity "$preexec_parent" preexec_parent_identity
+    printf 'version=1\ntoken=%s\n' "$preexec_token" >"$preexec_log"
+    printf 'preexec\n' >"$preexec_snapshot"
+    _upterm_create_control_dir "$preexec_token"
+    _upterm_supervisor_exec() {
+      local trust_fd="$1" token="$2" gate="$3" parent_pid="$4" parent_identity="$5"
+      local control_dir plugin_source supervisor_name
+      shift 5
+      : >"$preexec_barrier_entered"
+      while [[ ! -e "$preexec_barrier_release" ]]; do
+        sleep 0.01
+      done
+      [[ -z "$trust_fd" ]] || return 1
+      exec 3<&-
+      _upterm_close_inherited_fds
+      control_dir=$(_upterm_control_dir "$token") || return 1
+      plugin_source="$TEST_HOME/.config/ds/share-upterm.sh"
+      supervisor_name="ds-upterm-supervisor-$token"
+      if command -v setsid >/dev/null 2>&1 && ! _upterm_is_wsl; then
+        # shellcheck disable=SC2016 # The detached supervisor expands its arguments.
+        exec setsid bash -c \
+          'source "$1" || exit; shift; _upterm_supervisor_main "$@"' \
+          "$supervisor_name" "$plugin_source" "$token" "$control_dir" \
+          "$gate" "$parent_pid" "$parent_identity" "$@"
+      else
+        # shellcheck disable=SC2016 # The detached supervisor expands its arguments.
+        exec nohup bash -c \
+          'source "$1" || exit; shift; _upterm_supervisor_main "$@"' \
+          "$supervisor_name" "$plugin_source" "$token" "$control_dir" \
+          "$gate" "$parent_pid" "$parent_identity" "$@"
+      fi
+    }
+    # shellcheck disable=SC2016 # The marker path expands in the supervised child.
+    _upterm_spawn_supervisor "" "$preexec_log" \
+      "$preexec_token" "$preexec_gate" \
+      "$preexec_parent" "$preexec_parent_identity" \
+      bash -c 'printf "executed\n" >"$1"; sleep 30' bash "$preexec_exec"
+    preexec_supervisor=$_UPTERM_SPAWN_PID
+    preexec_identity=""
+    _upterm_process_identity "$preexec_supervisor" preexec_identity
+    _track_test_tree "$preexec_supervisor"
+    for ((gate_attempt = 0; gate_attempt < 500; gate_attempt++)); do
+      [[ -e "$preexec_barrier_entered" ]] && break
+      kill -0 "$preexec_supervisor" 2>/dev/null || break
+      sleep 0.01
+    done
+    _assert_file_exists "host key: deterministic pre-exec barrier is reached" \
+      "$preexec_barrier_entered"
+    (
+      : >"$preexec_wait_started"
+      set +e
+      _upterm_wait_for_supervisor_waiting \
+        "$preexec_supervisor" "$preexec_identity" "$preexec_token"
+      printf '%s\n' "$?" >"$preexec_wait_result"
+    ) &
+    preexec_wait_job=$!
+    _track_test_pid "$preexec_wait_job"
+    for ((gate_attempt = 0; gate_attempt < 500; gate_attempt++)); do
+      [[ -e "$preexec_wait_started" ]] && break
+      kill -0 "$preexec_wait_job" 2>/dev/null || break
+      sleep 0.01
+    done
+    _assert_file_exists "host key: readiness wait starts behind the pre-exec barrier" \
+      "$preexec_wait_started"
+    _assert_file_missing "host key: readiness cannot complete before waiting handshake" \
+      "$preexec_wait_result"
+    : >"$preexec_barrier_release"
+    wait "$preexec_wait_job"
+    _assert_file_content "host key: readiness succeeds after exact waiting handshake" \
+      "0" "$preexec_wait_result"
+    if _upterm_supervisor_matches \
+      "$preexec_supervisor" "$preexec_identity" "$preexec_token"; then
+      _pass "host key: command identity matches only after readiness"
+    else
+      _fail "host key: command identity does not match after readiness"
+    fi
+    _upterm_write_snapshot_owner create active "$preexec_supervisor" \
+      "$preexec_token" "$preexec_snapshot" "$preexec_identity"
+    _upterm_write_pid_file "$lifecycle_pid" "$preexec_supervisor" "$preexec_token"
+    _upterm_release_launch_gate \
+      "$preexec_gate" "$preexec_supervisor" "$preexec_identity"
+    for ((gate_attempt = 0; gate_attempt < 500; gate_attempt++)); do
+      [[ -e "$preexec_exec" ]] && break
+      kill -0 "$preexec_supervisor" 2>/dev/null || break
+      sleep 0.01
+    done
+    _assert_file_exists "host key: child executes only after ordered publication" \
+      "$preexec_exec"
+    if _upterm_write_snapshot_owner replace stopping "$preexec_supervisor" \
+      "$preexec_token" "$preexec_snapshot" "$preexec_identity"; then
+      _pass "host key: readiness fixture reserves exact stopping state"
+    else
+      _fail "host key: readiness fixture cannot reserve exact stopping state"
+    fi
+    if _upterm_request_supervisor_stop \
+      "$preexec_supervisor" "$preexec_identity" "$preexec_token"; then
+      _pass "host key: readiness fixture stops its exact supervisor"
+    else
+      _fail "host key: readiness fixture cannot stop its exact supervisor"
+    fi
+    if _upterm_cleanup_lifecycle_files "$preexec_token"; then
+      _pass "host key: readiness fixture removes exact lifecycle state"
+    else
+      _fail "host key: readiness fixture cannot remove exact lifecycle state"
+    fi
+    if _upterm_cleanup_known_hosts_snapshot \
+      "$preexec_token" "$preexec_snapshot"; then
+      _pass "host key: readiness fixture removes exact trust state"
+    else
+      _fail "host key: readiness fixture cannot remove exact trust state"
+    fi
+    # shellcheck source=/dev/null
+    . "$TEST_HOME/.config/ds/share-upterm.sh"
+    preexec_restored_definition=$(
+      shopt -s extdebug
+      declare -F _upterm_supervisor_exec
+    )
+    _assert_eq "host key: supervisor exec source metadata is restored" \
+      "$TEST_HOME/.config/ds/share-upterm.sh" \
+      "${preexec_restored_definition##* }"
+
+    early_wait_token=$(_upterm_snapshot_token)
+    early_wait_control=$(_upterm_control_dir "$early_wait_token")
+    _upterm_create_control_dir "$early_wait_token"
+    sleep 30 &
+    early_wait_pid=$!
+    _track_test_pid "$early_wait_pid"
+    early_wait_identity=""
+    _upterm_process_identity "$early_wait_pid" early_wait_identity
+    kill -KILL "$early_wait_pid" 2>/dev/null || true
+    wait "$early_wait_pid" 2>/dev/null || true
+    set +e
+    early_wait_output=$(_upterm_wait_for_supervisor_waiting \
+      "$early_wait_pid" "$early_wait_identity" "$early_wait_token" 100 2>&1)
+    early_wait_rc=$?
+    set -e
+    wait "$early_wait_pid" 2>/dev/null || true
+    _assert_exit "host key: readiness reports supervisor early death" 1 "$early_wait_rc"
+    _assert_contains "host key: readiness early-death error is actionable" \
+      "exited before its waiting handshake" "$early_wait_output"
+    rmdir "$early_wait_control"
+
+    timeout_wait_token=$(_upterm_snapshot_token)
+    timeout_wait_control=$(_upterm_control_dir "$timeout_wait_token")
+    _upterm_create_control_dir "$timeout_wait_token"
+    sleep 30 &
+    timeout_wait_pid=$!
+    _track_test_pid "$timeout_wait_pid"
+    timeout_wait_identity=""
+    _upterm_process_identity "$timeout_wait_pid" timeout_wait_identity
+    set +e
+    timeout_wait_output=$(_upterm_wait_for_supervisor_waiting \
+      "$timeout_wait_pid" "$timeout_wait_identity" "$timeout_wait_token" 3 2>&1)
+    timeout_wait_rc=$?
+    set -e
+    _assert_exit "host key: readiness has a bounded timeout" 1 "$timeout_wait_rc"
+    _assert_contains "host key: readiness timeout is actionable" \
+      "timed out waiting" "$timeout_wait_output"
+    kill "$timeout_wait_pid" 2>/dev/null || true
+    wait "$timeout_wait_pid" 2>/dev/null || true
+    rmdir "$timeout_wait_control"
+
+    gate_death_token=$(_upterm_snapshot_token)
+    gate_death_path=$(_upterm_launch_gate_file "$gate_death_token")
+    gate_death_snapshot=$(_upterm_known_hosts_snapshot_file "$gate_death_token")
+    gate_death_child_file="$lifecycle_dir/gate-death-child"
+    gate_death_ready="$lifecycle_dir/gate-death-ready"
+    gate_death_exec="$lifecycle_dir/gate-death-exec"
+    gate_death_log="$lifecycle_dir/gate-death-log"
+    (
+      gate_death_parent=""
+      gate_death_parent_identity=""
+      _upterm_current_pid gate_death_parent
+      _upterm_process_identity "$gate_death_parent" gate_death_parent_identity
+      _upterm_write_snapshot_owner create starting "$gate_death_parent" \
+        "$gate_death_token" "$gate_death_snapshot"
+      printf 'gated-trust\n' >"$gate_death_snapshot"
+      printf 'version=1\ntoken=%s\n' \
+        "$gate_death_token" >"$gate_death_log"
+      _upterm_create_control_dir "$gate_death_token"
+      # shellcheck disable=SC2016 # The marker path expands only in the gated child.
+      _upterm_spawn_supervisor "" "$gate_death_log" \
+        "$gate_death_token" "$gate_death_path" \
+        "$gate_death_parent" "$gate_death_parent_identity" \
+        bash -c 'printf "executed\n" >"$1"' bash "$gate_death_exec"
+      builtin printf '%s\n' "$_UPTERM_SPAWN_PID" >"$gate_death_child_file"
+      _upterm_write_snapshot_owner replace active "$_UPTERM_SPAWN_PID" \
+        "$gate_death_token" "$gate_death_snapshot"
+      _upterm_write_pid_file \
+        "$lifecycle_pid" "$_UPTERM_SPAWN_PID" "$gate_death_token"
+      : >"$gate_death_ready"
+      wait "$_UPTERM_SPAWN_PID"
+    ) &
+    gate_death_job=$!
+    _track_test_pid "$gate_death_job"
+    for ((gate_attempt = 0; gate_attempt < 500; gate_attempt++)); do
+      [[ -e "$gate_death_ready" ]] && break
+      kill -0 "$gate_death_job" 2>/dev/null || break
+      sleep 0.01
+    done
+    _assert_file_exists "host key: gated child reaches complete state before release" \
+      "$gate_death_ready"
+    gate_death_child=$(<"$gate_death_child_file")
+    gate_death_child_identity=""
+    _test_pid_identity "$gate_death_child" gate_death_child_identity
+    _track_test_tree "$gate_death_job"
+    kill -KILL "$gate_death_job" 2>/dev/null || true
+    wait "$gate_death_job" 2>/dev/null || true
+    _share_stop "publisher-death-before-gate" >/dev/null
+    if _wait_for_test_pid_exit \
+      "$gate_death_child" "$gate_death_child_identity"; then
+      _pass "host key: gated child is stopped after publisher dies before gate"
+    else
+      _fail "host key: gated child is stopped after publisher dies before gate"
+      kill "$gate_death_child" 2>/dev/null || true
+    fi
+    _assert_file_missing "host key: publisher death before gate never execs child" \
+      "$gate_death_exec"
+    _assert_file_missing "host key: publisher death before gate removes PID state" \
+      "$lifecycle_pid"
+    _assert_file_missing "host key: publisher death before gate removes ownership" \
+      "$lifecycle_snapshot_owner"
+    _assert_file_missing "host key: publisher death before gate removes trust snapshot" \
+      "$gate_death_snapshot"
+
+    gate_stage_token=$(_upterm_snapshot_token)
+    gate_stage_path=$(_upterm_launch_gate_file "$gate_stage_token")
+    gate_stage_snapshot=$(_upterm_known_hosts_snapshot_file "$gate_stage_token")
+    gate_stage_ready="$lifecycle_dir/gate-supervisor-ready"
+    gate_stage_child_file="$lifecycle_dir/gate-supervisor-child"
+    gate_stage_exec="$lifecycle_dir/gate-supervisor-exec"
+    gate_stage_log="$lifecycle_dir/gate-supervisor-log"
+    (
+      gate_stage_parent=""
+      gate_stage_parent_identity=""
+      _upterm_current_pid gate_stage_parent
+      _upterm_process_identity "$gate_stage_parent" gate_stage_parent_identity
+      _upterm_write_snapshot_owner create starting "$gate_stage_parent" \
+        "$gate_stage_token" "$gate_stage_snapshot"
+      printf 'gated-stage\n' >"$gate_stage_snapshot"
+      printf 'version=1\ntoken=%s\n' \
+        "$gate_stage_token" >"$gate_stage_log"
+      _upterm_create_control_dir "$gate_stage_token"
+      # shellcheck disable=SC2016 # The marker path expands only in the supervised child.
+      _upterm_spawn_supervisor "" "$gate_stage_log" \
+        "$gate_stage_token" "$gate_stage_path" \
+        "$gate_stage_parent" "$gate_stage_parent_identity" \
+        bash -c 'printf "executed\n" >"$1"; sleep 30' bash "$gate_stage_exec"
+      gate_stage_child="$_UPTERM_SPAWN_PID"
+      builtin printf '%s\n' "$gate_stage_child" >"$gate_stage_child_file"
+      _upterm_write_snapshot_owner replace active "$gate_stage_child" \
+        "$gate_stage_token" "$gate_stage_snapshot"
+      _upterm_write_pid_file \
+        "$lifecycle_pid" "$gate_stage_child" "$gate_stage_token"
+      gate_stage_child_identity=""
+      _upterm_process_identity "$gate_stage_child" gate_stage_child_identity
+      _upterm_release_launch_gate \
+        "$gate_stage_path" "$gate_stage_child" "$gate_stage_child_identity"
+      : >"$gate_stage_ready"
+      wait "$gate_stage_child"
+    ) >"$lifecycle_dir/gate-supervisor-output" 2>&1 &
+    gate_stage_job=$!
+    _track_test_pid "$gate_stage_job"
+    for ((gate_attempt = 0; gate_attempt < 500; gate_attempt++)); do
+      [[ -e "$gate_stage_ready" && -e "$gate_stage_exec" ]] && break
+      kill -0 "$gate_stage_job" 2>/dev/null || break
+      sleep 0.01
+    done
+    _assert_file_exists "host key: supervised child passes the published gate" \
+      "$gate_stage_exec"
+    gate_stage_child=$(<"$gate_stage_child_file")
+    gate_stage_child_identity=""
+    _test_pid_identity "$gate_stage_child" gate_stage_child_identity
+    _track_test_tree "$gate_stage_job"
+    kill -KILL "$gate_stage_job" 2>/dev/null || true
+    wait "$gate_stage_job" 2>/dev/null || true
+    _share_stop "publisher-death-after-gate" >/dev/null
+    if _wait_for_test_pid_exit \
+      "$gate_stage_child" "$gate_stage_child_identity"; then
+      _pass "host key: token supervisor stops after launcher death"
+    else
+      _fail "host key: token supervisor stops after launcher death"
+    fi
+    _assert_file_missing "host key: post-gate stop removes ownership" \
+      "$lifecycle_snapshot_owner"
+
+    supervisor_death_child_file="$lifecycle_dir/supervisor-death-child"
+    supervisor_death_hosted_file="$lifecycle_dir/supervisor-death-hosted"
+    supervisor_death_term_file="$lifecycle_dir/supervisor-death-term"
+    DS_UPTERM_HOST="uptermd.upterm.dev:22"
+    export MOCK_UPTERM_PID_FILE="$supervisor_death_child_file"
+    export MOCK_UPTERM_HOSTED_PID_FILE="$supervisor_death_hosted_file"
+    export MOCK_UPTERM_IGNORE_TERM=1
+    export MOCK_UPTERM_TERM_FILE="$supervisor_death_term_file"
+    MOCK_UPTERM_SLEEP=30 DS_UPTERM_KNOWN_HOSTS="" \
+      _share_start "supervisor-death-a" >/dev/null
+    _upterm_read_snapshot_owner "$lifecycle_snapshot_owner"
+    supervisor_death_token="$_UPTERM_SNAPSHOT_TOKEN"
+    supervisor_death_pid="$_UPTERM_SNAPSHOT_PID"
+    for ((supervisor_death_attempt = 0; supervisor_death_attempt < 500; supervisor_death_attempt++)); do
+      [[ -s "$supervisor_death_child_file" ]] && break
+      sleep 0.01
+    done
+    _assert_file_exists "host key: production supervisor launches the Upterm child" \
+      "$supervisor_death_child_file"
+    _assert_file_exists "host key: supervisor-death fixture records its hosted child" \
+      "$supervisor_death_hosted_file"
+    supervisor_death_child=$(<"$supervisor_death_child_file")
+    supervisor_death_hosted=$(<"$supervisor_death_hosted_file")
+    _track_test_tree "$supervisor_death_pid"
+    kill -KILL "$supervisor_death_pid" 2>/dev/null || true
+    for ((supervisor_death_attempt = 0; supervisor_death_attempt < 700; supervisor_death_attempt++)); do
+      [[ -e "$supervisor_death_term_file" ]] && break
+      sleep 0.01
+    done
+    _assert_file_exists "host key: orphan monitor begins condition-based child shutdown" \
+      "$supervisor_death_term_file"
+    unset MOCK_UPTERM_PID_FILE MOCK_UPTERM_HOSTED_PID_FILE \
+      MOCK_UPTERM_IGNORE_TERM MOCK_UPTERM_TERM_FILE
+    set +e
+    DS_UPTERM_KNOWN_HOSTS="" \
+      _share_start "supervisor-death-b" \
+      >"$lifecycle_dir/supervisor-death-b-output" 2>&1
+    supervisor_death_b_rc=$?
+    set -e
+    _assert_exit "host key: a new start cannot pass a live orphan cleanup" \
+      1 "$supervisor_death_b_rc"
+    _upterm_read_snapshot_owner "$lifecycle_snapshot_owner"
+    _assert_eq "host key: live orphan cleanup retains the original token" \
+      "$supervisor_death_token" "$_UPTERM_SNAPSHOT_TOKEN"
+    supervisor_death_done_token=""
+    supervisor_death_done_result=""
+    supervisor_death_control=$(_upterm_control_dir "$supervisor_death_token")
+    supervisor_death_deadline=$((SECONDS + 20))
+    while ((SECONDS < supervisor_death_deadline)); do
+      if ! kill -0 "$supervisor_death_child" 2>/dev/null &&
+        _upterm_read_token_state \
+          "$supervisor_death_control/done" result \
+          supervisor_death_done_token supervisor_death_done_result &&
+        [[ "$supervisor_death_done_token" == "$supervisor_death_token" &&
+          "$supervisor_death_done_result" == owner-lost ]]; then
+        break
+      fi
+      sleep 0.01
+    done
+    if kill -0 "$supervisor_death_child" 2>/dev/null ||
+      [[ "$supervisor_death_done_token" != "$supervisor_death_token" ||
+        "$supervisor_death_done_result" != owner-lost ]]; then
+      supervisor_death_stat=$(ps -o stat= -p "$supervisor_death_child" 2>/dev/null || true)
+      _fail "host key: token monitor stops Upterm after supervisor death (stat=${supervisor_death_stat:-absent}, done=${supervisor_death_done_token:-missing}/${supervisor_death_done_result:-missing})"
+      kill -KILL "$supervisor_death_child" 2>/dev/null || true
+    else
+      _pass "host key: token monitor stops Upterm after supervisor death"
+    fi
+    _terminate_test_tree "$supervisor_death_hosted" KILL
+    set +e
+    DS_UPTERM_KNOWN_HOSTS="" \
+      _share_start "supervisor-death-b" >/dev/null 2>&1
+    supervisor_death_retry_rc=$?
+    set -e
+    _assert_exit "host key: a new start waits for completed orphan cleanup" \
+      0 "$supervisor_death_retry_rc"
+    _share_stop "supervisor-death-b" >/dev/null 2>&1 || true
+
+    monitor_death_child_file="$lifecycle_dir/monitor-death-child"
+    monitor_death_hosted_file="$lifecycle_dir/monitor-death-hosted"
+    export MOCK_UPTERM_PID_FILE="$monitor_death_child_file"
+    export MOCK_UPTERM_HOSTED_PID_FILE="$monitor_death_hosted_file"
+    MOCK_UPTERM_SLEEP=30 DS_UPTERM_KNOWN_HOSTS="" \
+      _share_start "monitor-death-a" >/dev/null
+    unset MOCK_UPTERM_PID_FILE MOCK_UPTERM_HOSTED_PID_FILE
+    _upterm_read_snapshot_owner "$lifecycle_snapshot_owner"
+    monitor_death_token="$_UPTERM_SNAPSHOT_TOKEN"
+    monitor_death_supervisor="$_UPTERM_SNAPSHOT_PID"
+    monitor_death_control=$(_upterm_control_dir "$monitor_death_token")
+    monitor_death_pid=""
+    monitor_death_identity=""
+    monitor_death_state_token=""
+    _upterm_read_pid_file "$monitor_death_control/monitor" \
+      monitor_death_pid monitor_death_identity monitor_death_state_token
+    _assert_eq "host key: monitor state is bound to the active token" \
+      "$monitor_death_token" "$monitor_death_state_token"
+    if _upterm_pid_matches_identity "$monitor_death_pid" "$monitor_death_identity"; then
+      _pass "host key: monitor state names the exact live direct parent"
+    else
+      _fail "host key: monitor state names the exact live direct parent"
+    fi
+    _track_test_tree "$monitor_death_supervisor"
+    kill -KILL "$monitor_death_pid" 2>/dev/null || true
+    for ((monitor_death_attempt = 0; monitor_death_attempt < 500; monitor_death_attempt++)); do
+      _upterm_pid_matches_identity \
+        "$monitor_death_supervisor" "$_UPTERM_SNAPSHOT_IDENTITY" || break
+      sleep 0.01
+    done
+    _assert_file_exists "host key: monitor-death fixture records its hosted child" \
+      "$monitor_death_hosted_file"
+    monitor_death_child=$(<"$monitor_death_child_file")
+    monitor_death_hosted=$(<"$monitor_death_hosted_file")
+    if kill -0 "$monitor_death_child" 2>/dev/null; then
+      _pass "host key: monitor SIGKILL leaves the unowned Upterm child observable"
+    else
+      _fail "host key: monitor SIGKILL leaves the unowned Upterm child observable"
+    fi
+    set +e
+    DS_UPTERM_KNOWN_HOSTS="" \
+      _share_start "monitor-death-b" \
+      >"$lifecycle_dir/monitor-death-b-output" 2>&1
+    monitor_death_b_rc=$?
+    set -e
+    _assert_exit "host key: replacement is refused without monitor completion" \
+      1 "$monitor_death_b_rc"
+    _upterm_read_snapshot_owner "$lifecycle_snapshot_owner"
+    _assert_eq "host key: monitor death retains the original lifecycle token" \
+      "$monitor_death_token" "$_UPTERM_SNAPSHOT_TOKEN"
+    _assert_file_exists "host key: monitor death retains process state" \
+      "$lifecycle_pid"
+    _assert_file_exists "host key: monitor death retains session state" \
+      "$(_upterm_session_file)"
+    set +e
+    monitor_death_stop_output=$(_share_stop "monitor-death-a" 2>&1)
+    monitor_death_stop_rc=$?
+    set -e
+    _assert_exit "host key: monitor death cannot be reported as a clean stop" \
+      1 "$monitor_death_stop_rc"
+    _assert_not_contains "host key: monitor death never claims stopped" \
+      "stopped sharing" "$monitor_death_stop_output"
+    _assert_file_exists "host key: failed monitor stop retains ownership" \
+      "$lifecycle_snapshot_owner"
+    _terminate_test_tree "$monitor_death_child" KILL
+    _terminate_test_tree "$monitor_death_hosted" KILL
+    for ((monitor_death_attempt = 0; monitor_death_attempt < 500; monitor_death_attempt++)); do
+      kill -0 "$monitor_death_child" 2>/dev/null || break
+      sleep 0.01
+    done
+    _upterm_supervisor_write_status \
+      "$monitor_death_control/done" "$monitor_death_token" owner-lost
+    _share_stop "monitor-death-a" >/dev/null
+
+    gate_observe_token=$(_upterm_snapshot_token)
+    gate_observe_path=$(_upterm_launch_gate_file "$gate_observe_token")
+    gate_observe_log="$lifecycle_dir/gate-observe-log"
+    gate_observe_exec="$lifecycle_dir/gate-observe-exec"
+    gate_observe_mode="$lifecycle_dir/gate-observe-mode"
+    gate_observe_chmod="$lifecycle_dir/gate-observe-chmod"
+    gate_observe_parent=""
+    gate_observe_parent_identity=""
+    _upterm_current_pid gate_observe_parent
+    _upterm_process_identity "$gate_observe_parent" gate_observe_parent_identity
+    saved_consume_gate=$(declare -f _upterm_consume_launch_gate)
+    _upterm_consume_launch_gate() {
+      local mode
+      if mode=$(stat -c '%a' "$1" 2>/dev/null); then
+        :
+      else
+        mode=$(stat -f '%Lp' "$1")
+      fi
+      builtin printf '%s\n' "$mode" >"$gate_observe_mode"
+      rm -f "$1"
+    }
+    # shellcheck disable=SC2016 # The marker path expands only in the gated child.
+    _upterm_spawn_with_trust_fd "" "$gate_observe_log" \
+      "$gate_observe_path" "$gate_observe_parent" "$gate_observe_parent_identity" \
+      bash -c 'printf "executed\n" >"$1"; sleep 30' bash "$gate_observe_exec"
+    gate_observe_child="$_UPTERM_SPAWN_PID"
+    gate_observe_identity=""
+    _upterm_process_identity "$gate_observe_child" gate_observe_identity
+    _assert_file_missing "host key: child cannot exec before gate publication" \
+      "$gate_observe_exec"
+    gate_observe_real_chmod=$(type -P chmod)
+    # shellcheck disable=SC2329 # Gate publication invokes this race double.
+    chmod() {
+      local last="" gate_chmod_attempt
+      for last; do :; done
+      if [[ "$last" == "$gate_observe_path" ]]; then
+        : >"$gate_observe_chmod"
+        for ((gate_chmod_attempt = 0; gate_chmod_attempt < 500; gate_chmod_attempt++)); do
+          [[ ! -e "$gate_observe_path" && ! -L "$gate_observe_path" ]] && break
+          sleep 0.01
+        done
+      fi
+      "$gate_observe_real_chmod" "$@"
+    }
+    set +e
+    _upterm_release_launch_gate \
+      "$gate_observe_path" "$gate_observe_child" "$gate_observe_identity"
+    gate_observe_release_rc=$?
+    set -e
+    unset -f chmod
+    _assert_exit "host key: gate consumption before parent return succeeds" \
+      0 "$gate_observe_release_rc"
+    _assert_file_missing "host key: gate publication has no post-create chmod race" \
+      "$gate_observe_chmod"
+    for ((gate_attempt = 0; gate_attempt < 500; gate_attempt++)); do
+      [[ -e "$gate_observe_exec" ]] && break
+      kill -0 "$gate_observe_child" 2>/dev/null || break
+      sleep 0.01
+    done
+    _assert_file_exists "host key: child execs after observing complete gate" \
+      "$gate_observe_exec"
+    _assert_eq "host key: launch gate is private" "600" "$(<"$gate_observe_mode")"
+    _assert_file_missing "host key: child observation consumes launch gate" \
+      "$gate_observe_path"
+    kill "$gate_observe_child" 2>/dev/null || true
+    wait "$gate_observe_child" 2>/dev/null || true
+    eval "$saved_consume_gate"
+
+    gate_cleanup_token=""
+    gate_cleanup_snapshot=""
+    _upterm_acquire_snapshot_owner gate_cleanup_token gate_cleanup_snapshot
+    gate_cleanup_path=$(_upterm_launch_gate_file "$gate_cleanup_token")
+    printf 'gate-cleanup\n' >"$gate_cleanup_snapshot"
+    : >"$gate_cleanup_path"
+    chmod 600 "$gate_cleanup_path"
+    gate_cleanup_real_rm=$(type -P rm)
+    gate_cleanup_block=1
+    # shellcheck disable=SC2329 # owner cleanup invokes this failure double.
+    rm() {
+      local arg blocked=0
+      local -a passthrough=()
+      for arg; do
+        if ((gate_cleanup_block)) && [[ "$arg" == "$gate_cleanup_path" ]]; then
+          blocked=1
+        else
+          passthrough+=("$arg")
+        fi
+      done
+      ((${#passthrough[@]} == 0)) || "$gate_cleanup_real_rm" "${passthrough[@]}"
+      ((blocked == 0))
+    }
+    set +e
+    output=$(_upterm_cleanup_known_hosts_snapshot \
+      "$gate_cleanup_token" "$gate_cleanup_snapshot" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: launch gate cleanup failure propagates" 1 "$rc"
+    _assert_file_exists "host key: gate cleanup failure retains ownership" \
+      "$lifecycle_snapshot_owner"
+    _assert_file_exists "host key: failed gate cleanup retains retry path" \
+      "$gate_cleanup_path"
+    gate_cleanup_block=0
+    _upterm_cleanup_known_hosts_snapshot "$gate_cleanup_token" "$gate_cleanup_snapshot"
+    unset -f rm
+    _assert_file_missing "host key: launch gate cleanup retry removes gate" \
+      "$gate_cleanup_path"
+    _assert_file_missing "host key: launch gate cleanup retry removes owner" \
+      "$lifecycle_snapshot_owner"
+
+    mixed_known_hosts="$lifecycle_dir/mixed-known-hosts"
+    printf 'uptermd.upterm.dev %s\n' "${snapshot_original#* }" >"$mixed_known_hosts"
+    for mixed_first_mode in unconfigured configured; do
+      mixed_ready="$lifecycle_dir/mixed-$mixed_first_mode-ready"
+      mixed_first_output="$lifecycle_dir/mixed-$mixed_first_mode-first-output"
+      mixed_second_output="$lifecycle_dir/mixed-$mixed_first_mode-second-output"
+      mixed_release="$lifecycle_dir/mixed-$mixed_first_mode-release"
+      if [[ "$mixed_first_mode" == configured ]]; then
+        mixed_first_known_hosts="$mixed_known_hosts"
+        mixed_second_known_hosts=""
+      else
+        mixed_first_known_hosts=""
+        mixed_second_known_hosts="$mixed_known_hosts"
+      fi
+      (
+        # shellcheck disable=SC2329 # The production start invokes this boundary double.
+        _upterm_write_pid_file() {
+          : >"$mixed_ready"
+          while [[ ! -e "$mixed_release" ]]; do sleep 0.01; done
+          return 1
+        }
+        DS_UPTERM_HOST="uptermd.upterm.dev:22" \
+          DS_UPTERM_KNOWN_HOSTS="$mixed_first_known_hosts" \
+          _share_start "mixed-$mixed_first_mode-first"
+      ) >"$mixed_first_output" 2>&1 &
+      mixed_first_job=$!
+      _track_test_pid "$mixed_first_job"
+      for ((mixed_attempt = 0; mixed_attempt < 500; mixed_attempt++)); do
+        [[ -e "$mixed_ready" ]] && break
+        kill -0 "$mixed_first_job" 2>/dev/null || break
+        sleep 0.01
+      done
+      _assert_file_exists "host key: $mixed_first_mode start reaches pre-PID boundary" \
+        "$mixed_ready"
+      set +e
+      DS_UPTERM_HOST="uptermd.upterm.dev:22" \
+        DS_UPTERM_KNOWN_HOSTS="$mixed_second_known_hosts" \
+        _share_start "mixed-$mixed_first_mode-second" \
+        >"$mixed_second_output" 2>&1
+      mixed_second_rc=$?
+      set -e
+      _assert_exit "host key: opposite-mode start cannot pass an in-flight reservation" \
+        1 "$mixed_second_rc"
+      : >"$mixed_release"
+      kill "$mixed_first_job" 2>/dev/null || true
+      wait "$mixed_first_job" 2>/dev/null || true
+      _share_stop "mixed-$mixed_first_mode-second" >/dev/null 2>&1 || true
+      command rm -f "$lifecycle_pid" "$(_upterm_session_file)" \
+        "$(_upterm_admin_file)" "$(_upterm_log_file)"
+      if [[ -e "$lifecycle_snapshot_owner" || -L "$lifecycle_snapshot_owner" ]]; then
+        if _upterm_read_snapshot_owner "$lifecycle_snapshot_owner"; then
+          _upterm_cleanup_known_hosts_snapshot \
+            "$_UPTERM_SNAPSHOT_TOKEN" \
+            "$(dirname "$lifecycle_snapshot_owner")/$_UPTERM_SNAPSHOT_BASENAME" ||
+            true
+        fi
+      fi
+    done
+
+    stop_pause_ready="$lifecycle_dir/stop-pause-ready"
+    stop_pause_release="$lifecycle_dir/stop-pause-release"
+    stop_pause_output="$lifecycle_dir/stop-pause-output"
+    stop_pause_signals="$lifecycle_dir/stop-pause-signals"
+    DS_UPTERM_HOST="uptermd.upterm.dev:22"
+    DS_UPTERM_KNOWN_HOSTS=""
+    MOCK_UPTERM_SLEEP=30 _share_start "stop-pause-a" >/dev/null
+    _upterm_read_snapshot_owner "$lifecycle_snapshot_owner"
+    stop_pause_token="$_UPTERM_SNAPSHOT_TOKEN"
+    (
+      stop_pause_real_rm=$(type -P rm)
+      # shellcheck disable=SC2329 # Stop polling invokes this signal audit double.
+      kill() {
+        if [[ "${1:-}" != -0 ]]; then
+          builtin printf '%s\n' "$*" >>"$stop_pause_signals"
+        fi
+        command kill "$@"
+      }
+      # shellcheck disable=SC2329 # Exact lifecycle cleanup invokes this barrier.
+      rm() {
+        local arg should_pause=0
+        for arg; do
+          [[ "$arg" == "$lifecycle_pid" ]] && should_pause=1
+        done
+        if ((should_pause)); then
+          : >"$stop_pause_ready"
+          while [[ ! -e "$stop_pause_release" ]]; do sleep 0.01; done
+        fi
+        "$stop_pause_real_rm" "$@"
+      }
+      _share_stop "stop-pause-a"
+    ) >"$stop_pause_output" 2>&1 &
+    stop_pause_job=$!
+    _track_test_pid "$stop_pause_job"
+    for ((stop_pause_attempt = 0; stop_pause_attempt < 500; stop_pause_attempt++)); do
+      [[ -e "$stop_pause_ready" ]] && break
+      kill -0 "$stop_pause_job" 2>/dev/null || break
+      sleep 0.01
+    done
+    _assert_file_exists "host key: stop reaches post-shutdown pre-cleanup boundary" \
+      "$stop_pause_ready"
+    _upterm_read_snapshot_owner "$lifecycle_snapshot_owner"
+    _assert_eq "host key: stop publishes stopping phase before cleanup" \
+      "stopping" "$_UPTERM_SNAPSHOT_PHASE"
+    _assert_eq "host key: stopping phase retains A token" \
+      "$stop_pause_token" "$_UPTERM_SNAPSHOT_TOKEN"
+    set +e
+    DS_UPTERM_KNOWN_HOSTS="$mixed_known_hosts" \
+      _share_start "stop-pause-b" >"$lifecycle_dir/stop-pause-b-output" 2>&1
+    stop_pause_b_rc=$?
+    set -e
+    _assert_exit "host key: B cannot start while A cleanup is paused" 1 "$stop_pause_b_rc"
+    _upterm_read_snapshot_owner "$lifecycle_snapshot_owner"
+    _assert_eq "host key: blocked B preserves A stopping token" \
+      "$stop_pause_token" "$_UPTERM_SNAPSHOT_TOKEN"
+    : >"$stop_pause_release"
+    wait "$stop_pause_job"
+    _assert_file_missing "host key: stop sends no external PID or group signal" \
+      "$stop_pause_signals"
+    _assert_file_missing "host key: completed stop releases exact owner" \
+      "$lifecycle_snapshot_owner"
+    _share_stop "stop-pause-b" >/dev/null 2>&1 || true
+
+    exit_pause_ready="$lifecycle_dir/exit-pause-ready"
+    exit_pause_release="$lifecycle_dir/exit-pause-release"
+    exit_pause_output="$lifecycle_dir/exit-pause-output"
+    exit_pause_trigger="$lifecycle_dir/exit-pause-trigger"
+    DS_UPTERM_KNOWN_HOSTS=""
+    export MOCK_UPTERM_EXIT_FILE="$exit_pause_trigger"
+    _share_start "exit-pause-a" >/dev/null
+    : >"$exit_pause_trigger"
+    unset MOCK_UPTERM_EXIT_FILE
+    _upterm_read_snapshot_owner "$lifecycle_snapshot_owner"
+    exit_pause_token="$_UPTERM_SNAPSHOT_TOKEN"
+    exit_pause_supervisor="$_UPTERM_SNAPSHOT_PID"
+    exit_pause_supervisor_identity="$_UPTERM_SNAPSHOT_IDENTITY"
+    exit_pause_control=$(_upterm_control_dir "$exit_pause_token")
+    exit_pause_done_token=""
+    exit_pause_done_result=""
+    exit_pause_supervisor_status=0
+    for ((exit_pause_attempt = 0; exit_pause_attempt < 500; exit_pause_attempt++)); do
+      if _upterm_read_token_state \
+        "$exit_pause_control/done" result \
+        exit_pause_done_token exit_pause_done_result &&
+        [[ "$exit_pause_done_token" == "$exit_pause_token" &&
+          "$exit_pause_done_result" == exited ]]; then
+        if _upterm_supervisor_matches \
+          "$exit_pause_supervisor" "$exit_pause_supervisor_identity" \
+          "$exit_pause_token"; then
+          exit_pause_supervisor_status=0
+        else
+          exit_pause_supervisor_status=$?
+        fi
+        ((exit_pause_supervisor_status == 1)) && break
+      fi
+      sleep 0.01
+    done
+    _assert_file_exists "host key: natural child exit is recorded by its supervisor" \
+      "$exit_pause_control/done"
+    _assert_exit "host key: natural-exit supervisor is ready for reconciliation" \
+      1 "$exit_pause_supervisor_status"
+    (
+      exit_pause_real_rm=$(type -P rm)
+      # shellcheck disable=SC2329 # Reconciliation invokes this cleanup barrier.
+      rm() {
+        local arg should_pause=0
+        for arg; do
+          [[ "$arg" == "$lifecycle_pid" ]] && should_pause=1
+        done
+        if ((should_pause)); then
+          : >"$exit_pause_ready"
+          while [[ ! -e "$exit_pause_release" ]]; do sleep 0.01; done
+        fi
+        "$exit_pause_real_rm" "$@"
+      }
+      DS_UPTERM_KNOWN_HOSTS="$mixed_known_hosts" _share_start "exit-pause-b"
+    ) >"$exit_pause_output" 2>&1 &
+    exit_pause_job=$!
+    _track_test_pid "$exit_pause_job"
+    for ((exit_pause_attempt = 0; exit_pause_attempt < 500; exit_pause_attempt++)); do
+      [[ -e "$exit_pause_ready" ]] && break
+      kill -0 "$exit_pause_job" 2>/dev/null || break
+      sleep 0.01
+    done
+    _assert_file_exists "host key: natural-exit cleanup reaches its exact-file boundary" \
+      "$exit_pause_ready"
+    _upterm_read_snapshot_owner "$lifecycle_snapshot_owner"
+    _assert_eq "host key: natural-exit cleanup publishes stopping first" \
+      "stopping" "$_UPTERM_SNAPSHOT_PHASE"
+    _assert_eq "host key: natural-exit cleanup retains A token" \
+      "$exit_pause_token" "$_UPTERM_SNAPSHOT_TOKEN"
+    set +e
+    DS_UPTERM_KNOWN_HOSTS="" \
+      _share_start "exit-pause-c" >"$lifecycle_dir/exit-pause-c-output" 2>&1
+    exit_pause_c_rc=$?
+    set -e
+    _assert_exit "host key: another start cannot pass paused natural-exit cleanup" \
+      1 "$exit_pause_c_rc"
+    _upterm_read_snapshot_owner "$lifecycle_snapshot_owner"
+    _assert_eq "host key: blocked start preserves natural-exit A token" \
+      "$exit_pause_token" "$_UPTERM_SNAPSHOT_TOKEN"
+    : >"$exit_pause_release"
+    wait "$exit_pause_job"
+    _upterm_read_snapshot_owner "$lifecycle_snapshot_owner"
+    if [[ "$_UPTERM_SNAPSHOT_TOKEN" != "$exit_pause_token" ]]; then
+      _pass "host key: B acquires a new token only after A cleanup completes"
+    else
+      _fail "host key: B acquires a new token only after A cleanup completes"
+    fi
+    _share_stop "exit-pause-b" >/dev/null
+
+    MOCK_UPTERM_SLEEP=30 DS_UPTERM_KNOWN_HOSTS="" \
+      _share_start "token-mismatch" >/dev/null
+    _upterm_read_snapshot_owner "$lifecycle_snapshot_owner"
+    mismatch_owner_token="$_UPTERM_SNAPSHOT_TOKEN"
+    mismatch_session_file=$(_upterm_session_file)
+    mismatch_other_token=00000000000000000000000000000000
+    [[ "$mismatch_other_token" == "$mismatch_owner_token" ]] &&
+      mismatch_other_token=11111111111111111111111111111111
+    printf 'version=1\ntoken=%s\nsession=token-mismatch\n' \
+      "$mismatch_other_token" >"$mismatch_session_file"
+    set +e
+    mismatch_output=$(_share_stop "token-mismatch" 2>&1)
+    mismatch_rc=$?
+    set -e
+    _assert_exit "host key: mismatched common-state token fails closed" 1 "$mismatch_rc"
+    _assert_contains "host key: common-state token mismatch is actionable" \
+      "owned by another lifecycle" "$mismatch_output"
+    _assert_file_exists "host key: token mismatch preserves exact owner for retry" \
+      "$lifecycle_snapshot_owner"
+    _assert_file_exists "host key: token mismatch preserves foreign session state" \
+      "$mismatch_session_file"
+    command rm -f "$mismatch_session_file"
+    _upterm_write_session_file \
+      "$mismatch_session_file" "$mismatch_owner_token" "token-mismatch"
+    _share_stop "token-mismatch" >/dev/null
+    _assert_file_missing "host key: exact-token cleanup retry releases ownership" \
+      "$lifecycle_snapshot_owner"
+    DS_UPTERM_HOST="example.test:22"
+    DS_UPTERM_KNOWN_HOSTS="$snapshot_source"
+
+    # Replacing the snapshot pathname after validation must not change the
+    # already-open inode that the Upterm child consumes.
+    printf '%s' "$snapshot_original" >"$snapshot_source"
+    snapshot_path_capture="$lifecycle_dir/snapshot-path-capture"
+    DS_UPTERM_KNOWN_HOSTS="$snapshot_source"
+    export MOCK_UPTERM_KNOWN_HOSTS_CAPTURE="$snapshot_path_capture"
+    # shellcheck disable=SC2329 # production invokes this network-boundary test double.
+    ssh-keyscan() {
+      local snapshot_scan_arg certificate=0 owner_snapshot snapshot_path replacement_tmp
+      for snapshot_scan_arg; do
+        [[ "$snapshot_scan_arg" == -c ]] && certificate=1
+      done
+      ((certificate)) && return 1
+      owner_snapshot=$(sed -n 's/^snapshot=//p' "$lifecycle_snapshot_owner" 2>/dev/null || true)
+      if [[ -n "$owner_snapshot" ]]; then
+        snapshot_path="$(dirname "$lifecycle_snapshot_base")/$owner_snapshot"
+      else
+        snapshot_path="$lifecycle_snapshot_base"
+      fi
+      replacement_tmp="${snapshot_path}.replacement"
+      printf '%s\n' "$snapshot_replacement" >"$replacement_tmp"
+      mv -f "$replacement_tmp" "$snapshot_path"
+      printf '%s\n' "$snapshot_original"
+    }
+    _reset_tmux_log
+    set +e
+    output=$(_share_start "snapshot-path-swap" 2>&1)
+    rc=$?
+    set -e
+    unset MOCK_UPTERM_KNOWN_HOSTS_CAPTURE
+    _assert_exit "host key: snapshot path replacement cannot change launched trust" 0 "$rc"
+    _assert_file_content "host key: launched Upterm stays bound to the validated inode" \
+      "$snapshot_original" "$snapshot_path_capture"
+    _assert_contains "host key: replaced snapshot still launches through a bound descriptor" \
+      "--known-hosts /dev/fd/3" "$(_tmux_log)"
+    _share_stop "snapshot-path-swap" >/dev/null
+
+    printf '%s' "$snapshot_original" >"$snapshot_source"
+    # shellcheck disable=SC2329 # production invokes this network-boundary test double.
+    ssh-keyscan() {
+      local snapshot_scan_arg certificate=0 owner_snapshot validation_path replacement_tmp
+      for snapshot_scan_arg; do
+        [[ "$snapshot_scan_arg" == -c ]] && certificate=1
+      done
+      ((certificate)) && return 1
+      owner_snapshot=$(sed -n 's/^snapshot=//p' "$lifecycle_snapshot_owner" 2>/dev/null || true)
+      validation_path="$(dirname "$lifecycle_snapshot_base")/$owner_snapshot.tmp"
+      replacement_tmp="${validation_path}.replacement"
+      printf '%s\n' "$snapshot_replacement" >"$replacement_tmp"
+      mv -f "$replacement_tmp" "$validation_path"
+      printf '%s\n' "$snapshot_original"
+    }
+    _reset_tmux_log
+    set +e
+    output=$(_share_start "validation-path-swap" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: validation path replacement fails closed" 1 "$rc"
+    _assert_contains "host key: validation path replacement is actionable" \
+      "validation snapshot changed during verification" "$output"
+    _assert_not_contains "host key: validation path replacement never invokes Upterm" \
+      "upterm host" "$(_tmux_log)"
+    _assert_file_missing "host key: validation path failure removes snapshot ownership" \
+      "$lifecycle_snapshot_owner"
+    if compgen -G "${lifecycle_snapshot_base}.*" >/dev/null; then
+      _fail "host key: validation path failure removes all snapshot links"
+    else
+      _pass "host key: validation path failure removes all snapshot links"
+    fi
+
+    # A second start must not remove or reuse the first start's in-flight trust
+    # artifact before the first process has published its daemon PID.
+    printf '%s' "$snapshot_original" >"$snapshot_source"
+    concurrent_ready="$lifecycle_dir/concurrent-ready"
+    concurrent_release="$lifecycle_dir/concurrent-release"
+    concurrent_first_output="$lifecycle_dir/concurrent-first-output"
+    rm -f "$concurrent_ready" "$concurrent_release" "$concurrent_first_output"
+    # shellcheck disable=SC2329 # production invokes this network-boundary test double.
+    ssh-keyscan() {
+      local concurrent_scan_arg certificate=0
+      for concurrent_scan_arg; do
+        [[ "$concurrent_scan_arg" == -c ]] && certificate=1
+      done
+      ((certificate)) && return 1
+      if [[ "${BLOCK_UPTERM_SCAN:-0}" == 1 ]]; then
+        : >"$concurrent_ready"
+        while [[ ! -e "$concurrent_release" ]]; do
+          sleep 0.01
+        done
+      fi
+      printf '%s\n' "$snapshot_original"
+    }
+    (
+      BLOCK_UPTERM_SCAN=1 _share_start "concurrent-first"
+    ) >"$concurrent_first_output" 2>&1 &
+    concurrent_first_pid=$!
+    _track_test_pid "$concurrent_first_pid"
+    for ((concurrent_attempt = 0; concurrent_attempt < 500; concurrent_attempt++)); do
+      [[ -e "$concurrent_ready" ]] && break
+      kill -0 "$concurrent_first_pid" 2>/dev/null || break
+      sleep 0.01
+    done
+    _assert_file_exists "host key: first concurrent start reaches the reserved prelaunch phase" \
+      "$concurrent_ready"
+    set +e
+    concurrent_second_output=$(BLOCK_UPTERM_SCAN=0 _share_start "concurrent-second" 2>&1)
+    concurrent_second_rc=$?
+    set -e
+    _assert_exit "host key: a concurrent start cannot replace in-flight trust" \
+      1 "$concurrent_second_rc"
+    _assert_contains "host key: concurrent start rejection is actionable" \
+      "another Upterm start is already in progress" "$concurrent_second_output"
+    set +e
+    concurrent_stop_output=$(_share_stop "concurrent-first" 2>&1)
+    concurrent_stop_rc=$?
+    set -e
+    _assert_exit "host key: stop cannot remove another process's prelaunch trust" \
+      1 "$concurrent_stop_rc"
+    _assert_contains "host key: prelaunch stop rejection is actionable" \
+      "another Upterm start is still in progress" "$concurrent_stop_output"
+    _assert_file_exists "host key: prelaunch stop preserves snapshot ownership" \
+      "$lifecycle_snapshot_owner"
+    : >"$concurrent_release"
+    set +e
+    wait "$concurrent_first_pid"
+    concurrent_first_rc=$?
+    set -e
+    _assert_exit "host key: the reservation owner completes normally" 0 "$concurrent_first_rc"
+    _share_stop "concurrent-first" >/dev/null
+
+    printf '%s' "$snapshot_original" >"$snapshot_source"
+    ln -s "$snapshot_source" "$lifecycle_dir/symlink-known-hosts"
+    DS_UPTERM_KNOWN_HOSTS="$lifecycle_dir/symlink-known-hosts"
+    _reset_tmux_log
+    set +e
+    output=$(_share_start "unsafe-source" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: symlink trust sources fail closed" 1 "$rc"
+    _assert_contains "host key: unsafe trust sources are actionable" \
+      "readable non-symlink regular file" "$output"
+    _assert_not_contains "host key: unsafe trust sources never invoke Upterm" \
+      "upterm host" "$(_tmux_log)"
+    _assert_file_missing "host key: unsafe trust sources leave no snapshot" \
+      "$lifecycle_snapshot"
+    if ((rc == 0)); then
+      _share_stop "unsafe-source" >/dev/null
+    fi
+
+    # The source path is trusted before open, but a detectable swap to a
+    # symlink during setup must still fail rather than following it.
+    source_swap_target="$lifecycle_dir/source-swap-target"
+    source_swap_original="$lifecycle_dir/source-swap-original"
+    printf '%s' "$snapshot_original" >"$snapshot_source"
+    printf '%s' "$snapshot_original" >"$source_swap_target"
+    DS_UPTERM_KNOWN_HOSTS="$snapshot_source"
+    saved_ensure_state_dir=$(declare -f _ensure_state_dir)
+    _ensure_state_dir() {
+      mkdir -p "$DS_STATE_DIR"
+      if [[ "${SWAP_KNOWN_HOSTS_DURING_SETUP:-0}" == 1 ]]; then
+        mv "$snapshot_source" "$source_swap_original"
+        ln -s "$source_swap_target" "$snapshot_source"
+        SWAP_KNOWN_HOSTS_DURING_SETUP=0
+      fi
+    }
+    _reset_tmux_log
+    set +e
+    output=$(SWAP_KNOWN_HOSTS_DURING_SETUP=1 _share_start "source-open-swap" 2>&1)
+    rc=$?
+    set -e
+    eval "$saved_ensure_state_dir"
+    _assert_exit "host key: a source swapped to a symlink before open fails closed" 1 "$rc"
+    _assert_contains "host key: source-open swap rejection is actionable" \
+      "readable non-symlink regular file" "$output"
+    _assert_not_contains "host key: source-open swap never invokes Upterm" \
+      "upterm host" "$(_tmux_log)"
+    if ((rc == 0)); then
+      _share_stop "source-open-swap" >/dev/null
+    fi
+    rm -f "$snapshot_source"
+    mv "$source_swap_original" "$snapshot_source"
+
+    DS_UPTERM_KNOWN_HOSTS="$snapshot_source"
+    export MOCK_UPTERM_FAIL=1
+    failed_start_signals="$lifecycle_dir/failed-start-signals"
+    # shellcheck disable=SC2329 # Failed-start cleanup invokes this signal audit double.
+    kill() {
+      if [[ "${1:-}" != -0 ]]; then
+        builtin printf '%s\n' "$*" >>"$failed_start_signals"
+      fi
+      command kill "$@"
+    }
+    _reset_tmux_log
+    set +e
+    output=$(_share_start "launch-failure" 2>&1)
+    rc=$?
+    set -e
+    unset MOCK_UPTERM_FAIL
+    unset -f kill
+    _assert_exit "host key: an Upterm launch failure propagates" 1 "$rc"
+    _assert_contains "host key: an Upterm launch failure is actionable" \
+      "upterm exited before publishing share info" "$output"
+    _assert_file_missing "host key: launch failure removes its trust snapshot" \
+      "$lifecycle_snapshot"
+    _assert_file_missing "host key: launch failure removes its pid file" "$lifecycle_pid"
+    _assert_file_missing "host key: launch failure removes its session file" \
+      "$(_upterm_session_file)"
+    _assert_file_missing "host key: launch failure removes its log file" \
+      "$(_upterm_log_file)"
+    _assert_file_missing "host key: launch failure leaves no snapshot temporary file" \
+      "${lifecycle_snapshot}.tmp"
+    _assert_file_missing "host key: failed-start cleanup sends no external signal" \
+      "$failed_start_signals"
+
+    stale_snapshot_token=""
+    _upterm_acquire_snapshot_owner stale_snapshot_token lifecycle_snapshot
+    printf 'stale\n' >"$lifecycle_snapshot"
+    sleep 30 &
+    stale_active_pid=$!
+    _track_test_pid "$stale_active_pid"
+    _upterm_write_snapshot_owner replace active "$stale_active_pid" \
+      "$stale_snapshot_token" "$lifecycle_snapshot"
+    _upterm_write_pid_file \
+      "$lifecycle_pid" "$stale_active_pid" "$stale_snapshot_token"
+    kill "$stale_active_pid" 2>/dev/null || true
+    wait "$stale_active_pid" 2>/dev/null || true
+    stale_control=$(_upterm_control_dir "$stale_snapshot_token")
+    _upterm_create_control_dir "$stale_snapshot_token"
+    _upterm_supervisor_write_status \
+      "$stale_control/done" "$stale_snapshot_token" exited
+    _share_running >/dev/null 2>&1 || true
+    _assert_file_missing "host key: dead share state removes a stale trust snapshot" \
+      "$lifecycle_snapshot"
+    _assert_file_missing "host key: dead share state removes stale snapshot ownership" \
+      "$lifecycle_snapshot_owner"
+
+    # Snapshot deletion failures must remain actionable and must preserve the
+    # owner record so the same artifact can be retried safely.
+    real_rm=$(type -P rm)
+    block_snapshot_rm=0
+    # shellcheck disable=SC2329 # production cleanup invokes this failure-injection double.
+    rm() {
+      local arg suffix blocked=0
+      local -a passthrough=()
+      for arg; do
+        suffix="${arg#"$lifecycle_snapshot_base".}"
+        if ((block_snapshot_rm)) && [[ "$arg" == "$lifecycle_snapshot_base".* &&
+          ${#suffix} -eq 32 && "$suffix" != *[![:xdigit:]]* ]]; then
+          blocked=1
+        else
+          passthrough+=("$arg")
+        fi
+      done
+      ((${#passthrough[@]} == 0)) || "$real_rm" "${passthrough[@]}"
+      ((blocked == 0))
+    }
+
+    printf '@cert-authority example.test %s\n' "$real_ca_key" >"$snapshot_source"
+    DS_UPTERM_KNOWN_HOSTS="$snapshot_source"
+    block_snapshot_rm=1
+    set +e
+    output=$(_share_start "cleanup-preflight" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: preflight cleanup failure propagates" 1 "$rc"
+    _assert_contains "host key: preflight cleanup failure is actionable" \
+      "failed to remove the owned Upterm trust snapshot" "$output"
+    _assert_file_exists "host key: preflight cleanup failure preserves ownership" \
+      "$lifecycle_snapshot_owner"
+    block_snapshot_rm=0
+    _upterm_read_snapshot_owner "$lifecycle_snapshot_owner"
+    _upterm_cleanup_known_hosts_snapshot \
+      "$_UPTERM_SNAPSHOT_TOKEN" \
+      "$(dirname "$lifecycle_snapshot_owner")/$_UPTERM_SNAPSHOT_BASENAME"
+
+    printf '%s' "$snapshot_original" >"$snapshot_source"
+    export MOCK_UPTERM_FAIL=1
+    block_snapshot_rm=1
+    set +e
+    output=$(_share_start "cleanup-launch" 2>&1)
+    rc=$?
+    set -e
+    unset MOCK_UPTERM_FAIL
+    _assert_exit "host key: launch cleanup failure propagates" 1 "$rc"
+    _assert_contains "host key: launch cleanup failure is actionable" \
+      "failed to remove the owned Upterm trust snapshot" "$output"
+    _assert_file_exists "host key: launch cleanup failure preserves ownership" \
+      "$lifecycle_snapshot_owner"
+    block_snapshot_rm=0
+    _upterm_read_snapshot_owner "$lifecycle_snapshot_owner"
+    _upterm_cleanup_known_hosts_snapshot \
+      "$_UPTERM_SNAPSHOT_TOKEN" \
+      "$(dirname "$lifecycle_snapshot_owner")/$_UPTERM_SNAPSHOT_BASENAME"
+
+    _upterm_acquire_snapshot_owner stale_snapshot_token lifecycle_snapshot
+    printf 'stale\n' >"$lifecycle_snapshot"
+    sleep 30 &
+    stale_active_pid=$!
+    _track_test_pid "$stale_active_pid"
+    _upterm_write_snapshot_owner replace active "$stale_active_pid" \
+      "$stale_snapshot_token" "$lifecycle_snapshot"
+    _upterm_write_pid_file \
+      "$lifecycle_pid" "$stale_active_pid" "$stale_snapshot_token"
+    kill "$stale_active_pid" 2>/dev/null || true
+    wait "$stale_active_pid" 2>/dev/null || true
+    stale_control=$(_upterm_control_dir "$stale_snapshot_token")
+    _upterm_create_control_dir "$stale_snapshot_token"
+    _upterm_supervisor_write_status \
+      "$stale_control/done" "$stale_snapshot_token" exited
+    block_snapshot_rm=1
+    set +e
+    output=$(_share_running 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: dead-state cleanup failure has a distinct status" 2 "$rc"
+    _assert_contains "host key: dead-state cleanup failure is actionable" \
+      "failed to remove the owned Upterm trust snapshot" "$output"
+    block_snapshot_rm=0
+    _upterm_read_snapshot_owner "$lifecycle_snapshot_owner"
+    _upterm_cleanup_known_hosts_snapshot \
+      "$_UPTERM_SNAPSHOT_TOKEN" \
+      "$(dirname "$lifecycle_snapshot_owner")/$_UPTERM_SNAPSHOT_BASENAME"
+    "$real_rm" -f "$lifecycle_pid"
+
+    _upterm_acquire_snapshot_owner stale_snapshot_token lifecycle_snapshot
+    printf 'stale\n' >"$lifecycle_snapshot"
+    sleep 30 &
+    stale_active_pid=$!
+    _track_test_pid "$stale_active_pid"
+    _upterm_write_snapshot_owner replace active "$stale_active_pid" \
+      "$stale_snapshot_token" "$lifecycle_snapshot"
+    kill "$stale_active_pid" 2>/dev/null || true
+    wait "$stale_active_pid" 2>/dev/null || true
+    stale_control=$(_upterm_control_dir "$stale_snapshot_token")
+    _upterm_create_control_dir "$stale_snapshot_token"
+    _upterm_supervisor_write_status \
+      "$stale_control/done" "$stale_snapshot_token" exited
+    block_snapshot_rm=1
+    _reset_tmux_log
+    set +e
+    output=$(_share_start "cleanup-replacement" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: replacement stops when stale trust cannot be removed" 1 "$rc"
+    _assert_contains "host key: replacement cleanup failure is actionable" \
+      "failed to reconcile stale Upterm snapshot state" "$output"
+    _assert_not_contains "host key: replacement cleanup failure never invokes Upterm" \
+      "upterm host" "$(_tmux_log)"
+    block_snapshot_rm=0
+    _upterm_read_snapshot_owner "$lifecycle_snapshot_owner"
+    _upterm_cleanup_known_hosts_snapshot \
+      "$_UPTERM_SNAPSHOT_TOKEN" \
+      "$(dirname "$lifecycle_snapshot_owner")/$_UPTERM_SNAPSHOT_BASENAME"
+
+    cleanup_residue=""
+    for cleanup_path in "$lifecycle_pid" "$lifecycle_info" \
+      "$(_upterm_session_file)" "$(_upterm_admin_file)" "$(_upterm_log_file)" \
+      "$lifecycle_snapshot_owner" "$(_upterm_operation_lock_dir)"; do
+      if [[ -e "$cleanup_path" || -L "$cleanup_path" ]]; then
+        cleanup_residue+=" ${cleanup_path##*/}"
+      fi
+    done
+    if compgen -G "$(_state_file_prefix).upterm.*" >/dev/null; then
+      cleanup_residue+=" token-scoped"
+    fi
+    _assert_eq "host key: cleanup failure fixtures leave no common state" \
+      "" "$cleanup_residue"
+
+    cleanup_stop_saved_state_dir="$DS_STATE_DIR"
+    cleanup_stop_saved_pid="$DS_UPTERM_PID_FILE"
+    cleanup_stop_saved_info="$DS_SHARE_INFO_FILE"
+    cleanup_stop_saved_snapshot_base="$lifecycle_snapshot_base"
+    cleanup_stop_saved_snapshot_owner="$lifecycle_snapshot_owner"
+    cleanup_stop_saved_snapshot="$lifecycle_snapshot"
+    cleanup_stop_dir=$(_tmpdir)
+    DS_STATE_DIR="$cleanup_stop_dir/state"
+    DS_UPTERM_PID_FILE="$cleanup_stop_dir/upterm.pid"
+    DS_SHARE_INFO_FILE="$cleanup_stop_dir/share-info"
+    lifecycle_snapshot_base="$(_state_file_prefix).upterm.known_hosts"
+    lifecycle_snapshot_owner="${lifecycle_snapshot_base}.owner"
+    lifecycle_snapshot="$lifecycle_snapshot_base"
+    set +e
+    cleanup_stop_start_output=$(_share_start "cleanup-stop" 2>&1)
+    cleanup_stop_start_rc=$?
+    set -e
+    if ((cleanup_stop_start_rc == 0)); then
+      _pass "host key: stop cleanup fixture starts"
+    else
+      _fail "host key: stop cleanup fixture starts: $cleanup_stop_start_output"
+    fi
+    block_snapshot_rm=1
+    set +e
+    output=$(_share_stop "cleanup-stop" 2>&1)
+    rc=$?
+    set -e
+    _assert_exit "host key: stop cleanup failure propagates" 1 "$rc"
+    _assert_contains "host key: stop cleanup failure is actionable" \
+      "failed to remove the owned Upterm trust snapshot" "$output"
+    _assert_file_exists "host key: stop cleanup failure preserves ownership" \
+      "$lifecycle_snapshot_owner"
+    block_snapshot_rm=0
+    if _upterm_read_snapshot_owner "$lifecycle_snapshot_owner"; then
+      _upterm_cleanup_known_hosts_snapshot \
+        "$_UPTERM_SNAPSHOT_TOKEN" \
+        "$(dirname "$lifecycle_snapshot_owner")/$_UPTERM_SNAPSHOT_BASENAME"
+    fi
+    DS_STATE_DIR="$cleanup_stop_saved_state_dir"
+    DS_UPTERM_PID_FILE="$cleanup_stop_saved_pid"
+    DS_SHARE_INFO_FILE="$cleanup_stop_saved_info"
+    lifecycle_snapshot_base="$cleanup_stop_saved_snapshot_base"
+    lifecycle_snapshot_owner="$cleanup_stop_saved_snapshot_owner"
+    lifecycle_snapshot="$cleanup_stop_saved_snapshot"
+    unset -f rm
+
+    unset -f ssh-keyscan
+    rm -f "$lifecycle_pid" "$lifecycle_info" "$(_upterm_session_file)" \
+      "$(_upterm_admin_file)" "$(_upterm_log_file)"
+  fi
+
+  if [[ -n "$REAL_SSH_KEYGEN" ]]; then
+    invalid_authorities=('foo[bar]:22' '[not:ipv6]:22')
+    invalid_lookups=('foo[bar]' 'not:ipv6')
+    for ((invalid_index = 0; invalid_index < ${#invalid_authorities[@]}; invalid_index++)); do
+      invalid_known_hosts="$lifecycle_dir/invalid-$invalid_index-known-hosts"
+      printf '@cert-authority %s %s\n' \
+        "${invalid_lookups[$invalid_index]}" "$real_ca_key" >"$invalid_known_hosts"
+      DS_UPTERM_HOST="${invalid_authorities[$invalid_index]}"
+      DS_UPTERM_KNOWN_HOSTS="$invalid_known_hosts"
+      rm -f "$lifecycle_pid" "$lifecycle_info" "$(_upterm_session_file)" \
+        "$(_upterm_admin_file)" "$(_upterm_log_file)"
+      _reset_tmux_log
+      set +e
+      output=$(_share_start "invalid-authority" 2>&1)
+      rc=$?
+      set -e
+      _assert_exit "host key: invalid authority fails before CA delegation" 1 "$rc"
+      _assert_contains "host key: invalid authority reports parser rejection" \
+        "invalid upterm server address" "$output"
+      _assert_not_contains "host key: invalid authority never invokes Upterm" \
+        "upterm host" "$(_tmux_log)"
+      _assert_file_missing "host key: invalid authority creates no pid file" "$lifecycle_pid"
+      _assert_file_missing "host key: invalid authority creates no session file" \
+        "$(_upterm_session_file)"
+      _assert_file_missing "host key: invalid authority creates no admin file" \
+        "$(_upterm_admin_file)"
+      _assert_file_missing "host key: invalid authority creates no log file" \
+        "$(_upterm_log_file)"
+      _assert_file_missing "host key: invalid authority creates no share info" "$lifecycle_info"
+
+      if [[ -f "$lifecycle_pid" ]]; then
+        invalid_pid=$(cat "$lifecycle_pid" 2>/dev/null || true)
+        if [[ "$invalid_pid" =~ ^[0-9]+$ ]]; then
+          # shellcheck disable=SC2218 # A later audit double must not shadow cleanup.
+          command kill "$invalid_pid" 2>/dev/null || true
+        fi
+      fi
+      rm -f "$lifecycle_pid" "$lifecycle_info" "$(_upterm_session_file)" \
+        "$(_upterm_admin_file)" "$(_upterm_log_file)"
+    done
+  fi
+  DS_UPTERM_HOST=""
+  DS_UPTERM_KNOWN_HOSTS=""
+  DS_UPTERM_PID_FILE=""
+fi
+
 # ---------------------------------------------------------------------------
 # Tests: Share TTL watcher
 # ---------------------------------------------------------------------------
@@ -779,69 +4588,250 @@ _assert_eq "missing config: share-ttl empty" "" "$DS_UPTERM_SHARE_TTL"
 echo ""
 echo "=== Share TTL watcher ==="
 
-# Add a mock setsid that just runs its args directly (no new process group
-# needed in tests — we just need to verify the watcher pid file is created
-# and the watcher can be cancelled).
-cat >"$MOCK_BIN/setsid" <<'MOCK'
-#!/usr/bin/env bash
-# Run in background so sleep doesn't block the test process.
-"$@" &
-MOCK
-chmod +x "$MOCK_BIN/setsid"
-
-# Add a mock ds that records --unshare calls
 DS_UNSHARE_LOG="$MOCK_BIN/ds-unshare.log"
 cat >"$MOCK_BIN/ds" <<MOCK
 #!/usr/bin/env bash
-echo "ds \$*" >> "${DS_UNSHARE_LOG}"
+printf 'expected=%s expiry=%s args=%s\n' \
+  "\${DS_UPTERM_EXPECTED_TOKEN:-}" "\${DS_UPTERM_TTL_EXPIRY_TOKEN:-}" "\$*" \
+  >>"${DS_UNSHARE_LOG}"
 MOCK
 chmod +x "$MOCK_BIN/ds"
 
-# --- _upterm_start_ttl_watcher creates a pid file ---
 _reset_tmux_log
 DS_UPTERM_PID_FILE="$(_upterm_pid_file)"
 DS_UPTERM_SHARE_TTL=""
 : >"$DS_UNSHARE_LOG"
-_upterm_start_ttl_watcher 60 "ds"
-ttl_pid_file=$(_upterm_ttl_pid_file)
-_assert_file_exists "watcher: ttl pid file created" "$ttl_pid_file"
-watcher_pid=$(cat "$ttl_pid_file" 2>/dev/null || true)
-if [[ "$watcher_pid" =~ ^[0-9]+$ ]]; then
-  _pass "watcher: pid file contains numeric PID"
+ttl_token_a=11111111111111111111111111111111
+ttl_token_b=22222222222222222222222222222222
+ttl_control_a=$(_upterm_ttl_control_dir "$ttl_token_a")
+
+ttl_old_umask=$(umask)
+umask 000
+_upterm_start_ttl_watcher 60 "ds" "$ttl_token_a"
+umask "$ttl_old_umask"
+_assert_file_exists "watcher: token-scoped watcher state is created" \
+  "$ttl_control_a/watcher"
+ttl_watcher_pid=""
+# shellcheck disable=SC2034 # The reader requires an identity output variable.
+ttl_watcher_identity=""
+ttl_watcher_token=""
+_upterm_read_pid_file "$ttl_control_a/watcher" \
+  ttl_watcher_pid ttl_watcher_identity ttl_watcher_token
+_assert_eq "watcher: process state carries the lifecycle token" \
+  "$ttl_token_a" "$ttl_watcher_token"
+ttl_dir_mode=$(stat -c '%a' "$ttl_control_a" 2>/dev/null || stat -f '%Lp' "$ttl_control_a")
+ttl_file_mode=$(stat -c '%a' "$ttl_control_a/watcher" 2>/dev/null || stat -f '%Lp' "$ttl_control_a/watcher")
+_assert_eq "watcher: control directory is private under umask 000" "700" "$ttl_dir_mode"
+_assert_eq "watcher: state file is private under umask 000" "600" "$ttl_file_mode"
+
+ttl_signal_audit="$(_tmpdir)/signals"
+saved_ttl_kill=$(declare -f kill 2>/dev/null || true)
+# shellcheck disable=SC2329 # Production cancellation would invoke this audit double.
+kill() {
+  [[ "${1:-}" == -0 ]] || printf '%s\n' "$*" >>"$ttl_signal_audit"
+  command kill "$@"
+}
+_upterm_cancel_ttl_watcher "$ttl_token_a"
+unset -f kill
+[[ -z "$saved_ttl_kill" ]] || eval "$saved_ttl_kill"
+_assert_file_missing "watcher: acknowledged cancellation removes exact state" \
+  "$ttl_control_a"
+if [[ ! -s "$ttl_signal_audit" ]]; then
+  _pass "watcher: cancellation never signals a recovered PID or process group"
 else
-  _fail "watcher: pid file contains non-numeric value: '$watcher_pid'"
+  _fail "watcher: cancellation signaled recovered state: $(<"$ttl_signal_audit")"
 fi
-# Clean up — kill the watcher (it's sleeping for 60s)
-_upterm_cancel_ttl_watcher
-_assert_file_missing "watcher: cancel removes pid file" "$ttl_pid_file"
-# Watcher process should be gone
-if [[ "$watcher_pid" =~ ^[0-9]+$ ]] && kill -0 "$watcher_pid" 2>/dev/null; then
-  _fail "watcher: cancel killed process"
+for ((ttl_attempt = 0; ttl_attempt < 500; ttl_attempt++)); do
+  command kill -0 "$ttl_watcher_pid" 2>/dev/null || break
+  sleep 0.01
+done
+if command kill -0 "$ttl_watcher_pid" 2>/dev/null; then
+  _fail "watcher: cooperative cancellation exits the watcher"
 else
-  _pass "watcher: cancel killed process"
+  _pass "watcher: cooperative cancellation exits the watcher"
 fi
 
-# --- _upterm_cancel_ttl_watcher is idempotent (no pid file) ---
-_upterm_cancel_ttl_watcher
-_assert_file_missing "cancel: idempotent when no pid file" "$(_upterm_ttl_pid_file)"
-_pass "cancel: no error when pid file absent"
+_upterm_cancel_ttl_watcher "$ttl_token_a"
+_pass "watcher: cancellation is idempotent when exact state is absent"
 
-# --- re-starting watcher cancels previous one ---
-_upterm_start_ttl_watcher 60 "ds"
-first_pid=$(cat "$(_upterm_ttl_pid_file)" 2>/dev/null || true)
-_upterm_start_ttl_watcher 60 "ds"
-second_pid=$(cat "$(_upterm_ttl_pid_file)" 2>/dev/null || true)
-if [[ "$first_pid" != "$second_pid" ]]; then
-  _pass "watcher: re-start spawns new watcher"
+_upterm_start_ttl_watcher 60 "ds" "$ttl_token_a"
+ttl_first_pid=""
+ttl_first_identity=""
+ttl_first_token=""
+_upterm_read_pid_file "$ttl_control_a/watcher" \
+  ttl_first_pid ttl_first_identity ttl_first_token
+_assert_eq "watcher: reset source state has the exact token" \
+  "$ttl_token_a" "$ttl_first_token"
+if _upterm_ttl_watcher_matches \
+  "$ttl_first_pid" "$ttl_first_identity" "$ttl_token_a"; then
+  _pass "watcher: reset source names the exact watcher"
 else
-  _fail "watcher: re-start should spawn a new watcher PID"
+  _fail "watcher: reset source does not name the exact watcher"
 fi
-if [[ "$first_pid" =~ ^[0-9]+$ ]] && kill -0 "$first_pid" 2>/dev/null; then
-  _fail "watcher: re-start killed previous watcher"
+_upterm_start_ttl_watcher 60 "ds" "$ttl_token_a"
+ttl_second_pid=""
+ttl_second_identity=""
+ttl_second_token=""
+_upterm_read_pid_file "$ttl_control_a/watcher" \
+  ttl_second_pid ttl_second_identity ttl_second_token
+_assert_eq "watcher: reset replacement state has the exact token" \
+  "$ttl_token_a" "$ttl_second_token"
+if _upterm_ttl_watcher_matches \
+  "$ttl_second_pid" "$ttl_second_identity" "$ttl_token_a"; then
+  _pass "watcher: reset replacement names the exact watcher"
 else
-  _pass "watcher: re-start killed previous watcher"
+  _fail "watcher: reset replacement does not name the exact watcher"
 fi
-_upterm_cancel_ttl_watcher
+if [[ "$ttl_first_pid" != "$ttl_second_pid" ]]; then
+  _pass "watcher: reset replaces the exact token's watcher"
+else
+  _fail "watcher: reset did not replace the exact token's watcher"
+fi
+for ((ttl_attempt = 0; ttl_attempt < 500; ttl_attempt++)); do
+  command kill -0 "$ttl_first_pid" 2>/dev/null || break
+  sleep 0.01
+done
+if command kill -0 "$ttl_first_pid" 2>/dev/null; then
+  _fail "watcher: reset waits for cooperative cancellation"
+else
+  _pass "watcher: reset waits for cooperative cancellation"
+fi
+_upterm_cancel_ttl_watcher "$ttl_token_a"
+
+ttl_unrelated_dir=$(_upterm_ttl_control_dir "$ttl_token_a")
+mkdir -m 700 "$ttl_unrelated_dir"
+if [[ -x /usr/bin/setsid ]]; then
+  /usr/bin/setsid sleep 300 &
+else
+  sleep 300 &
+fi
+ttl_unrelated_pid=$!
+_track_test_pid "$ttl_unrelated_pid"
+_upterm_write_pid_file \
+  "$ttl_unrelated_dir/watcher" "$ttl_unrelated_pid" "$ttl_token_a"
+_upterm_supervisor_write_status "$ttl_unrelated_dir/ready" "$ttl_token_a" ready
+: >"$ttl_signal_audit"
+# shellcheck disable=SC2329 # Production cancellation would invoke this audit double.
+kill() {
+  [[ "${1:-}" == -0 ]] || printf '%s\n' "$*" >>"$ttl_signal_audit"
+  command kill "$@"
+}
+set +e
+_upterm_cancel_ttl_watcher "$ttl_token_a" >/dev/null 2>&1
+ttl_unrelated_rc=$?
+set -e
+unset -f kill
+[[ -z "$saved_ttl_kill" ]] || eval "$saved_ttl_kill"
+_assert_exit "watcher: unrelated command identity fails closed" 1 "$ttl_unrelated_rc"
+if [[ ! -s "$ttl_signal_audit" ]] && command kill -0 "$ttl_unrelated_pid" 2>/dev/null; then
+  _pass "watcher: stale PID or PGID state never signals an unrelated group"
+else
+  _fail "watcher: stale PID or PGID state affected an unrelated group"
+fi
+_assert_file_exists "watcher: unverifiable reused state is retained" \
+  "$ttl_unrelated_dir/watcher"
+command kill "$ttl_unrelated_pid" 2>/dev/null || true
+wait "$ttl_unrelated_pid" 2>/dev/null || true
+rm -rf "$ttl_unrelated_dir"
+
+_upterm_start_ttl_watcher 60 "ds" "$ttl_token_a"
+ttl_dead_pid=""
+ttl_dead_identity=""
+ttl_dead_token=""
+_upterm_read_pid_file "$ttl_control_a/watcher" \
+  ttl_dead_pid ttl_dead_identity ttl_dead_token
+_assert_eq "watcher: death fixture state has the exact token" \
+  "$ttl_token_a" "$ttl_dead_token"
+command kill -KILL "$ttl_dead_pid" 2>/dev/null || true
+wait "$ttl_dead_pid" 2>/dev/null || true
+if _upterm_pid_matches_identity "$ttl_dead_pid" "$ttl_dead_identity"; then
+  _fail "watcher: killed death fixture still has its recorded identity"
+else
+  _pass "watcher: killed death fixture no longer has its recorded identity"
+fi
+for ((ttl_attempt = 0; ttl_attempt < 500; ttl_attempt++)); do
+  command kill -0 "$ttl_dead_pid" 2>/dev/null || break
+  sleep 0.01
+done
+set +e
+_upterm_cancel_ttl_watcher "$ttl_token_a" >/dev/null 2>&1
+ttl_dead_rc=$?
+set -e
+_assert_exit "watcher: dead watcher without acknowledgement fails closed" 1 "$ttl_dead_rc"
+_assert_file_exists "watcher: dead watcher state is retained" "$ttl_control_a/watcher"
+rm -rf "$ttl_control_a"
+
+mkdir -m 700 "$ttl_control_a"
+printf 'malformed\n' >"$ttl_control_a/watcher"
+set +e
+_upterm_cancel_ttl_watcher "$ttl_token_a" >/dev/null 2>&1
+ttl_malformed_rc=$?
+set -e
+_assert_exit "watcher: malformed state fails closed" 1 "$ttl_malformed_rc"
+_assert_file_exists "watcher: malformed state is retained" "$ttl_control_a/watcher"
+rm -rf "$ttl_control_a"
+
+_upterm_start_ttl_watcher 60 "ds" "$ttl_token_a"
+saved_ttl_write_state=$(declare -f _upterm_write_token_state)
+_upterm_write_token_state() {
+  [[ "$2" != request ]]
+}
+set +e
+_upterm_cancel_ttl_watcher "$ttl_token_a" >/dev/null 2>&1
+ttl_cancel_failure_rc=$?
+set -e
+eval "$saved_ttl_write_state"
+_assert_exit "watcher: cancellation publication failure is reported" \
+  1 "$ttl_cancel_failure_rc"
+_assert_file_exists "watcher: cancellation failure retains exact state" \
+  "$ttl_control_a/watcher"
+_upterm_cancel_ttl_watcher "$ttl_token_a"
+
+ttl_symlink_victim=$(_tmpdir)
+printf 'victim\n' >"$ttl_symlink_victim/keep"
+ln -s "$ttl_symlink_victim" "$ttl_control_a"
+set +e
+_upterm_start_ttl_watcher 60 "ds" "$ttl_token_a" >/dev/null 2>&1
+ttl_symlink_rc=$?
+set -e
+_assert_exit "watcher: planted control symlink is rejected" 1 "$ttl_symlink_rc"
+_assert_file_content "watcher: planted symlink target is untouched" \
+  "victim" "$ttl_symlink_victim/keep"
+rm -f "$ttl_control_a"
+
+: >"$DS_UNSHARE_LOG"
+_upterm_start_ttl_watcher 1 "myses" "$ttl_token_a"
+for ((ttl_attempt = 0; ttl_attempt < 1000; ttl_attempt++)); do
+  [[ -s "$DS_UNSHARE_LOG" ]] && break
+  sleep 0.01
+done
+unshare_calls=$(<"$DS_UNSHARE_LOG")
+_assert_contains "watcher: expiry carries its expected lifecycle token" \
+  "expected=$ttl_token_a expiry=$ttl_token_a args=--unshare myses" "$unshare_calls"
+for ((ttl_attempt = 0; ttl_attempt < 500; ttl_attempt++)); do
+  [[ ! -e "$ttl_control_a" && ! -L "$ttl_control_a" ]] && break
+  sleep 0.01
+done
+_assert_file_missing "watcher: natural expiry removes exact watcher state" \
+  "$ttl_control_a"
+
+ttl_guard_dir=$(_tmpdir)
+ttl_guard_snapshot=$(_upterm_known_hosts_snapshot_file "$ttl_token_b")
+printf 'guard\n' >"$ttl_guard_snapshot"
+ttl_guard_pid=""
+_upterm_current_pid ttl_guard_pid
+_upterm_write_snapshot_owner create starting "$ttl_guard_pid" \
+  "$ttl_token_b" "$ttl_guard_snapshot"
+set +e
+DS_UPTERM_EXPECTED_TOKEN="$ttl_token_a" \
+  _upterm_share_stop_locked "newer" >"$ttl_guard_dir/output" 2>&1
+ttl_guard_rc=$?
+set -e
+_assert_exit "watcher: old-token expiry cannot stop a newer lifecycle" 1 "$ttl_guard_rc"
+_upterm_read_snapshot_owner "$(_upterm_known_hosts_owner_file)"
+_assert_eq "watcher: newer lifecycle token remains owned" \
+  "$ttl_token_b" "$_UPTERM_SNAPSHOT_TOKEN"
+rm -f "$(_upterm_known_hosts_owner_file)" "$ttl_guard_snapshot"
 
 # --- TTL=0 disables the watcher ---
 DS_UPTERM_SHARE_TTL="0"
@@ -851,16 +4841,9 @@ DS_SHARE_INFO_FILE="$(_default_share_info_file)"
 DS_UPTERM_PID_FILE="$(_upterm_pid_file)"
 SESSION="ds" HOST=""
 result=$(_do_share 2>&1) || true
-_assert_file_missing "ttl=0: no ttl pid file created" "$(_upterm_ttl_pid_file)"
 _assert_not_contains "ttl=0: no auto-expire message" "auto-expire" "$result"
-# Clean up share state
-_pid_f=$(_upterm_pid_file)
-if [[ -f "$_pid_f" ]]; then
-  _pid=$(cat "$_pid_f" 2>/dev/null || true)
-  if [[ "$_pid" =~ ^[0-9]+$ ]]; then kill "$_pid" 2>/dev/null || true; fi
-  rm -f "$_pid_f"
-fi
-rm -f "$DS_SHARE_INFO_FILE" "$(_upterm_admin_file)" "$(_upterm_session_file)" "$(_upterm_log_file)"
+# Clean up share state through the token-owning lifecycle path.
+_share_stop "ds" >/dev/null 2>&1 || true
 
 # --- TTL>0 creates watcher on successful share ---
 # Note: _do_share must NOT be captured in $() because the mock upterm starts
@@ -880,34 +4863,42 @@ DS_UPTERM_PID_FILE="$(_upterm_pid_file)"
 SESSION="ds" HOST=""
 _do_share >"$_share_out" 2>&1 || true
 result=$(cat "$_share_out")
-_assert_file_exists "ttl>0: ttl pid file created on share" "$(_upterm_ttl_pid_file)"
 _assert_contains "ttl>0: auto-expire message shown" "auto-expire" "$result"
-share_watcher_pid=$(cat "$(_upterm_ttl_pid_file)" 2>/dev/null || true)
+_upterm_read_snapshot_owner "$(_upterm_known_hosts_owner_file)"
+share_watcher_token="$_UPTERM_SNAPSHOT_TOKEN"
+share_watcher_control=$(_upterm_ttl_control_dir "$share_watcher_token")
+_assert_file_exists "ttl>0: token-scoped watcher created on share" \
+  "$share_watcher_control/watcher"
+share_watcher_pid=""
+share_watcher_identity=""
+share_watcher_state_token=""
+_upterm_read_pid_file "$share_watcher_control/watcher" \
+  share_watcher_pid share_watcher_identity share_watcher_state_token
+_assert_eq "ttl>0: watcher state matches the active lifecycle token" \
+  "$share_watcher_token" "$share_watcher_state_token"
+if _upterm_ttl_watcher_matches \
+  "$share_watcher_pid" "$share_watcher_identity" "$share_watcher_token"; then
+  _pass "ttl>0: watcher state names the exact live watcher"
+else
+  _fail "ttl>0: watcher state does not name the exact live watcher"
+fi
 
 # --- _share_stop cancels the watcher ---
 SESSION="ds" HOST=""
 _do_unshare 2>&1 || true
-_assert_file_missing "unshare: ttl pid file removed" "$(_upterm_ttl_pid_file)"
+_assert_file_missing "unshare: exact TTL watcher state removed" "$share_watcher_control"
 if [[ "$share_watcher_pid" =~ ^[0-9]+$ ]] && kill -0 "$share_watcher_pid" 2>/dev/null; then
   _fail "unshare: watcher process killed"
 else
   _pass "unshare: watcher process killed"
 fi
 
-# --- TTL fires and calls ds --unshare ---
-DS_UPTERM_SHARE_TTL=""
-: >"$DS_UNSHARE_LOG"
-_upterm_start_ttl_watcher 1 "myses"
-sleep 2
-unshare_calls=$(cat "$DS_UNSHARE_LOG" 2>/dev/null || true)
-_assert_contains "ttl fire: ds --unshare called after TTL" "--unshare myses" "$unshare_calls"
-rm -f "$(_upterm_ttl_pid_file)"
-
 # Reset sharing vars for remaining tmux tests
 # shellcheck disable=SC2034  # sourced helpers read these globals dynamically.
 DS_SHARE_VIA=""
 # shellcheck disable=SC2034  # sourced helpers read these globals dynamically.
 DS_NO_ATTACH=0
+# shellcheck disable=SC2034  # sourced helpers read this global dynamically.
 DS_SHARE_INFO_FILE=""
 DS_UPTERM_PID_FILE=""
 DS_UPTERM_GITHUB_USER=""
@@ -2326,5 +6317,23 @@ desktop        -
 fileserver           autossh
 server1       ssh
 EOF
+
+_test_worktree_leaks=0
+for _test_ledger_entry in "$TEST_PID_LEDGER"/*; do
+  [[ -e "$_test_ledger_entry" ]] || continue
+  _test_leak_pid=${_test_ledger_entry##*/}
+  read -r _test_weekday _test_month _test_day _test_clock _test_year \
+    <"$_test_ledger_entry"
+  _test_leak_identity="$_test_weekday $_test_month $_test_day $_test_clock $_test_year"
+  _test_pid_still_live "$_test_leak_pid" "$_test_leak_identity" || continue
+  _test_leak_args=$(LC_ALL=C ps -ww -o command= -p "$_test_leak_pid" 2>/dev/null || true)
+  case "$_test_leak_args" in
+    "sleep 86400" | *"ds-test-suite."*"upterm.admin"*"sleep 86400"*)
+      _test_worktree_leaks=$((_test_worktree_leaks + 1))
+      ;;
+  esac
+done
+_assert_eq "test cleanup: no adopted hosted commands or sleep 86400 descendants" \
+  "0" "$_test_worktree_leaks"
 
 _test_summary
