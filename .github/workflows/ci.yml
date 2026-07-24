@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   shell:
-    uses: cgraf78/actions/.github/workflows/shell-ci.yml@7d88c3afa6e51a83e9cfefb0c12f503155e17952
+    uses: cgraf78/actions/.github/workflows/shell-ci.yml@ac5330ce8cc9b5a060a0e21d6ef1a5457c183fb6
     with:
-      profiles: base,shellcheck
+      profiles: base,openssh-netcat-lsof,procps,shellcheck
       test-command: bash tests/ds-ci

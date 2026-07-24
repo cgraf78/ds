@@ -11,6 +11,8 @@ cd "$ROOT_DIR"
 
 shellcheck -x bin/ds
 shellcheck -x lib/plugins/*.sh
-shellcheck -x -P SCRIPTDIR tests/ds-test tests/test-helpers.sh
+# Older distro releases misclassify indirectly invoked test doubles as
+# unreachable; keep every other diagnostic enabled across versions.
+shellcheck -e SC2317 -x -P SCRIPTDIR tests/ds-test tests/test-helpers.sh
 
 bash tests/ds-test

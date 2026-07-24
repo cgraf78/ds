@@ -164,7 +164,7 @@ Config file: `share-upterm.conf` in the configuration directory (env vars
 
 | Config key | Env var | Description |
 |---|---|---|
-| `server` | `DS_UPTERM_HOST` | Server `host:port` (default: `uptermd.upterm.dev:22`) |
+| `server` | `DS_UPTERM_HOST` | Server `host[:port]` or `[IPv6][:port]` (default: `uptermd.upterm.dev:22`) |
 | `known-hosts` | `DS_UPTERM_KNOWN_HOSTS` | Known hosts file for verification |
 | `private-key` | `DS_UPTERM_PRIVATE_KEY` | SSH private key (auto-detected if unset) |
 | `github-user` | `DS_UPTERM_GITHUB_USER` | Restrict access to a GitHub user |
@@ -175,6 +175,73 @@ Config file: `share-upterm.conf` in the configuration directory (env vars
 
 See `examples/share-upterm.conf` for a template.
 
+When `known-hosts` is configured, DS reserves a unique private mode-`0600`
+snapshot for the start, opens the configured source, and copies only through
+that open descriptor. DS validates through a private regular-file hard link so
+each validation pass gets an independent offset, while leaving a descriptor for
+the same inode untouched for Upterm. This matters on systems where reopening
+`/dev/fd/N` shares `N`'s current offset. Replacing the published snapshot path
+after setup cannot substitute different trust bytes. Concurrent starts cannot
+reuse or remove another start's snapshot, and failed or stopped starts retain
+ownership metadata until cleanup succeeds.
+
+Every Upterm start, including starts without `known-hosts`, holds one random
+lifecycle token from preflight through shutdown. The PID, session, admin, log,
+launch-gate, control, and trust state are bound to that token. A persistent
+token-named supervisor holds a private control channel to the monitor that
+directly parents Upterm. If the supervisor exits or is killed, channel closure
+causes that monitor to stop and reap its own child. `ds --unshare` does not
+signal a PID or process group recovered from a state file. Shutdown publishes a
+`stopping` phase first, and another start remains blocked until the exact prior
+token's cleanup has completed. Mismatched, malformed, or unverifiable state is
+retained with an error rather than being adopted or deleted.
+
+Portable Bash has no macOS-and-Linux equivalent of a parent-death signal. If
+the direct-parent monitor itself is killed abruptly, DS therefore cannot prove
+that the now-unowned Upterm process exited. It retains the complete lifecycle
+and trust state, refuses another share, and does not report a clean stop. The
+state should be removed only after the process has been verified terminated;
+rebooting is the conservative recovery when that cannot be established.
+
+The configured source must be a readable, non-symlink regular file on a
+filesystem controlled by the user. DS checks the pathname before and after
+opening it and rejects detectable unsafe-type changes. Bash cannot request an
+atomic `O_NOFOLLOW` open, so the source path and its containing filesystem
+remain trusted until the private copy completes; a same-authority writer that
+can replace and restore the path or modify the opened inode within that interval
+is outside this shell-only boundary. DS validates private hard links to the
+copied inode, then hands Upterm an untouched descriptor for that inode through
+`/dev/fd`.
+
+DS intentionally accepts a conservative subset of Upterm's `known_hosts`
+parser: blank lines; comments beginning with `#` after optional spaces or tabs;
+plain case-sensitive host patterns with `*`, `?`, and `!`; OpenSSH hashed hosts;
+numeric bracketed ports; the exact `@cert-authority` and `@revoked` markers; and
+key records whose declared type matches a key that the installed `ssh-keygen`
+can parse. Parseable records outside that subset are rejected with their line
+number rather than silently interpreted differently. Keep unrelated records in
+a separate file if another SSH consumer requires a broader grammar.
+
+Supported trust consists of a directly pinned raw `ssh-ed25519` key. RSA pins
+are rejected because `ssh-keyscan` cannot distinguish the RSA-SHA2 algorithms
+Upterm accepts from legacy `ssh-rsa`/SHA-1. DS probes the certificate algorithms
+first, then raw ED25519, and verifies the key Upterm would select. A server
+advertising a host certificate is rejected because a shell-only preflight
+cannot prove Upterm's CA, principal, validity, revocation, and signature checks
+before launch. For the same reason, `@cert-authority` trust and direct
+certificate pins are unsupported; configure the server to present a raw
+ED25519 host key instead.
+
+An `@revoked` record rejects only its exact key and, like Upterm, applies that
+revocation across the file regardless of its host pattern. Missing, malformed,
+unreachable, unsupported, revoked, ambiguous, or mismatched trust fails closed;
+DS never rewrites the trust file from unauthenticated scan output. Review and
+update changed trust out of band.
+
+Server names must use printable ASCII URI host syntax. Use an IDNA/punycode name
+instead of raw non-ASCII text. Malformed authorities are rejected before trust
+checks, state creation, or Upterm launch.
+
 #### Proxy session
 
 When sharing, connecting clients get a plain login shell on the host. From
@@ -184,7 +251,13 @@ resizing your active session.
 
 #### Share TTL
 
-Shares expire automatically after `share-ttl` seconds (default: 1 hour). When the timer fires, `ds --unshare` is called automatically. Running `ds --share` on an already-shared session resets the timer. Set `share-ttl = 0` to disable auto-expiry.
+Shares expire automatically after `share-ttl` seconds (default: 1 hour). Each
+watcher is bound to the lifecycle token it was created for, so an old timer
+cannot stop a replacement share. Reset and shutdown use a private cooperative
+request/acknowledgement rather than signaling a PID recovered from state.
+Malformed or unverifiable watcher state is retained with an error. Running `ds
+--share` on an already-shared session resets the timer. Set `share-ttl = 0` to
+disable auto-expiry.
 
 ## Shell Integration
 
