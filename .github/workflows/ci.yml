@@ -15,5 +15,6 @@ jobs:
   shell:
     uses: cgraf78/actions/.github/workflows/shell-ci.yml@ac5330ce8cc9b5a060a0e21d6ef1a5457c183fb6
     with:
+      matrix-set: full
       profiles: base,openssh-netcat-lsof,procps,shellcheck
       test-command: bash tests/ds-ci
