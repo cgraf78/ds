@@ -13,10 +13,11 @@ permissions:
 
 jobs:
   shell:
-    uses: cgraf78/actions/.github/workflows/shell-ci.yml@663f83780f58f231e810d0c9eca642bbf859353b
+    uses: cgraf78/actions/.github/workflows/shell-ci.yml@e3246b432e347b5c331940d41626cc7bda60b803
     with:
       matrix-set: full
       profiles: base,openssh-netcat-lsof,procps,shellcheck
+      termux-profiles: base,shellcheck
       test-command: bash tests/ds-ci
       termux-command: |-
         shellcheck -x bin/ds
