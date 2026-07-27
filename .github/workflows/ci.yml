@@ -13,8 +13,16 @@ permissions:
 
 jobs:
   shell:
-    uses: cgraf78/actions/.github/workflows/shell-ci.yml@1db322ef8a998a904974d0c81fb94515d1b16973
+    uses: cgraf78/actions/.github/workflows/shell-ci.yml@be8dd5a8da32120f0a97c9a8e30d9b07805c90bc
     with:
       matrix-set: full
       profiles: base,openssh-netcat-lsof,procps,shellcheck
+      termux-profiles: runtime,shellcheck
       test-command: bash tests/ds-ci
+      termux-command: |-
+        echo "Checking ds entrypoint"
+        shellcheck -x bin/ds
+        echo "Checking ds plugins"
+        shellcheck -x lib/plugins/*.sh
+        echo "Running ds help smoke"
+        timeout 30 bash bin/ds --help
