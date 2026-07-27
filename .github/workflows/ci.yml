@@ -20,7 +20,11 @@ jobs:
       termux-profiles: runtime,shellcheck
       test-command: bash tests/ds-ci
       termux-command: |-
+        echo "Checking ds entrypoint"
         shellcheck -x bin/ds
+        echo "Checking ds plugins"
         shellcheck -x lib/plugins/*.sh
+        echo "Checking ds test harness"
         shellcheck -e SC2317 -x -P SCRIPTDIR tests/ds-test tests/test-helpers.sh
-        bash bin/ds --help
+        echo "Running ds help smoke"
+        timeout 30 bash bin/ds --help
