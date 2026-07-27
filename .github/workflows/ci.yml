@@ -18,3 +18,8 @@ jobs:
       matrix-set: full
       profiles: base,openssh-netcat-lsof,procps,shellcheck
       test-command: bash tests/ds-ci
+      termux-command: |-
+        shellcheck -x bin/ds
+        shellcheck -x lib/plugins/*.sh
+        shellcheck -e SC2317 -x -P SCRIPTDIR tests/ds-test tests/test-helpers.sh
+        bash bin/ds --help
