@@ -71,6 +71,19 @@ case "${args[0]:-}" in
             exit 1
         fi
         ;;
+    list-sessions)
+        if [[ -n "${MOCK_TMUX_SESSION_ROWS+x}" ]]; then
+            printf '%s\n' "$MOCK_TMUX_SESSION_ROWS"
+            exit 0
+        fi
+        _session_id="${MOCK_TMUX_SESSION_ID:-}"
+        [[ -n "$_session_id" ]] || _session_id='$1'
+        for _session_name in ${MOCK_SESSIONS:-}; do
+            printf '%s\t%s\t%s\n' "$_session_name" "$_session_id" \
+                "${MOCK_DS_STATUS_LABELS_MARKER:-}"
+        done
+        exit 0
+        ;;
     ls)
         # Render the requested -F format per session so callers that ask for
         # combined fields (e.g. `_do_list`) get real name<TAB>info lines, while a
@@ -138,6 +151,9 @@ case "${args[0]:-}" in
             fi
             exit 0
         fi
+        if [[ " ${args[*]} " != *" -q "* ]]; then
+            exit 1
+        fi
         exit 0
         ;;
     show-options)
@@ -168,7 +184,17 @@ case "${args[0]:-}" in
         fi
         exit 0
         ;;
-    new-session|attach|switch-client|kill-session|rename-window|split-window|new-window|select-window|send-keys|set-hook|set-window-option)
+    set-hook)
+        [[ "${MOCK_TMUX_FAIL_SET_HOOK:-0}" == "1" ]] && exit 7
+        exit 0
+        ;;
+    new-session)
+        if [[ " ${args[*]} " == *" -P "* ]]; then
+            printf '%s\n' "${MOCK_TMUX_NEW_SESSION_ID:-\$1}"
+        fi
+        exit 0
+        ;;
+    attach|switch-client|kill-session|rename-window|split-window|new-window|select-window|send-keys|set-window-option)
         exit 0
         ;;
 esac
@@ -5145,6 +5171,106 @@ _assert_eq "tmux command quoting preserves spaces and quotes" \
 
 echo ""
 echo "=== Session attachment ==="
+
+# The public warm path is invoked frequently from shell navigation. A current
+# status-label marker lets one exact session query serve both existence and
+# reconciliation checks, independent of the number of windows.
+export MOCK_SESSIONS="ds"
+export MOCK_TMUX_SESSION_ROWS=$'ds-old\t$7\t0:$7\nds\t$8\t1:$8'
+unset MOCK_TMUX_LOCAL_STATUS_LEFT MOCK_TMUX_LOCAL_PANE_BORDER_FORMAT
+unset MOCK_TMUX_LOCAL_STATUS_LEFT_SET MOCK_TMUX_LOCAL_PANE_BORDER_FORMAT_SET
+_session_query=$'tmux list-sessions -F #{session_name}\t#{session_id}\t#{@ds_status_labels_version}'
+for _warm_windows in '%1' $'%1\n%2\n%3\n%4\n%5'; do
+  _reset_tmux_log
+  export MOCK_TMUX_WINDOWS="$_warm_windows"
+  HOME="$TEST_HOME" DS_STATE_DIR="$DS_STATE_DIR" DS_SOURCED="" \
+    "$SCRIPT_DIR/../bin/ds" --no-attach ds
+  _warm_log=$(_tmux_log)
+  _assert_eq "warm public no-attach uses one tmux query (${_warm_windows//$'\n'/,})" \
+    "$_session_query" "$_warm_log"
+done
+
+_reset_tmux_log
+export MOCK_TMUX_WINDOWS="%1"
+TMUX="" HOME="$TEST_HOME" DS_STATE_DIR="$DS_STATE_DIR" DS_SOURCED="" \
+  "$SCRIPT_DIR/../bin/ds" ds
+_assert_eq "warm public attach uses one query plus attach" \
+  "$_session_query"$'\ntmux attach -t =ds' "$(_tmux_log)"
+
+# A missing, old, or same-version marker from a replaced tmux session performs
+# reconciliation and publishes the version bound to the current session ID.
+for _legacy_case in missing old session-id; do
+  _reset_tmux_log
+  case "$_legacy_case" in
+    missing)
+      export MOCK_TMUX_SESSION_ROWS=$'ds\t$8\t'
+      ;;
+    old)
+      export MOCK_TMUX_SESSION_ROWS=$'ds\t$8\t0:$8'
+      ;;
+    session-id)
+      export MOCK_TMUX_SESSION_ROWS=$'ds\t$8\t1:$7'
+      ;;
+  esac
+  export MOCK_TMUX_WINDOWS="%1"
+  HOME="$TEST_HOME" DS_STATE_DIR="$DS_STATE_DIR" DS_SOURCED="" \
+    "$SCRIPT_DIR/../bin/ds" --no-attach ds
+  _legacy_log=$(_tmux_log)
+  _assert_contains "legacy labels ($_legacy_case): reconciles pane hook" \
+    "tmux set-hook -t ds $_DS_PANE_BORDER_HOOK" "$_legacy_log"
+  _assert_eq "legacy labels ($_legacy_case): publishes marker last" \
+    "tmux set-option -t =ds @ds_status_labels_version 1:\$8" \
+    "$(tail -n 1 <<<"$_legacy_log")"
+done
+
+# Local options remain authoritative even when a legacy five-window session is
+# reconciled. Every window is inspected, but none of its local values is reset.
+_reset_tmux_log
+export MOCK_TMUX_SESSION_ROWS=$'ds\t$8\t'
+export MOCK_TMUX_WINDOWS=$'%1\n%2\n%3\n%4\n%5'
+export MOCK_TMUX_LOCAL_STATUS_LEFT="[ custom ] "
+export MOCK_TMUX_LOCAL_PANE_BORDER_FORMAT=" custom-pane "
+HOME="$TEST_HOME" DS_STATE_DIR="$DS_STATE_DIR" DS_SOURCED="" \
+  "$SCRIPT_DIR/../bin/ds" --no-attach ds
+_local_override_log=$(_tmux_log)
+_assert_not_contains "legacy labels: preserves local status-left" \
+  "tmux set-option -t ds status-left" "$_local_override_log"
+_assert_not_contains "legacy labels: preserves all local pane borders" \
+  "tmux set-window-option -t %" "$_local_override_log"
+_assert_eq "legacy labels: inspects all five local pane borders" \
+  "10" "$(grep -c '^tmux show-window-options ' <<<"$_local_override_log")"
+_assert_not_contains "legacy labels: every local pane query is quiet" \
+  "tmux show-window-options -t" "$_local_override_log"
+_assert_eq "legacy labels: publishes after preserving local overrides" \
+  "tmux set-option -t =ds @ds_status_labels_version 1:\$8" \
+  "$(tail -n 1 <<<"$_local_override_log")"
+unset MOCK_TMUX_LOCAL_STATUS_LEFT MOCK_TMUX_LOCAL_PANE_BORDER_FORMAT
+
+# A failed reconciliation is advisory for attach behavior but must not claim
+# the session is current. With the marker still absent, the next call retries.
+_reset_tmux_log
+export MOCK_TMUX_WINDOWS="%1"
+export MOCK_TMUX_FAIL_SET_HOOK=1
+TMUX="" HOME="$TEST_HOME" DS_STATE_DIR="$DS_STATE_DIR" DS_SOURCED="" \
+  "$SCRIPT_DIR/../bin/ds" ds
+_failed_label_log=$(_tmux_log)
+_assert_contains "failed labels: still attaches" "tmux attach -t =ds" "$_failed_label_log"
+_assert_not_contains "failed labels: does not publish marker" \
+  "tmux set-option -t =ds @ds_status_labels_version" "$_failed_label_log"
+
+_reset_tmux_log
+unset MOCK_TMUX_FAIL_SET_HOOK
+TMUX="" HOME="$TEST_HOME" DS_STATE_DIR="$DS_STATE_DIR" DS_SOURCED="" \
+  "$SCRIPT_DIR/../bin/ds" ds
+_retry_label_log=$(_tmux_log)
+_assert_contains "failed labels: next call retries reconciliation" \
+  "tmux set-hook -t ds $_DS_PANE_BORDER_HOOK" "$_retry_label_log"
+_assert_contains "failed labels: successful retry publishes marker" \
+  "tmux set-option -t =ds @ds_status_labels_version 1:\$8" "$_retry_label_log"
+_assert_eq "failed labels: successful retry still attaches last" \
+  "tmux attach -t =ds" "$(tail -n 1 <<<"$_retry_label_log")"
+
+unset MOCK_TMUX_SESSION_ROWS MOCK_TMUX_WINDOWS
 
 # When session exists, _do_session should attach instead of creating
 _reset_tmux_log

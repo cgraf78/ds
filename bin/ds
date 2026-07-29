@@ -96,6 +96,9 @@ _DS_SHARE_BACKEND_GLOB='share-*.sh'
 _DS_HOST_LABEL_FORMAT='#{?@hostname_alias,#{@hostname_alias},#{host_short}}'
 _DS_HOST_LABEL_SEPARATOR=':'
 _DS_PANE_BORDER_HOOK='after-new-window[99]'
+# Bump when DS-owned label setup changes. Session-local user changes remain
+# authoritative until then instead of being rewritten on every attachment.
+_DS_STATUS_LABELS_VERSION='1'
 
 _usage() {
   echo "Usage: ds [session] [@host]          create or attach to a session"
@@ -572,41 +575,69 @@ _tmux_command_quote() {
 
 _set_status_labels() {
   local session="$1"
-  local pane_border pane_border_cleaned status_left window window_border
+  local pane_border pane_border_cleaned status_left window window_border windows
+  local option_rc rc=0
 
-  if ! _session_option_set "$session" status-left; then
-    status_left=$(tmux show-options -gqv status-left 2>/dev/null || true)
-    tmux set-option -t "$session" status-left "$(_status_left_with_host "$status_left")"
+  _session_option_set "$session" status-left
+  option_rc=$?
+  if [[ "$option_rc" -ne 0 ]]; then
+    [[ "$option_rc" -eq 1 ]] || rc=1
+    if ! status_left=$(tmux show-options -gqv status-left 2>/dev/null); then
+      status_left=""
+      rc=1
+    fi
+    tmux set-option -t "$session" status-left \
+      "$(_status_left_with_host "$status_left")" || rc=1
   fi
 
-  pane_border=$(tmux show-options -gqv pane-border-format 2>/dev/null || true)
+  if ! pane_border=$(tmux show-options -gqv pane-border-format 2>/dev/null); then
+    pane_border=""
+    rc=1
+  fi
   pane_border_cleaned="$(_pane_border_without_host "$pane_border")"
   if [[ "$pane_border" != "$pane_border_cleaned" ]]; then
     tmux set-hook -t "$session" "$_DS_PANE_BORDER_HOOK" \
-      "set-window-option pane-border-format $(_tmux_command_quote "$pane_border_cleaned")"
+      "set-window-option pane-border-format $(_tmux_command_quote "$pane_border_cleaned")" || rc=1
+    if ! windows=$(tmux list-windows -t "$session" -F '#{window_id}' 2>/dev/null); then
+      windows=""
+      rc=1
+    fi
     while IFS= read -r window; do
       [[ -n "$window" ]] || continue
-      if _window_option_set "$window" pane-border-format; then
-        window_border=$(tmux show-window-options -v -t "$window" pane-border-format 2>/dev/null || true)
+      _window_option_set "$window" pane-border-format
+      option_rc=$?
+      if [[ "$option_rc" -eq 0 ]]; then
+        if ! window_border=$(tmux show-window-options -v -t "$window" pane-border-format 2>/dev/null); then
+          rc=1
+          continue
+        fi
         [[ "$(_pane_border_without_host "$window_border")" != "$window_border" ]] || continue
+      elif [[ "$option_rc" -ne 1 ]]; then
+        rc=1
       fi
-      tmux set-window-option -t "$window" pane-border-format "$pane_border_cleaned"
-    done < <(tmux list-windows -t "$session" -F '#{window_id}' 2>/dev/null || true)
+      tmux set-window-option -t "$window" pane-border-format "$pane_border_cleaned" || rc=1
+    done <<<"$windows"
   fi
+
+  return "$rc"
 }
 
 _session_option_set() {
   local session="$1"
   local option="$2"
+  local value
 
-  [[ -n "$(tmux show-options -t "$session" -q "$option" 2>/dev/null)" ]]
+  value=$(tmux show-options -t "$session" -q "$option" 2>/dev/null) || return 2
+  [[ -n "$value" ]]
 }
 
 _window_option_set() {
   local window="$1"
   local option="$2"
+  local value
 
-  [[ -n "$(tmux show-window-options -t "$window" "$option" 2>/dev/null)" ]]
+  value=$(tmux show-window-options -q -t "$window" "$option" 2>/dev/null) || return 2
+  [[ -n "$value" ]]
 }
 
 # --- Session resolution helpers ---
@@ -761,9 +792,24 @@ _do_unshare() {
 }
 
 _do_session() {
-  # Attach if session already exists (= prefix for exact match)
-  if tmux has-session -t "=$SESSION" 2>/dev/null; then
-    _set_status_labels "$SESSION"
+  # One compatibility-safe query provides existence, identity, and the
+  # reconciliation marker without adding work per window on the warm path.
+  local marker name session_id sessions
+  sessions=$(tmux list-sessions -F $'#{session_name}\t#{session_id}\t#{@ds_status_labels_version}' \
+    2>/dev/null) || sessions=""
+  while IFS=$'\t' read -r name session_id marker; do
+    [[ "$name" == "$SESSION" ]] && break
+    session_id=""
+  done <<<"$sessions"
+
+  if [[ -n "$session_id" ]]; then
+    if [[ "$marker" != "$_DS_STATUS_LABELS_VERSION:$session_id" ]]; then
+      if _set_status_labels "$SESSION"; then
+        # Publish last: a failed setup stays unmarked and retries next time.
+        tmux set-option -t "=$SESSION" @ds_status_labels_version \
+          "$_DS_STATUS_LABELS_VERSION:$session_id" || true
+      fi
+    fi
     if [[ -n "${DS_SHARE_VIA:-}" ]]; then
       _share_start "$SESSION"
     fi
@@ -777,11 +823,14 @@ _do_session() {
   local shell_name shell_cmd
   shell_name="$(_shell_name)"
   shell_cmd="$(_shell_login_cmd)"
-  tmux new-session -d -s "$SESSION" "$shell_cmd"
+  session_id=$(tmux new-session -d -s "$SESSION" -P -F '#{session_id}' "$shell_cmd")
   tmux set-environment -t "$SESSION" DS_MANAGED 1
   tmux set-environment -t "$SESSION" DS_SHELL_NAME "$shell_name"
   tmux set-option -t "$SESSION" default-command "$shell_cmd"
-  _set_status_labels "$SESSION"
+  if [[ -n "$session_id" ]] && _set_status_labels "$SESSION"; then
+    tmux set-option -t "=$SESSION" @ds_status_labels_version \
+      "$_DS_STATUS_LABELS_VERSION:$session_id" || true
+  fi
   "_profile_$PROFILE" "$SESSION"
   if [[ -n "${DS_SHARE_VIA:-}" ]]; then
     _share_start "$SESSION"
@@ -1287,10 +1336,9 @@ case "$ACTION" in
     if [[ -n "$HOST" ]]; then
       # Remote: skip local profile resolution — the remote ds handles it
       :
-    elif [[ -n "$SESSION" ]] && tmux has-session -t "=$SESSION" 2>/dev/null; then
-      # Existing local session: attach directly (no profile needed)
-      PROFILE=""
     else
+      # Existing sessions ignore PROFILE in _do_session. Resolving here avoids a
+      # separate tmux preflight before its authoritative exact session query.
       _resolve_profile
     fi
     ;;
