@@ -258,6 +258,13 @@ if [[ "$1" == "host" ]]; then
     hosted_pid=$!
     _mock_upterm_record_pid() {
       local recorded_pid="$1" weekday month day clock year extra temporary
+      # Exercise a child exiting between the ps snapshot and identity capture.
+      if [[ "$recorded_pid" != "$hosted_pid" &&
+        -n "${MOCK_UPTERM_CHILD_RECORD_RACE_FILE:-}" &&
+        ! -e "$MOCK_UPTERM_CHILD_RECORD_RACE_FILE" ]]; then
+        : >"$MOCK_UPTERM_CHILD_RECORD_RACE_FILE"
+        return 1
+      fi
       if [[ -n "${DS_TEST_PID_LEDGER:-}" && -d "$DS_TEST_PID_LEDGER" &&
         ! -L "$DS_TEST_PID_LEDGER" ]]; then
         read -r weekday month day clock year extra \
@@ -281,15 +288,19 @@ if [[ "$1" == "host" ]]; then
     hosted_child=""
     hosted_deadline=$((SECONDS + 10))
     while ((SECONDS < hosted_deadline)); do
+      # Hosted setup runs short-lived commands before its persistent sleep.
+      # A stale child snapshot is retryable; the deadline still fails closed.
       while read -r child parent; do
         [[ "$child" =~ ^[0-9]+$ && "$parent" == "$hosted_pid" ]] || continue
-        hosted_child="$child"
-        break
+        if _mock_upterm_record_pid "$child"; then
+          hosted_child="$child"
+          break
+        fi
       done < <(ps -axo pid=,ppid=)
       [[ -z "$hosted_child" ]] || break
       sleep 0.01
     done
-    if [[ -z "$hosted_child" ]] || ! _mock_upterm_record_pid "$hosted_child"; then
+    if [[ -z "$hosted_child" ]]; then
       kill -KILL "$hosted_pid" 2>/dev/null || true
       wait "$hosted_pid" 2>/dev/null || true
       exit 1
@@ -3794,11 +3805,13 @@ MOCK
     supervisor_death_child_file="$lifecycle_dir/supervisor-death-child"
     supervisor_death_hosted_file="$lifecycle_dir/supervisor-death-hosted"
     supervisor_death_term_file="$lifecycle_dir/supervisor-death-term"
+    supervisor_death_record_race="$lifecycle_dir/supervisor-death-record-race"
     DS_UPTERM_HOST="uptermd.upterm.dev:22"
     export MOCK_UPTERM_PID_FILE="$supervisor_death_child_file"
     export MOCK_UPTERM_HOSTED_PID_FILE="$supervisor_death_hosted_file"
     export MOCK_UPTERM_IGNORE_TERM=1
     export MOCK_UPTERM_TERM_FILE="$supervisor_death_term_file"
+    export MOCK_UPTERM_CHILD_RECORD_RACE_FILE="$supervisor_death_record_race"
     MOCK_UPTERM_SLEEP=30 DS_UPTERM_KNOWN_HOSTS="" \
       _share_start "supervisor-death-a" >/dev/null
     _upterm_read_snapshot_owner "$lifecycle_snapshot_owner"
@@ -3812,6 +3825,8 @@ MOCK
     done
     _assert_file_exists "host key: production supervisor launches the Upterm child" \
       "$supervisor_death_child_file"
+    _assert_file_exists "host key: hosted-child fixture exercises a record race" \
+      "$supervisor_death_record_race"
     _assert_file_exists "host key: supervisor-death fixture records its hosted child" \
       "$supervisor_death_hosted_file"
     supervisor_death_child=$(<"$supervisor_death_child_file")
@@ -3825,7 +3840,8 @@ MOCK
     _assert_file_exists "host key: orphan monitor begins condition-based child shutdown" \
       "$supervisor_death_term_file"
     unset MOCK_UPTERM_PID_FILE MOCK_UPTERM_HOSTED_PID_FILE \
-      MOCK_UPTERM_IGNORE_TERM MOCK_UPTERM_TERM_FILE
+      MOCK_UPTERM_IGNORE_TERM MOCK_UPTERM_TERM_FILE \
+      MOCK_UPTERM_CHILD_RECORD_RACE_FILE
     set +e
     DS_UPTERM_KNOWN_HOSTS="" \
       _share_start "supervisor-death-b" \
