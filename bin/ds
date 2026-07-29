@@ -421,6 +421,7 @@ _state_file_prefix() {
 #   _share_running             return 0 if sharing is active
 #   _share_current_session     print name of shared session
 #   _share_load_config         load backend-specific config
+#   _share_obviously_inactive  optional cheap predicate for read-only listing
 
 _write_share_info() {
   local content="$1"
@@ -459,10 +460,12 @@ _load_share_backend() {
 _share_running() { return 1; }
 _share_current_session() { :; }
 _share_load_config() { :; }
+_share_obviously_inactive() { return 1; }
 _share_reset_stubs() {
   _share_running() { return 1; }
   _share_current_session() { :; }
   _share_load_config() { :; }
+  _share_obviously_inactive() { return 1; }
 }
 
 # --- Tmux helpers ---
@@ -660,7 +663,7 @@ _resolve_profile() {
 
 _do_list() {
   local shared_session=""
-  if _share_running; then
+  if ! _share_obviously_inactive && _share_running; then
     shared_session=$(_share_current_session)
   fi
   # Fetch name + window/attach info for every session in ONE call. Re-running
@@ -1228,6 +1231,13 @@ elif [[ "$ACTION" == "share" || "$ACTION" == "unshare" || "$ACTION" == "list" ||
     _sbn="${_sbn%.sh}"
     # shellcheck source=/dev/null
     . "$_sb"
+    # Listing only annotates a shared session. A stable no-evidence observation
+    # may omit an annotation for a concurrently starting share; mutating actions
+    # always retain the backend's exact locked lifecycle probe.
+    if [[ "$ACTION" == "list" ]] && _share_obviously_inactive; then
+      _share_reset_stubs
+      continue
+    fi
     if _share_running 2>/dev/null; then
       DS_SHARE_VIA="$_sbn"
       _share_load_config

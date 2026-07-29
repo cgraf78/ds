@@ -2543,6 +2543,32 @@ _upterm_share_running_locked() {
   return 0
 }
 
+_upterm_has_lifecycle_evidence() {
+  local state_prefix="$DS_STATE_DIR/ds"
+  local pid_file="${DS_UPTERM_PID_FILE:-${state_prefix}.upterm.pid}"
+  local owner_file="${state_prefix}.upterm.known_hosts.owner"
+  local candidate
+
+  for candidate in \
+    "$pid_file" \
+    "$owner_file" \
+    "${state_prefix}.upterm.operation.lock"; do
+    [[ -e "$candidate" || -L "$candidate" ]] && return 0
+  done
+  for candidate in \
+    "${owner_file}."*.*.*.new \
+    "${state_prefix}.upterm.launch."* \
+    "${state_prefix}.upterm.control."* \
+    "${state_prefix}.upterm.ttl."*; do
+    [[ -e "$candidate" || -L "$candidate" ]] && return 0
+  done
+  return 1
+}
+
+_share_obviously_inactive() {
+  ! _upterm_has_lifecycle_evidence
+}
+
 _share_running() {
   local operation_token="" running_status
   if ! _upterm_acquire_operation_lock operation_token; then
