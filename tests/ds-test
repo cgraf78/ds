@@ -1244,6 +1244,143 @@ else
   _pass "share_running: rejects missing PID file"
 fi
 
+echo ""
+echo "=== Inactive Upterm share probe ==="
+
+inactive_probe_saved_state_dir="$DS_STATE_DIR"
+inactive_probe_saved_pid_file="$DS_UPTERM_PID_FILE"
+inactive_probe_saved_share_info="$DS_SHARE_INFO_FILE"
+inactive_probe_root=$(_tmpdir)
+inactive_probe_state="$inactive_probe_root/state"
+inactive_probe_calls="$inactive_probe_root/calls"
+inactive_probe_bin="$inactive_probe_root/bin"
+inactive_probe_home="$inactive_probe_root/home"
+inactive_probe_e2e_state="$inactive_probe_root/e2e-state"
+inactive_probe_e2e_calls="$inactive_probe_root/e2e-calls"
+command mkdir -p "$inactive_probe_state" "$inactive_probe_bin" \
+  "$inactive_probe_home" "$inactive_probe_e2e_state"
+cat >"$inactive_probe_bin/probe" <<'MOCK'
+#!/usr/bin/env bash
+tool=${0##*/}
+printf '%s %s\n' "$tool" "$*" >>"$DS_TEST_INACTIVE_PROBE_CALLS"
+case "$tool" in
+  ps) exec "$DS_TEST_REAL_PS" "$@" ;;
+  od) exec "$DS_TEST_REAL_OD" "$@" ;;
+  mkdir) exec "$DS_TEST_REAL_MKDIR" "$@" ;;
+esac
+exit 127
+MOCK
+chmod +x "$inactive_probe_bin/probe"
+for inactive_probe_tool in ps od mkdir; do
+  ln -s probe "$inactive_probe_bin/$inactive_probe_tool"
+done
+DS_STATE_DIR="$inactive_probe_state"
+DS_UPTERM_PID_FILE="$inactive_probe_state/upterm.pid"
+DS_SHARE_INFO_FILE="$inactive_probe_state/share-info"
+
+# `_share_running` is also used before destructive actions, so even an empty
+# state retains the exact lifecycle lock and process-identity protocol.
+: >"$inactive_probe_calls"
+export DS_TEST_INACTIVE_PROBE_CALLS="$inactive_probe_calls"
+DS_TEST_REAL_PS="$(type -P ps)"
+DS_TEST_REAL_OD="$(type -P od)"
+DS_TEST_REAL_MKDIR="$(type -P mkdir)"
+export DS_TEST_REAL_PS DS_TEST_REAL_OD DS_TEST_REAL_MKDIR
+set +e
+PATH="$inactive_probe_bin:$PATH" _share_running >/dev/null 2>&1
+inactive_probe_rc=$?
+set -e
+_assert_exit "share_running: empty state reports inactive" 1 "$inactive_probe_rc"
+_assert_contains "share_running: empty state retains process identity verification" \
+  "ps -o lstart=" "$(cat "$inactive_probe_calls")"
+_assert_contains "share_running: empty state retains random lock ownership" \
+  "od -An -N16 -tx1 /dev/urandom" "$(cat "$inactive_probe_calls")"
+_assert_contains "share_running: empty state retains lifecycle locking" \
+  ".upterm.operation.lock" "$(cat "$inactive_probe_calls")"
+
+# End-to-end list auto-detection must preserve the same process topology. Core
+# startup may create the state directory, so assert specifically that Upterm
+# never invokes ps/od or creates its operation lock.
+export MOCK_TMUX_LS=ds MOCK_DS_MANAGED=ds
+_run_inactive_probe_list() {
+  : >"$inactive_probe_e2e_calls"
+  set +e
+  inactive_probe_e2e_output=$(
+    HOME="$inactive_probe_home" \
+      XDG_CONFIG_HOME="$inactive_probe_home/config" \
+      DS_STATE_DIR="$inactive_probe_e2e_state" \
+      DS_UPTERM_PID_FILE="${inactive_probe_e2e_pid_file:-}" \
+      DS_SHARE_INFO_FILE="" \
+      DS_LIB_DIR="$SCRIPT_DIR/../lib/plugins" \
+      DS_SOURCED="" \
+      TMUX_LOG="$TMUX_LOG" \
+      DS_TEST_INACTIVE_PROBE_CALLS="$inactive_probe_e2e_calls" \
+      DS_TEST_REAL_PS="$(type -P ps)" \
+      DS_TEST_REAL_OD="$(type -P od)" \
+      DS_TEST_REAL_MKDIR="$(type -P mkdir)" \
+      PATH="$inactive_probe_bin:$MOCK_BIN:$PATH" \
+      bash "$SCRIPT_DIR/../bin/ds" -l 2>&1
+  )
+  inactive_probe_e2e_rc=$?
+  set -e
+}
+inactive_probe_e2e_pid_file=""
+_run_inactive_probe_list
+_assert_exit "list: empty Upterm state succeeds" 0 "$inactive_probe_e2e_rc"
+_assert_contains "list: empty Upterm state retains managed sessions" \
+  "ds: 3 windows (detached)" "$inactive_probe_e2e_output"
+_assert_eq "list: empty Upterm state performs no process identity probe" \
+  "" "$(grep -E '^(ps|od) ' "$inactive_probe_e2e_calls" || true)"
+_assert_not_contains "list: empty Upterm state creates no lifecycle lock" \
+  ".upterm.operation.lock" "$(cat "$inactive_probe_e2e_calls")"
+
+# Every lifecycle artifact remains fail-closed during list auto-detection: even
+# malformed or orphaned evidence must enter `_share_running` and its exact
+# locked reconciliation path.
+for inactive_probe_evidence in pid owner owner-temp operation-lock launch control ttl; do
+  inactive_probe_e2e_state=$(_tmpdir)
+  inactive_probe_e2e_pid_file=""
+  inactive_probe_prefix="$inactive_probe_e2e_state/ds"
+  inactive_probe_owner="${inactive_probe_prefix}.upterm.known_hosts.owner"
+  case "$inactive_probe_evidence" in
+    pid)
+      inactive_probe_e2e_pid_file="$inactive_probe_e2e_state/custom-upterm.pid"
+      printf 'malformed\n' >"$inactive_probe_e2e_pid_file"
+      ;;
+    owner)
+      ln -s missing-owner "$inactive_probe_owner"
+      ;;
+    owner-temp)
+      : >"${inactive_probe_owner}.bad.bad.bad.new"
+      ;;
+    operation-lock)
+      ln -s missing-lock "${inactive_probe_prefix}.upterm.operation.lock"
+      ;;
+    launch)
+      : >"${inactive_probe_prefix}.upterm.launch.bad-token"
+      ;;
+    control)
+      command mkdir "${inactive_probe_prefix}.upterm.control.bad-token"
+      ;;
+    ttl)
+      command mkdir "${inactive_probe_prefix}.upterm.ttl.bad-token"
+      ;;
+  esac
+  _run_inactive_probe_list
+  _assert_exit "list: $inactive_probe_evidence evidence preserves output" \
+    0 "$inactive_probe_e2e_rc"
+  _assert_contains \
+    "list: $inactive_probe_evidence evidence uses locked reconciliation" \
+    "ps -o lstart=" "$(cat "$inactive_probe_e2e_calls")"
+done
+
+DS_STATE_DIR="$inactive_probe_saved_state_dir"
+DS_UPTERM_PID_FILE="$inactive_probe_saved_pid_file"
+DS_SHARE_INFO_FILE="$inactive_probe_saved_share_info"
+unset inactive_probe_tool inactive_probe_evidence MOCK_TMUX_LS MOCK_DS_MANAGED
+unset DS_TEST_INACTIVE_PROBE_CALLS DS_TEST_REAL_PS DS_TEST_REAL_OD
+unset DS_TEST_REAL_MKDIR
+
 # Test _share_load_config reads share-upterm.conf
 cat >"$CONF_DIR/share-upterm.conf" <<'EOF'
 # test config
