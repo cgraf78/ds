@@ -78,9 +78,14 @@ case "${args[0]:-}" in
         fi
         _session_id="${MOCK_TMUX_SESSION_ID:-}"
         [[ -n "$_session_id" ]] || _session_id='$1'
+        _status_marker="${MOCK_DS_STATUS_LABELS_MARKER:-}"
+        if [[ -n "${MOCK_DS_STATUS_LABELS_STATE_FILE:-}" &&
+            -f "$MOCK_DS_STATUS_LABELS_STATE_FILE" ]]; then
+            _status_marker=$(<"$MOCK_DS_STATUS_LABELS_STATE_FILE")
+        fi
         for _session_name in ${MOCK_SESSIONS:-}; do
             printf '%s\t%s\t%s\n' "$_session_name" "$_session_id" \
-                "${MOCK_DS_STATUS_LABELS_MARKER:-}"
+                "$_status_marker"
         done
         exit 0
         ;;
@@ -186,6 +191,14 @@ case "${args[0]:-}" in
         ;;
     set-hook)
         [[ "${MOCK_TMUX_FAIL_SET_HOOK:-0}" == "1" ]] && exit 7
+        exit 0
+        ;;
+    set-option)
+        if [[ "${args[3]:-}" == "@ds_status_labels_version" &&
+            -n "${MOCK_DS_STATUS_LABELS_STATE_FILE:-}" ]]; then
+            [[ "${args[2]:-}" == "${MOCK_TMUX_SESSION_ID:-}" ]] || exit 1
+            printf '%s\n' "${args[4]:-}" >"$MOCK_DS_STATUS_LABELS_STATE_FILE"
+        fi
         exit 0
         ;;
     new-session)
@@ -5105,6 +5118,8 @@ _do_session
 log=$(_tmux_log)
 _assert_contains "default → session 'ds'" "new-session -d -s ds" "$log"
 _assert_contains "tags session with DS_MANAGED" "set-environment -t ds DS_MANAGED 1" "$log"
+_assert_contains "new session publishes status marker by session ID" \
+  "set-option -t \$1 @ds_status_labels_version $_DS_STATUS_LABELS_VERSION:\$1" "$log"
 _assert_contains "display label includes host and session" \
   "set-option -t ds status-left [ $_DS_HOST_LABEL_FORMAT$_DS_HOST_LABEL_SEPARATOR#S ]" "$log"
 _assert_contains "pane title hook keeps future windows host-free" \
@@ -5232,7 +5247,7 @@ for _legacy_case in missing old session-id; do
   _assert_contains "legacy labels ($_legacy_case): reconciles pane hook" \
     "tmux set-hook -t ds $_DS_PANE_BORDER_HOOK" "$_legacy_log"
   _assert_eq "legacy labels ($_legacy_case): publishes marker last" \
-    "tmux set-option -t =ds @ds_status_labels_version 1:\$8" \
+    "tmux set-option -t \$8 @ds_status_labels_version 1:\$8" \
     "$(tail -n 1 <<<"$_legacy_log")"
 done
 
@@ -5255,7 +5270,7 @@ _assert_eq "legacy labels: inspects all five local pane borders" \
 _assert_not_contains "legacy labels: every local pane query is quiet" \
   "tmux show-window-options -t" "$_local_override_log"
 _assert_eq "legacy labels: publishes after preserving local overrides" \
-  "tmux set-option -t =ds @ds_status_labels_version 1:\$8" \
+  "tmux set-option -t \$8 @ds_status_labels_version 1:\$8" \
   "$(tail -n 1 <<<"$_local_override_log")"
 unset MOCK_TMUX_LOCAL_STATUS_LEFT MOCK_TMUX_LOCAL_PANE_BORDER_FORMAT
 
@@ -5269,7 +5284,7 @@ TMUX="" HOME="$TEST_HOME" DS_STATE_DIR="$DS_STATE_DIR" DS_SOURCED="" \
 _failed_label_log=$(_tmux_log)
 _assert_contains "failed labels: still attaches" "tmux attach -t =ds" "$_failed_label_log"
 _assert_not_contains "failed labels: does not publish marker" \
-  "tmux set-option -t =ds @ds_status_labels_version" "$_failed_label_log"
+  "tmux set-option -t \$8 @ds_status_labels_version" "$_failed_label_log"
 
 _reset_tmux_log
 unset MOCK_TMUX_FAIL_SET_HOOK
@@ -5279,9 +5294,27 @@ _retry_label_log=$(_tmux_log)
 _assert_contains "failed labels: next call retries reconciliation" \
   "tmux set-hook -t ds $_DS_PANE_BORDER_HOOK" "$_retry_label_log"
 _assert_contains "failed labels: successful retry publishes marker" \
-  "tmux set-option -t =ds @ds_status_labels_version 1:\$8" "$_retry_label_log"
+  "tmux set-option -t \$8 @ds_status_labels_version 1:\$8" "$_retry_label_log"
 _assert_eq "failed labels: successful retry still attaches last" \
   "tmux attach -t =ds" "$(tail -n 1 <<<"$_retry_label_log")"
+
+# Persist the mock marker like tmux does. The first call repairs a legacy
+# session; the second must observe the published marker and take the warm path.
+_marker_state=$(_tmpdir)/status-labels-marker
+export MOCK_DS_STATUS_LABELS_STATE_FILE="$_marker_state"
+export MOCK_TMUX_SESSION_ID="\$8"
+export MOCK_SESSIONS="ds"
+unset MOCK_TMUX_SESSION_ROWS
+HOME="$TEST_HOME" DS_STATE_DIR="$DS_STATE_DIR" DS_SOURCED="" \
+  "$SCRIPT_DIR/../bin/ds" --no-attach ds
+_assert_eq "status marker: successful reconciliation persists by session ID" \
+  "$_DS_STATUS_LABELS_VERSION:\$8" "$(<"$_marker_state")"
+_reset_tmux_log
+HOME="$TEST_HOME" DS_STATE_DIR="$DS_STATE_DIR" DS_SOURCED="" \
+  "$SCRIPT_DIR/../bin/ds" --no-attach ds
+_assert_eq "status marker: persisted state enables the next warm path" \
+  "$_session_query" "$(_tmux_log)"
+unset MOCK_DS_STATUS_LABELS_STATE_FILE MOCK_TMUX_SESSION_ID MOCK_SESSIONS
 
 unset MOCK_TMUX_SESSION_ROWS MOCK_TMUX_WINDOWS
 
