@@ -3700,7 +3700,6 @@ MOCK
     _track_test_tree "$gate_death_job"
     kill -KILL "$gate_death_job" 2>/dev/null || true
     wait "$gate_death_job" 2>/dev/null || true
-    _share_stop "publisher-death-before-gate" >/dev/null
     if _wait_for_test_pid_exit \
       "$gate_death_child" "$gate_death_child_identity"; then
       _pass "host key: gated child is stopped after publisher dies before gate"
@@ -3708,6 +3707,7 @@ MOCK
       _fail "host key: gated child is stopped after publisher dies before gate"
       kill "$gate_death_child" 2>/dev/null || true
     fi
+    _share_stop "publisher-death-before-gate" >/dev/null
     _assert_file_missing "host key: publisher death before gate never execs child" \
       "$gate_death_exec"
     _assert_file_missing "host key: publisher death before gate removes PID state" \
@@ -3791,8 +3791,10 @@ MOCK
     _upterm_read_snapshot_owner "$lifecycle_snapshot_owner"
     supervisor_death_token="$_UPTERM_SNAPSHOT_TOKEN"
     supervisor_death_pid="$_UPTERM_SNAPSHOT_PID"
-    for ((supervisor_death_attempt = 0; supervisor_death_attempt < 500; supervisor_death_attempt++)); do
-      [[ -s "$supervisor_death_child_file" ]] && break
+    supervisor_death_fixture_deadline=$((SECONDS + 15))
+    while ((SECONDS < supervisor_death_fixture_deadline)); do
+      [[ -s "$supervisor_death_child_file" &&
+        -s "$supervisor_death_hosted_file" ]] && break
       sleep 0.01
     done
     _assert_file_exists "host key: production supervisor launches the Upterm child" \
@@ -3863,6 +3865,21 @@ MOCK
     MOCK_UPTERM_SLEEP=30 DS_UPTERM_KNOWN_HOSTS="" \
       _share_start "monitor-death-a" >/dev/null
     unset MOCK_UPTERM_PID_FILE MOCK_UPTERM_HOSTED_PID_FILE
+    # The admin socket makes the start observable before the mock has finished
+    # publishing its process bookkeeping. Kill the monitor only after the
+    # fixture is fully ready so this test exercises monitor death, not launch.
+    monitor_death_fixture_deadline=$((SECONDS + 15))
+    while ((SECONDS < monitor_death_fixture_deadline)); do
+      [[ -s "$monitor_death_child_file" &&
+        -s "$monitor_death_hosted_file" ]] && break
+      sleep 0.01
+    done
+    _assert_file_exists "host key: monitor-death fixture records its Upterm child" \
+      "$monitor_death_child_file"
+    _assert_file_exists "host key: monitor-death fixture records its hosted child" \
+      "$monitor_death_hosted_file"
+    monitor_death_child=$(<"$monitor_death_child_file")
+    monitor_death_hosted=$(<"$monitor_death_hosted_file")
     _upterm_read_snapshot_owner "$lifecycle_snapshot_owner"
     monitor_death_token="$_UPTERM_SNAPSHOT_TOKEN"
     monitor_death_supervisor="$_UPTERM_SNAPSHOT_PID"
@@ -3886,10 +3903,6 @@ MOCK
         "$monitor_death_supervisor" "$_UPTERM_SNAPSHOT_IDENTITY" || break
       sleep 0.01
     done
-    _assert_file_exists "host key: monitor-death fixture records its hosted child" \
-      "$monitor_death_hosted_file"
-    monitor_death_child=$(<"$monitor_death_child_file")
-    monitor_death_hosted=$(<"$monitor_death_hosted_file")
     if kill -0 "$monitor_death_child" 2>/dev/null; then
       _pass "host key: monitor SIGKILL leaves the unowned Upterm child observable"
     else
