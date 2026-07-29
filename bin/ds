@@ -803,10 +803,10 @@ _do_session() {
   done <<<"$sessions"
 
   if [[ -n "$session_id" ]]; then
-    if [[ "$marker" != "$_DS_STATUS_LABELS_VERSION:$session_id" ]]; then
+    if [[ -n "$session_id" && "$marker" != "$_DS_STATUS_LABELS_VERSION:$session_id" ]]; then
       if _set_status_labels "$SESSION"; then
         # Publish last: a failed setup stays unmarked and retries next time.
-        tmux set-option -t "=$SESSION" @ds_status_labels_version \
+        tmux set-option -t "$session_id" @ds_status_labels_version \
           "$_DS_STATUS_LABELS_VERSION:$session_id" || true
       fi
     fi
@@ -828,7 +828,7 @@ _do_session() {
   tmux set-environment -t "$SESSION" DS_SHELL_NAME "$shell_name"
   tmux set-option -t "$SESSION" default-command "$shell_cmd"
   if [[ -n "$session_id" ]] && _set_status_labels "$SESSION"; then
-    tmux set-option -t "=$SESSION" @ds_status_labels_version \
+    tmux set-option -t "$session_id" @ds_status_labels_version \
       "$_DS_STATUS_LABELS_VERSION:$session_id" || true
   fi
   "_profile_$PROFILE" "$SESSION"
