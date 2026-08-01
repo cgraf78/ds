@@ -9,13 +9,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 ```bash
-# Run tests
-bash tests/ds-test
-
-# Lint
-shellcheck -x bin/ds
-shellcheck -x lib/plugins/*.sh
-shellcheck -x -P SCRIPTDIR tests/ds-test tests/test-helpers.sh
+# Run the same tests and typed-inventory lint used by CI
+bash tests/ds-ci
 
 # Install locally
 bash install.sh    # installs to ~/.local/bin/ds + ~/.local/lib/ds/plugins/

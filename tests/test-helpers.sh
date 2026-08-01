@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Older ShellCheck releases misclassify test helpers invoked by name.
+# shellcheck disable=SC2317
 # test-helpers.sh — shared test framework for ds tests.
 #
 # Source this file from test scripts to get assertion helpers,
