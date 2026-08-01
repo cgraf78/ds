@@ -13,16 +13,13 @@ permissions:
 
 jobs:
   shell:
-    uses: cgraf78/actions/.github/workflows/shell-ci.yml@d0648a98a1585710edb5d1393af84e48025bcaa7
+    uses: cgraf78/actions/.github/workflows/shell-ci.yml@f9a9074b2d43fb3812067477d29307ef1e84e70e
     with:
       matrix-set: full
-      profiles: base,openssh-netcat-lsof,procps,shellcheck
-      termux-profiles: runtime,shellcheck
-      test-command: bash tests/ds-ci
+      profiles: base,openssh-netcat-lsof,procps
+      shellcheck-inventory-path: .github/shellcheck-files.txt
+      termux-profiles: runtime
+      test-command: DS_SKIP_SHELLCHECK=1 bash tests/ds-ci
       termux-command: |-
-        echo "Checking ds entrypoint"
-        shellcheck -x bin/ds
-        echo "Checking ds plugins"
-        shellcheck -x lib/plugins/*.sh
         echo "Running ds help smoke"
         timeout 30 bash bin/ds --help

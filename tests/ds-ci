@@ -1,18 +1,27 @@
 #!/usr/bin/env bash
 # ds-ci — local entrypoint for the same checks GitHub Actions runs.
 #
-# Keeping the file list here lets the shared reusable workflow stay generic
-# while ds owns the shellcheck paths that define its public and plugin surface.
+# Local runs lint by default. Shared CI delegates lint to its required inventory
+# job and sets DS_SKIP_SHELLCHECK only for the cross-platform behavior matrix.
 
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
-shellcheck -x bin/ds
-shellcheck -x lib/plugins/*.sh
-# Older distro releases misclassify indirectly invoked test doubles as
-# unreachable; keep every other diagnostic enabled across versions.
-shellcheck -e SC2317 -x -P SCRIPTDIR tests/ds-test tests/test-helpers.sh
+if [[ "${DS_SKIP_SHELLCHECK:-0}" != 1 ]]; then
+  shell_files=()
+  while IFS=$'\t' read -r record_type path ||
+    [[ -n "$record_type$path" ]]; do
+    if [[ "$record_type" == program ]]; then
+      shell_files+=("$path")
+    fi
+  done <.github/shellcheck-files.txt
+  ((${#shell_files[@]} > 0)) || {
+    printf 'ds-ci: ShellCheck inventory has no programs\n' >&2
+    exit 1
+  }
+  shellcheck -x -P SCRIPTDIR "${shell_files[@]}"
+fi
 
 bash tests/ds-test
