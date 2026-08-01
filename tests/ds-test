@@ -194,6 +194,10 @@ case "${args[0]:-}" in
         exit 0
         ;;
     show-options)
+        if [[ " ${args[*]} " == *" @ds-resurrect-auto-restore"* ]]; then
+            echo "${MOCK_DS_AUTO_RESTORE:-}"
+            exit 0
+        fi
         if [[ " ${args[*]} " == *" @continuum-restore-max-delay"* ]]; then
             echo "${MOCK_CONTINUUM_RESTORE_MAX_DELAY:-}"
             exit 0
@@ -5353,6 +5357,28 @@ if _resurrect_restore_expected; then
 else
   _fail "resurrect wait: detects a pending saved environment"
 fi
+export MOCK_CONTINUUM_RESTORE=off
+export MOCK_DS_AUTO_RESTORE=on
+if _resurrect_restore_expected; then
+  _pass "resurrect wait: accepts default-server restore ownership"
+else
+  _fail "resurrect wait: accepts default-server restore ownership"
+fi
+touch "$HOME/tmux_no_auto_restore"
+if _resurrect_restore_expected; then
+  _fail "resurrect wait: default ownership still honors the halt file"
+else
+  _pass "resurrect wait: default ownership still honors the halt file"
+fi
+rm "$HOME/tmux_no_auto_restore" "$_resurrect_wait_dir/last"
+if _resurrect_restore_expected; then
+  _fail "resurrect wait: default ownership still requires a snapshot"
+else
+  _pass "resurrect wait: default ownership still requires a snapshot"
+fi
+touch "$_resurrect_wait_dir/last"
+export MOCK_CONTINUUM_RESTORE=on
+unset MOCK_DS_AUTO_RESTORE
 (
   sleep 0.2
   printf '1234567890\n' >"$_resurrect_wait_marker"
@@ -5453,23 +5479,58 @@ export MOCK_SESSIONS="other"
 SESSION="dev"
 PROFILE="dev"
 DS_NO_ATTACH=1
+_runtime_dir=$(_tmpdir)
+export XDG_RUNTIME_DIR="$_runtime_dir"
 _reset_tmux_log
 _do_session
 _concurrent_log=$(_tmux_log)
-if [[ -e "$(_resurrect_startup_lock_dir)" ]]; then
-  _fail "resurrect wait: startup coordinator is always released"
-else
+_lock_base=$(_resurrect_startup_lock_base)
+_assert_eq "resurrect wait: lock uses the reboot-scoped runtime directory" \
+  "$_runtime_dir/ds/resurrect-startup.$(hostname)" "$_lock_base"
+IFS=$'\t' read -r -a _lock_paths < <(_resurrect_startup_lock_paths)
+_lock_current=${_lock_paths[0]}
+_lock_found=0
+for _lock_path in "${_lock_paths[@]}"; do
+  [[ -d "$_lock_path" ]] && _lock_found=1
+done
+if [[ "$_lock_found" == "0" ]]; then
   _pass "resurrect wait: startup coordinator is always released"
+else
+  _fail "resurrect wait: startup coordinator is always released"
 fi
-_lock_path=$(XDG_STATE_HOME=relative _resurrect_startup_lock_dir)
-_assert_eq "resurrect wait: lock uses normalized ds state directory" \
-  "$DS_STATE_DIR/resurrect-startup.$(hostname).lock" "$_lock_path"
-mkdir -p "${_lock_path%/*}"
-printf '%s wrong-process-start\n' "$$" >"$_lock_path"
-_recovered_lock=$(_acquire_resurrect_startup_lock)
-_assert_eq "resurrect wait: recovers a reused owner pid" \
-  "$_lock_path" "$_recovered_lock"
-_release_resurrect_startup_lock "$_recovered_lock"
+mkdir -p "${_lock_base%/*}" "$_lock_current"
+if _acquire_resurrect_startup_lock_with_attempts 1 >/dev/null 2>&1; then
+  _fail "resurrect wait: active generation fails closed"
+else
+  _pass "resurrect wait: active generation fails closed"
+fi
+if [[ -d "$_lock_current" ]]; then
+  _pass "resurrect wait: active generation is not removed"
+else
+  _fail "resurrect wait: active generation is not removed"
+fi
+rmdir "$_lock_current"
+_lock_now=$(_epoch_seconds)
+_old_generation=$((_lock_now / 10 - 5))
+_old_locks=()
+for _lock_offset in 0 1 2 3 4; do
+  _old_lock="$_lock_base.$((_old_generation + _lock_offset))"
+  mkdir "$_old_lock"
+  _old_locks+=("$_old_lock")
+done
+_lock_token=$(_acquire_resurrect_startup_lock_with_attempts 1)
+_release_resurrect_startup_lock "$_lock_token"
+_old_lock_found=1
+for _old_lock in "${_old_locks[@]}"; do
+  [[ -d "$_old_lock" ]] || _old_lock_found=0
+done
+if [[ "$_old_lock_found" == "1" ]]; then
+  _pass "resurrect wait: expired crash residue is ignored"
+else
+  _fail "resurrect wait: expired crash residue is ignored"
+fi
+rmdir "${_old_locks[@]}"
+unset XDG_RUNTIME_DIR
 _concurrent_wait_line=$(awk '/@ds_resurrect_restored_at/ { print NR; exit }' \
   <<<"$_concurrent_log")
 _concurrent_create_line=$(awk '/new-session -d -s dev/ { print NR; exit }' \
@@ -5480,6 +5541,20 @@ if [[ -n "$_concurrent_wait_line" && -n "$_concurrent_create_line" &&
 else
   _fail "resurrect wait: concurrent caller waits before creating a session"
 fi
+
+# A caller for the same bootstrap name must also coordinate. Resurrect replaces
+# the sole placeholder pane when restoring from scratch, so attaching early
+# would hand the caller a pane that is about to be killed.
+printf '1234567890\n' >"$_resurrect_wait_marker"
+export MOCK_TMUX_SESSION_ROWS=$'dev\t$9\t'
+export MOCK_SESSIONS="dev"
+_reset_tmux_log
+_do_session
+_same_target_log=$(_tmux_log)
+_assert_contains "resurrect wait: same target waits for cold restore" \
+  "@ds_resurrect_restored_at" "$_same_target_log"
+_assert_not_contains "resurrect wait: same target creates no second bootstrap" \
+  "new-session -d -s dev" "$_same_target_log"
 unset MOCK_TMUX_SESSION_ROWS MOCK_SESSIONS
 # shellcheck disable=SC2034  # sourced helpers read this global dynamically.
 DS_NO_ATTACH=0

@@ -80,6 +80,11 @@ layouts. Warm attaches retain the normal single-query path.
 These hooks do not change tmux-resurrect's process policy. Choose any process
 allowlist separately in tmux configuration.
 
+When a default-server coordinator disables continuum's native restore to keep
+additional tmux sockets isolated, it can set `@ds-resurrect-auto-restore` to
+`on`. `ds` then uses the same startup wait and halt-file behavior for that
+coordinator.
+
 ## Session Naming
 
 Sessions are named after their profile, with an optional dash-separated instance tag:
