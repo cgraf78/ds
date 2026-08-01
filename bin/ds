@@ -683,9 +683,12 @@ _resurrect_dir() {
 }
 
 _resurrect_restore_expected() {
-  local enabled max_delay now server_start
+  local default_enabled enabled max_delay now server_start
   enabled=$(tmux show-options -gqv @continuum-restore 2>/dev/null) || enabled=""
-  [[ "$enabled" == "on" && ! -f "$HOME/tmux_no_auto_restore" &&
+  default_enabled=$(tmux show-options -gqv @ds-resurrect-auto-restore \
+    2>/dev/null) || default_enabled=""
+  [[ ("$enabled" == "on" || "$default_enabled" == "on") &&
+    ! -f "$HOME/tmux_no_auto_restore" &&
     -f "$(_resurrect_dir)/last" ]] || return 1
 
   server_start=$(tmux display-message -p '#{start_time}' 2>/dev/null) || return 1
@@ -1008,70 +1011,92 @@ _do_session_prepare() {
   fi
 }
 
-_resurrect_startup_lock_dir() {
-  local host
+_resurrect_startup_lock_base() {
+  local host root tmp
   host=$(hostname)
   host="${host//[^A-Za-z0-9._-]/_}"
-  printf '%s/resurrect-startup.%s.lock\n' "$DS_STATE_DIR" "$host"
+  case "${XDG_RUNTIME_DIR:-}" in
+    /*)
+      root="${XDG_RUNTIME_DIR%/}/ds"
+      ;;
+    *)
+      tmp=${TMPDIR:-/tmp}
+      [[ "$tmp" == /* ]] || tmp=/tmp
+      root="${tmp%/}/ds-$(id -u)"
+      ;;
+  esac
+  printf '%s/resurrect-startup.%s\n' "$root" "$host"
 }
 
-_process_start_identity() {
-  local pid="$1" started weekday month day clock year extra identity
-  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
-  started=$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null) || return 1
-  read -r weekday month day clock year extra <<<"$started" || return 1
-  [[ -n "$weekday" && -n "$month" && -n "$day" && -n "$clock" &&
-    -n "$year" && -z "$extra" ]] || return 1
-  printf -v started '%s %s %2s %s %s' \
-    "$weekday" "$month" "$day" "$clock" "$year"
-  identity=$(printf '%s' "$started" | od -An -tx1 | tr -d '[:space:]') ||
-    return 1
-  [[ -n "$identity" && "$identity" != *[!0-9a-f]* ]] || return 1
-  printf '%s\n' "$identity"
+_resurrect_startup_lock_paths() {
+  local base generation now offset separator=""
+  base=$(_resurrect_startup_lock_base) || return 1
+  now=$(_epoch_seconds) || return 1
+  [[ "$now" =~ ^[0-9]+$ ]] || return 1
+  generation=$((now / 10))
+  for offset in 0 1 2 3 4; do
+    printf '%s%s.%s' "$separator" "$base" "$((generation + offset))"
+    separator=$'\t'
+  done
+  printf '\n'
+}
+
+_acquire_resurrect_startup_lock_with_attempts() {
+  local max_attempts="$1"
+  local attempts=0 lock locks owner path root token
+  root=$(_resurrect_startup_lock_base) || return 1
+  root=${root%/*}
+  [[ ! -L "$root" ]] || return 1
+  (umask 077 && mkdir -p "$root") || return 1
+  [[ -d "$root" && ! -L "$root" ]] || return 1
+  owner=$(stat -c '%u' "$root" 2>/dev/null ||
+    stat -f '%u' "$root" 2>/dev/null) || return 1
+  [[ "$owner" == "$(id -u)" ]] || return 1
+  chmod 0700 "$root" || return 1
+
+  while ((attempts < max_attempts)); do
+    IFS=$'\t' read -r -a locks < <(_resurrect_startup_lock_paths) || return 1
+    token=""
+    for path in "${locks[@]}"; do
+      if mkdir -m 0700 "$path" 2>/dev/null; then
+        if [[ -n "$token" ]]; then
+          token+=$'\t'
+        fi
+        token+="$path"
+      else
+        _release_resurrect_startup_lock "$token" >/dev/null 2>&1 || true
+        token=""
+        break
+      fi
+    done
+    if [[ -n "$token" && "${#locks[@]}" -eq 5 ]]; then
+      printf '%s\n' "$token"
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.1
+  done
+  echo "ds: timed out waiting for tmux restore coordinator" >&2
+  return 1
 }
 
 _acquire_resurrect_startup_lock() {
-  local attempts=0 current_identity identity lock owner root tmp
-  lock=$(_resurrect_startup_lock_dir) || return 1
-  root=${lock%/*}
-  (umask 077 && mkdir -p "$root") || return 1
-  chmod 0700 "$root" || return 1
-  identity=$(_process_start_identity "$$") || return 1
-  tmp="$root/.resurrect-owner.$$"
-  (umask 077 && printf '%s %s\n' "$$" "$identity" >"$tmp") || return 1
-
-  while ! ln "$tmp" "$lock" 2>/dev/null; do
-    attempts=$((attempts + 1))
-    if [[ -f "$lock" && ! -L "$lock" ]]; then
-      read -r owner identity <"$lock" || owner=""
-      current_identity=$(_process_start_identity "$owner" 2>/dev/null) ||
-        current_identity=""
-      if [[ -z "$current_identity" || "$current_identity" != "$identity" ]]; then
-        rm -f "$lock"
-        continue
-      fi
-    fi
-    if ((attempts >= 600)); then
-      echo "ds: timed out waiting for tmux restore coordinator" >&2
-      rm -f "$tmp"
-      return 1
-    fi
-    sleep 0.1
-  done
-  rm -f "$tmp"
-  printf '%s\n' "$lock"
+  _acquire_resurrect_startup_lock_with_attempts 600
 }
 
 _release_resurrect_startup_lock() {
-  local lock="$1" owner="" identity="" current_identity
-  [[ -f "$lock" && ! -L "$lock" ]] && read -r owner identity <"$lock"
-  current_identity=$(_process_start_identity "$$") || return 1
-  [[ "$owner" == "$$" && "$identity" == "$current_identity" ]] || return 1
-  rm -f "$lock"
+  local token="$1" lock rc=0
+  local locks=()
+  [[ -n "$token" ]] || return 0
+  IFS=$'\t' read -r -a locks <<<"$token"
+  for lock in "${locks[@]}"; do
+    rmdir "$lock" 2>/dev/null || rc=1
+  done
+  return "$rc"
 }
 
 _do_session_with_startup_lock() (
-  local lock sessions startup_restore=detect
+  local lock server_start sessions startup_restore=detect
   lock=$(_acquire_resurrect_startup_lock) || return 1
   trap '_release_resurrect_startup_lock "$lock" >/dev/null 2>&1 || true' EXIT
 
@@ -1081,7 +1106,13 @@ _do_session_with_startup_lock() (
     2>/dev/null) || sessions=""
   if [[ -n "$sessions" ]]; then
     startup_restore=0
-    _resurrect_restore_expected && startup_restore=1
+    if _resurrect_restore_expected; then
+      server_start=$(tmux display-message -p '#{start_time}') || server_start=""
+      [[ -z "$server_start" ]] ||
+        _wait_for_resurrect_restore "$server_start" || true
+      sessions=$(tmux list-sessions -F $'#{session_name}\t#{session_id}\t#{@ds_status_labels_version}' \
+        2>/dev/null) || sessions=""
+    fi
   fi
   _do_session_prepare "$startup_restore" "$sessions"
 )
@@ -1089,15 +1120,22 @@ _do_session_with_startup_lock() (
 _do_session() {
   # One compatibility-safe query provides existence, identity, and the
   # reconciliation marker without adding work per window on the warm path.
-  local name session_id sessions
+  local coordinate=0 marker name session_id sessions
   sessions=$(tmux list-sessions -F $'#{session_name}\t#{session_id}\t#{@ds_status_labels_version}' \
     2>/dev/null) || sessions=""
-  while IFS=$'\t' read -r name session_id _; do
+  while IFS=$'\t' read -r name session_id marker; do
     [[ "$name" == "$SESSION" ]] && break
     session_id=""
   done <<<"$sessions"
 
   if [[ -z "$session_id" ]]; then
+    coordinate=1
+  elif [[ "$marker" != "$_DS_STATUS_LABELS_VERSION:$session_id" ]] &&
+    _resurrect_restore_expected; then
+    coordinate=1
+  fi
+
+  if [[ "$coordinate" == "1" ]]; then
     _do_session_with_startup_lock || return
   else
     _do_session_prepare 0 "$sessions" || return
