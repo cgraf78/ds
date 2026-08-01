@@ -7,6 +7,9 @@
 #        ds --killall [@host]          kill all ds sessions
 #        ds --share [session]          share a session (defaults to current)
 #        ds --unshare [session]        stop sharing (defaults to current)
+#        ds resurrect save FILE        save ds metadata into a resurrect snapshot
+#        ds resurrect begin            mark a resurrect restore in progress
+#        ds resurrect restore [FILE]   restore ds metadata from a snapshot
 #        ds init <bash|zsh>            print shell integration snippet
 #
 # Sessions:    profile name, profile-instance, or any name (e.g., dev, dev-work, myproject)
@@ -75,6 +78,7 @@ CONNECT_OVERRIDE=""
 HOST=""
 CONNECT="ssh"
 INIT_SHELL=""
+RESURRECT_FILE=""
 DS_SHARE_VIA="${DS_SHARE_VIA:-}"
 DS_NO_ATTACH="${DS_NO_ATTACH:-0}"
 DS_SHARE_INFO_FILE="${DS_SHARE_INFO_FILE:-}"
@@ -107,6 +111,9 @@ _usage() {
   echo "       ds --killall [@host]          kill all ds sessions"
   echo "       ds --share [session]          share a session (defaults to current)"
   echo "       ds --unshare [session]        stop sharing (defaults to current)"
+  echo "       ds resurrect save FILE        save ds metadata into a resurrect snapshot"
+  echo "       ds resurrect begin            mark a resurrect restore in progress"
+  echo "       ds resurrect restore [FILE]   restore ds metadata from a snapshot"
   echo "       ds init <bash|zsh>            print shell integration snippet"
   echo ""
   echo "Options:"
@@ -156,11 +163,14 @@ _shell_name() {
 }
 
 _shell_path() {
-  local shell
-  shell="$(_shell_name)"
+  _shell_path_for "$(_shell_name)"
+}
 
-  if command -v "$shell" >/dev/null 2>&1; then
-    command -v "$shell"
+_shell_path_for() {
+  local shell="$1"
+
+  if command -v -- "$shell" >/dev/null 2>&1; then
+    command -v -- "$shell"
     return
   fi
 
@@ -173,8 +183,13 @@ _shell_path() {
 }
 
 _shell_login_cmd() {
+  _shell_login_cmd_for "$(_shell_name)"
+}
+
+_shell_login_cmd_for() {
+  local shell="$1"
   local shell_path
-  shell_path="$(_shell_path)"
+  shell_path="$(_shell_path_for "$shell")"
   printf 'exec %q -l' "$shell_path"
 }
 
@@ -622,6 +637,139 @@ _set_status_labels() {
   return "$rc"
 }
 
+_session_shell_name() {
+  local session="$1" value
+  value=$(tmux show-environment -t "=$session" DS_SHELL_NAME 2>/dev/null) ||
+    return 1
+  [[ "$value" == DS_SHELL_NAME=* ]] || return 1
+  value="${value#DS_SHELL_NAME=}"
+  [[ "$value" =~ ^[A-Za-z0-9._+-]+$ ]] || return 1
+  printf '%s\n' "$value"
+}
+
+_session_is_managed() {
+  tmux show-environment -t "=$1" DS_MANAGED 2>/dev/null |
+    grep -q '^DS_MANAGED='
+}
+
+_reconcile_ds_session() {
+  local session="$1" session_id="$2" shell="$3"
+
+  [[ "$shell" =~ ^[A-Za-z0-9._+-]+$ ]] || return 1
+  tmux set-environment -t "$session" DS_MANAGED 1 || return 1
+  tmux set-environment -t "$session" DS_SHELL_NAME "$shell" || return 1
+  tmux set-option -t "$session" default-command \
+    "$(_shell_login_cmd_for "$shell")" || return 1
+  _set_status_labels "$session" || return 1
+  tmux set-option -t "$session_id" @ds_status_labels_version \
+    "$_DS_STATUS_LABELS_VERSION:$session_id"
+}
+
+_resurrect_dir() {
+  local host path
+  path=$(tmux show-options -gqv @resurrect-dir 2>/dev/null) || path=""
+  if [[ -z "$path" ]]; then
+    if [[ -d "$HOME/.tmux/resurrect" ]]; then
+      path="$HOME/.tmux/resurrect"
+    else
+      path="${XDG_DATA_HOME:-$HOME/.local/share}/tmux/resurrect"
+    fi
+  fi
+  host=$(hostname)
+  path="${path//\$HOME/$HOME}"
+  path="${path//\$HOSTNAME/$host}"
+  path="${path/#\~/$HOME}"
+  printf '%s\n' "$path"
+}
+
+_resurrect_restore_expected() {
+  local enabled max_delay now server_start
+  enabled=$(tmux show-options -gqv @continuum-restore 2>/dev/null) || enabled=""
+  [[ "$enabled" == "on" && ! -f "$HOME/tmux_no_auto_restore" &&
+    -f "$(_resurrect_dir)/last" ]] || return 1
+
+  server_start=$(tmux display-message -p '#{start_time}' 2>/dev/null) || return 1
+  max_delay=$(tmux show-options -gqv @continuum-restore-max-delay \
+    2>/dev/null) || max_delay=""
+  [[ "$max_delay" =~ ^[0-9]+$ ]] || max_delay=10
+  now=$(_epoch_seconds) || return 1
+  [[ "$server_start" =~ ^[0-9]+$ && "$now" =~ ^[0-9]+$ ]] || return 1
+  ((server_start > now - max_delay))
+}
+
+_epoch_seconds() {
+  date +%s
+}
+
+_wait_for_resurrect_restore() {
+  local server_start="$1" marker restoring
+  local start_attempts="${2:-30}" restore_attempts="${3:-300}"
+  local attempts="$start_attempts"
+
+  while ((attempts > 0)); do
+    marker=$(tmux show-options -gqv @ds_resurrect_restored_at 2>/dev/null) ||
+      marker=""
+    [[ "$marker" == "$server_start" ]] && return 0
+    restoring=$(tmux show-options -gqv @ds_resurrect_restoring_at 2>/dev/null) ||
+      restoring=""
+    [[ "$restoring" == "$server_start" ]] && break
+    sleep 0.1
+    attempts=$((attempts - 1))
+  done
+  [[ "$restoring" == "$server_start" ]] || return 1
+
+  attempts="$restore_attempts"
+  while ((attempts > 0)); do
+    marker=$(tmux show-options -gqv @ds_resurrect_restored_at 2>/dev/null) ||
+      marker=""
+    [[ "$marker" == "$server_start" ]] && return 0
+    sleep 0.1
+    attempts=$((attempts - 1))
+  done
+  return 1
+}
+
+_do_resurrect_begin() {
+  local server_start
+  server_start=$(tmux display-message -p '#{start_time}') || return 1
+  tmux set-option -g @ds_resurrect_restoring_at "$server_start"
+}
+
+_do_resurrect_save() {
+  local file="$1" chmod_file records="" session shell
+
+  [[ -f "$file" && ! -L "$file" ]] || return 1
+  chmod_file="$file"
+  [[ "$chmod_file" == -* ]] && chmod_file="./$chmod_file"
+  chmod 0600 "$chmod_file" || return 1
+  while IFS= read -r session; do
+    [[ -n "$session" && "$session" != *$'\t'* ]] || continue
+    _session_is_managed "$session" || continue
+    shell=$(_session_shell_name "$session") || continue
+    printf -v records '%sds-v1\t%s\t%s\n' "$records" "$session" "$shell"
+  done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null)
+
+  [[ -z "$records" ]] || printf '%s' "$records" >>"$file"
+}
+
+_do_resurrect_restore() {
+  local file="${1:-}" kind session shell extra session_id server_start
+  [[ -n "$file" ]] || file="$(_resurrect_dir)/last"
+  [[ -f "$file" ]] || return 1
+
+  while IFS=$'\t' read -r kind session shell extra; do
+    [[ "$kind" == "ds-v1" && -n "$session" && -z "$extra" ]] || continue
+    [[ "$session" != *$'\n'* && "$shell" =~ ^[A-Za-z0-9._+-]+$ ]] || continue
+    tmux has-session -t "=$session" 2>/dev/null || continue
+    session_id=$(tmux display-message -p -t "=$session" '#{session_id}') ||
+      continue
+    _reconcile_ds_session "$session" "$session_id" "$shell" || continue
+  done <"$file"
+
+  server_start=$(tmux display-message -p '#{start_time}') || return 1
+  tmux set-option -g @ds_resurrect_restored_at "$server_start"
+}
+
 _session_option_set() {
   local session="$1"
   local option="$2"
@@ -791,21 +939,38 @@ _do_unshare() {
   _share_stop "$SESSION"
 }
 
-_do_session() {
-  # One compatibility-safe query provides existence, identity, and the
-  # reconciliation marker without adding work per window on the warm path.
-  local marker name session_id sessions
-  sessions=$(tmux list-sessions -F $'#{session_name}\t#{session_id}\t#{@ds_status_labels_version}' \
-    2>/dev/null) || sessions=""
+_do_session_prepare() {
+  local startup_restore="$1" sessions="$2"
+  local marker name session_id
   while IFS=$'\t' read -r name session_id marker; do
     [[ "$name" == "$SESSION" ]] && break
     session_id=""
   done <<<"$sessions"
 
+  # A second cold-start caller must not create another placeholder while
+  # continuum is restoring the server started by the first caller.
+  if [[ -z "$session_id" && -n "$sessions" && "$startup_restore" == "1" ]]; then
+    local server_start
+    server_start=$(tmux display-message -p '#{start_time}') || server_start=""
+    [[ -z "$server_start" ]] || _wait_for_resurrect_restore "$server_start" || true
+    sessions=$(tmux list-sessions -F $'#{session_name}\t#{session_id}\t#{@ds_status_labels_version}' \
+      2>/dev/null) || sessions=""
+    while IFS=$'\t' read -r name session_id marker; do
+      [[ "$name" == "$SESSION" ]] && break
+      session_id=""
+    done <<<"$sessions"
+  fi
+
   if [[ -n "$session_id" ]]; then
     if [[ -n "$session_id" && "$marker" != "$_DS_STATUS_LABELS_VERSION:$session_id" ]]; then
-      if _set_status_labels "$SESSION"; then
-        # Publish last: a failed setup stays unmarked and retries next time.
+      if _session_is_managed "$SESSION"; then
+        local existing_shell
+        existing_shell=$(_session_shell_name "$SESSION") ||
+          existing_shell="$(_shell_name)"
+        # Publish the marker last: a failed setup stays unmarked and retries.
+        _reconcile_ds_session "$SESSION" "$session_id" "$existing_shell" || true
+      elif _set_status_labels "$SESSION"; then
+        # Preserve native tmux ownership when ds attaches by name.
         tmux set-option -t "$session_id" @ds_status_labels_version \
           "$_DS_STATUS_LABELS_VERSION:$session_id" || true
       fi
@@ -813,10 +978,6 @@ _do_session() {
     if [[ -n "${DS_SHARE_VIA:-}" ]]; then
       _share_start "$SESSION"
     fi
-    if [[ "$DS_NO_ATTACH" == "1" ]]; then
-      return
-    fi
-    _attach "$SESSION"
     return
   fi
 
@@ -824,21 +985,125 @@ _do_session() {
   shell_name="$(_shell_name)"
   shell_cmd="$(_shell_login_cmd)"
   session_id=$(tmux new-session -d -s "$SESSION" -P -F '#{session_id}' "$shell_cmd")
-  tmux set-environment -t "$SESSION" DS_MANAGED 1
-  tmux set-environment -t "$SESSION" DS_SHELL_NAME "$shell_name"
-  tmux set-option -t "$SESSION" default-command "$shell_cmd"
-  if [[ -n "$session_id" ]] && _set_status_labels "$SESSION"; then
-    tmux set-option -t "$session_id" @ds_status_labels_version \
-      "$_DS_STATUS_LABELS_VERSION:$session_id" || true
+  if [[ "$startup_restore" == "detect" ]]; then
+    startup_restore=0
+    _resurrect_restore_expected && startup_restore=1
   fi
+  if [[ "$startup_restore" == "1" ]]; then
+    local server_start
+    server_start=$(tmux display-message -p '#{start_time}') || server_start=""
+    [[ -z "$server_start" ]] || _wait_for_resurrect_restore "$server_start" || true
+  fi
+
+  # A restore hook marks saved ds sessions before this point. Keep their
+  # restored layout intact; otherwise finish the fresh bootstrap normally.
+  if _session_is_managed "$SESSION"; then
+    return
+  fi
+
+  _reconcile_ds_session "$SESSION" "$session_id" "$shell_name" || true
   "_profile_$PROFILE" "$SESSION"
   if [[ -n "${DS_SHARE_VIA:-}" ]]; then
     _share_start "$SESSION"
   fi
-  if [[ "$DS_NO_ATTACH" == "1" ]]; then
-    return
+}
+
+_resurrect_startup_lock_dir() {
+  local host
+  host=$(hostname)
+  host="${host//[^A-Za-z0-9._-]/_}"
+  printf '%s/resurrect-startup.%s.lock\n' "$DS_STATE_DIR" "$host"
+}
+
+_process_start_identity() {
+  local pid="$1" started weekday month day clock year extra identity
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  started=$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null) || return 1
+  read -r weekday month day clock year extra <<<"$started" || return 1
+  [[ -n "$weekday" && -n "$month" && -n "$day" && -n "$clock" &&
+    -n "$year" && -z "$extra" ]] || return 1
+  printf -v started '%s %s %2s %s %s' \
+    "$weekday" "$month" "$day" "$clock" "$year"
+  identity=$(printf '%s' "$started" | od -An -tx1 | tr -d '[:space:]') ||
+    return 1
+  [[ -n "$identity" && "$identity" != *[!0-9a-f]* ]] || return 1
+  printf '%s\n' "$identity"
+}
+
+_acquire_resurrect_startup_lock() {
+  local attempts=0 current_identity identity lock owner root tmp
+  lock=$(_resurrect_startup_lock_dir) || return 1
+  root=${lock%/*}
+  (umask 077 && mkdir -p "$root") || return 1
+  chmod 0700 "$root" || return 1
+  identity=$(_process_start_identity "$$") || return 1
+  tmp="$root/.resurrect-owner.$$"
+  (umask 077 && printf '%s %s\n' "$$" "$identity" >"$tmp") || return 1
+
+  while ! ln "$tmp" "$lock" 2>/dev/null; do
+    attempts=$((attempts + 1))
+    if [[ -f "$lock" && ! -L "$lock" ]]; then
+      read -r owner identity <"$lock" || owner=""
+      current_identity=$(_process_start_identity "$owner" 2>/dev/null) ||
+        current_identity=""
+      if [[ -z "$current_identity" || "$current_identity" != "$identity" ]]; then
+        rm -f "$lock"
+        continue
+      fi
+    fi
+    if ((attempts >= 600)); then
+      echo "ds: timed out waiting for tmux restore coordinator" >&2
+      rm -f "$tmp"
+      return 1
+    fi
+    sleep 0.1
+  done
+  rm -f "$tmp"
+  printf '%s\n' "$lock"
+}
+
+_release_resurrect_startup_lock() {
+  local lock="$1" owner="" identity="" current_identity
+  [[ -f "$lock" && ! -L "$lock" ]] && read -r owner identity <"$lock"
+  current_identity=$(_process_start_identity "$$") || return 1
+  [[ "$owner" == "$$" && "$identity" == "$current_identity" ]] || return 1
+  rm -f "$lock"
+}
+
+_do_session_with_startup_lock() (
+  local lock sessions startup_restore=detect
+  lock=$(_acquire_resurrect_startup_lock) || return 1
+  trap '_release_resurrect_startup_lock "$lock" >/dev/null 2>&1 || true' EXIT
+
+  # Requery after acquiring the host-scoped lock: another ds caller may
+  # have created the bootstrap or completed restoration while we waited.
+  sessions=$(tmux list-sessions -F $'#{session_name}\t#{session_id}\t#{@ds_status_labels_version}' \
+    2>/dev/null) || sessions=""
+  if [[ -n "$sessions" ]]; then
+    startup_restore=0
+    _resurrect_restore_expected && startup_restore=1
   fi
-  _attach "$SESSION"
+  _do_session_prepare "$startup_restore" "$sessions"
+)
+
+_do_session() {
+  # One compatibility-safe query provides existence, identity, and the
+  # reconciliation marker without adding work per window on the warm path.
+  local name session_id sessions
+  sessions=$(tmux list-sessions -F $'#{session_name}\t#{session_id}\t#{@ds_status_labels_version}' \
+    2>/dev/null) || sessions=""
+  while IFS=$'\t' read -r name session_id _; do
+    [[ "$name" == "$SESSION" ]] && break
+    session_id=""
+  done <<<"$sessions"
+
+  if [[ -z "$session_id" ]]; then
+    _do_session_with_startup_lock || return
+  else
+    _do_session_prepare 0 "$sessions" || return
+  fi
+
+  [[ "$DS_NO_ATTACH" == "1" ]] || _attach "$SESSION"
 }
 
 _do_init() {
@@ -1242,6 +1507,47 @@ while [[ $# -gt 0 ]]; do
       fi
       shift
       ;;
+    resurrect)
+      [[ $# -ge 2 ]] || {
+        echo "ds: resurrect requires save, begin, or restore" >&2
+        exit 1
+      }
+      case "$2" in
+        save)
+          [[ $# -eq 3 ]] || {
+            echo "ds: resurrect save requires a snapshot file" >&2
+            exit 1
+          }
+          ACTION="resurrect-save"
+          RESURRECT_FILE="$3"
+          shift 3
+          ;;
+        begin)
+          [[ $# -eq 2 ]] || {
+            echo "ds: resurrect begin takes no arguments" >&2
+            exit 1
+          }
+          ACTION="resurrect-begin"
+          shift 2
+          ;;
+        restore)
+          [[ $# -le 3 ]] || {
+            echo "ds: resurrect restore takes at most one snapshot file" >&2
+            exit 1
+          }
+          ACTION="resurrect-restore"
+          if [[ $# -eq 3 ]]; then
+            RESURRECT_FILE="$3"
+            shift
+          fi
+          shift 2
+          ;;
+        *)
+          echo "ds: resurrect requires save, begin, or restore" >&2
+          exit 1
+          ;;
+      esac
+      ;;
     -h | --help)
       _usage
       exit 0
@@ -1389,6 +1695,15 @@ case "$ACTION" in
     ;;
   unshare)
     _do_unshare
+    ;;
+  resurrect-save)
+    _do_resurrect_save "$RESURRECT_FILE"
+    ;;
+  resurrect-begin)
+    _do_resurrect_begin
+    ;;
+  resurrect-restore)
+    _do_resurrect_restore "$RESURRECT_FILE"
     ;;
   session)
     _do_session

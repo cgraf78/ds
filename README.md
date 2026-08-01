@@ -53,6 +53,33 @@ ds init bash                    # print Bash shell integration snippet
 ds init zsh                     # print Zsh shell integration snippet
 ```
 
+## Tmux Resurrect Integration
+
+`ds` can preserve its session identity inside a tmux-resurrect snapshot. This
+keeps restored sessions visible to `ds -l`, `ds --killall`, and shell
+completion, and restores the selected login shell for future windows.
+
+Configure tmux-resurrect to call the integration around its normal save and
+restore flow:
+
+```tmux
+set -g @resurrect-hook-post-save-layout 'ds resurrect save'
+set -g @resurrect-hook-pre-restore-all 'ds resurrect begin'
+set -g @resurrect-hook-post-restore-all 'ds resurrect restore'
+```
+
+The save hook appends versioned `ds` metadata to the exact resurrect snapshot
+path supplied by the plugin and restricts that file to mode `0600`. The restore
+hook ignores unknown versions and sessions that were not restored. The begin
+hook distinguishes a restore that is rebuilding a large environment from one
+that continuum suppressed. When tmux-continuum starts a new server, `ds` waits
+for these hooks before creating another session or applying a new profile,
+preventing the delayed restore from merging with freshly built multi-pane
+layouts. Warm attaches retain the normal single-query path.
+
+These hooks do not change tmux-resurrect's process policy. Choose any process
+allowlist separately in tmux configuration.
+
 ## Session Naming
 
 Sessions are named after their profile, with an optional dash-separated instance tag:

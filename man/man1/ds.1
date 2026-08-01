@@ -1,4 +1,4 @@
-.TH DS 1 "2026-06-30" "ds" "User Commands"
+.TH DS 1 "2026-08-01" "ds" "User Commands"
 .SH NAME
 ds \- create and manage local or remote tmux dev sessions
 .SH SYNOPSIS
@@ -30,6 +30,17 @@ ds \- create and manage local or remote tmux dev sessions
 .B ds
 .B init
 .RI < bash | zsh >
+.br
+.B ds
+.B resurrect save
+.I file
+.br
+.B ds
+.B resurrect begin
+.br
+.B ds
+.B resurrect restore
+.RI [ file ]
 .SH DESCRIPTION
 .B ds
 creates tmux development sessions locally or on remote hosts. A session name
@@ -129,6 +140,33 @@ relative to
 .B DS_MAN_DIR
 Destination for installed manual pages. Defaults to
 .IR ~/.local/share/man/man1 .
+.SH TMUX RESURRECT INTEGRATION
+The
+.B resurrect save
+command appends versioned ds session identity and shell metadata to the
+tmux-resurrect snapshot supplied by its post-save-layout hook. It restricts the
+snapshot to mode 0600.
+.PP
+The
+.B resurrect begin
+command marks the current tmux server restore as in progress so concurrent ds
+callers do not create sessions while layouts are being rebuilt.
+.PP
+The
+.B resurrect restore
+command restores that metadata after tmux-resurrect finishes rebuilding the
+environment.
+When no file is given, it reads the
+.I last
+snapshot under the configured
+.B @resurrect-dir .
+Configure the plugin hooks as follows:
+.PP
+.nf
+set -g @resurrect-hook-post-save-layout 'ds resurrect save'
+set -g @resurrect-hook-pre-restore-all 'ds resurrect begin'
+set -g @resurrect-hook-pre-restore-pane-processes 'ds resurrect restore'
+.fi
 .SH EXIT STATUS
 .TP
 .B 0

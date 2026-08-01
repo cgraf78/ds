@@ -47,6 +47,9 @@ mkdir -p "$TEST_HOME/.ssh"
 printf 'dummy' >"$DS_UPTERM_PRIVATE_KEY"
 # shellcheck source=../bin/ds
 . "$SCRIPT_DIR/../bin/ds"
+_epoch_seconds() {
+  printf '%s\n' "${MOCK_NOW:-1234567890}"
+}
 # Install and load the upterm share backend for sharing tests
 cp "$SCRIPT_DIR/../lib/plugins/share-upterm.sh" "$CONF_DIR/"
 # shellcheck source=/dev/null
@@ -61,6 +64,10 @@ cat >"$MOCK_BIN/tmux" <<'MOCK'
 # Mock tmux that logs calls and simulates responses
 echo "tmux $*" >> "${TMUX_LOG:-/dev/null}"
 args=("$@")
+if [[ -n "${MOCK_TMUX_SERVER_FILE:-}" &&
+    ! -f "$MOCK_TMUX_SERVER_FILE" && "${args[0]:-}" != "new-session" ]]; then
+    exit 1
+fi
 case "${args[0]:-}" in
     has-session)
         # Check MOCK_SESSIONS for existence
@@ -72,6 +79,14 @@ case "${args[0]:-}" in
         fi
         ;;
     list-sessions)
+        for _arg in "${args[@]}"; do
+            if [[ "$_arg" == '#{session_name}' ]]; then
+                for _session_name in ${MOCK_SESSIONS:-}; do
+                    printf '%s\n' "$_session_name"
+                done
+                exit 0
+            fi
+        done
         if [[ -n "${MOCK_TMUX_SESSION_ROWS+x}" ]]; then
             printf '%s\n' "$MOCK_TMUX_SESSION_ROWS"
             exit 0
@@ -118,8 +133,17 @@ case "${args[0]:-}" in
         exit 0
         ;;
     show-environment)
-        # show-environment -t =<session> DS_MANAGED
+        # show-environment -t =<session> DS_MANAGED|DS_SHELL_NAME
         _se_name="${args[2]#=}"
+        if [[ "${args[3]:-}" == "DS_SHELL_NAME" &&
+            " ${MOCK_DS_MANAGED:-} " == *" $_se_name "* ]]; then
+            if [[ "${MOCK_DS_SHELL_UNSET:-0}" == "1" ]]; then
+                echo "-DS_SHELL_NAME"
+                exit 0
+            fi
+            echo "DS_SHELL_NAME=${MOCK_DS_SHELL_NAME:-bash}"
+            exit 0
+        fi
         if [[ " ${MOCK_DS_MANAGED:-} " == *" $_se_name "* ]]; then
             echo "DS_MANAGED=1"
             exit 0
@@ -130,6 +154,14 @@ case "${args[0]:-}" in
     display-message)
         # Support session name query and info format
         for _a in "${args[@]}"; do
+            if [[ "$_a" == *'#{start_time}'* ]]; then
+                echo "${MOCK_TMUX_START_TIME:-1234567890}"
+                exit 0
+            fi
+            if [[ "$_a" == *'#{session_id}'* ]]; then
+                echo "${MOCK_TMUX_SESSION_ID:-\$1}"
+                exit 0
+            fi
             if [[ "$_a" == *'#{session_name}'* ]]; then
                 echo "${MOCK_CURRENT_SESSION:-ds}"
                 exit 0
@@ -162,6 +194,32 @@ case "${args[0]:-}" in
         exit 0
         ;;
     show-options)
+        if [[ " ${args[*]} " == *" @continuum-restore-max-delay"* ]]; then
+            echo "${MOCK_CONTINUUM_RESTORE_MAX_DELAY:-}"
+            exit 0
+        fi
+        if [[ " ${args[*]} " == *" @continuum-restore"* ]]; then
+            echo "${MOCK_CONTINUUM_RESTORE:-}"
+            exit 0
+        fi
+        if [[ " ${args[*]} " == *" @resurrect-dir"* ]]; then
+            echo "${MOCK_RESURRECT_DIR:-}"
+            exit 0
+        fi
+        if [[ " ${args[*]} " == *" @ds_resurrect_restored_at"* ]]; then
+            if [[ -n "${MOCK_RESURRECT_MARKER_FILE:-}" &&
+                -f "$MOCK_RESURRECT_MARKER_FILE" ]]; then
+                cat "$MOCK_RESURRECT_MARKER_FILE"
+            fi
+            exit 0
+        fi
+        if [[ " ${args[*]} " == *" @ds_resurrect_restoring_at"* ]]; then
+            if [[ -n "${MOCK_RESURRECT_BEGIN_FILE:-}" &&
+                -f "$MOCK_RESURRECT_BEGIN_FILE" ]]; then
+                cat "$MOCK_RESURRECT_BEGIN_FILE"
+            fi
+            exit 0
+        fi
         if [[ " ${args[*]} " == *" status-left"* ]]; then
             if [[ " ${args[*]} " == *" -g"* ]]; then
                 echo "${MOCK_TMUX_STATUS_LEFT:-[ #S ] }"
@@ -202,6 +260,9 @@ case "${args[0]:-}" in
         exit 0
         ;;
     new-session)
+        if [[ -n "${MOCK_TMUX_SERVER_FILE:-}" ]]; then
+            : >"$MOCK_TMUX_SERVER_FILE"
+        fi
         if [[ " ${args[*]} " == *" -P "* ]]; then
             printf '%s\n' "${MOCK_TMUX_NEW_SESSION_ID:-\$1}"
         fi
@@ -5216,6 +5277,229 @@ _assert_eq "tmux command quoting preserves spaces and quotes" \
 echo ""
 echo "=== Session attachment ==="
 
+# tmux-resurrect preserves layouts but not ds's session-local environment.
+# The integration rows travel inside the exact resurrect snapshot so metadata
+# cannot drift away from the layout it describes.
+_resurrect_file=$(_tmpdir)/resurrect.txt
+printf 'pane\tds\t1\n' >"$_resurrect_file"
+export MOCK_SESSIONS="ds native"
+export MOCK_DS_MANAGED=" ds"
+export MOCK_DS_SHELL_NAME="bash"
+set +e
+_do_resurrect_save "$_resurrect_file"
+_resurrect_save_rc=$?
+set -e
+_assert_exit "resurrect metadata: save succeeds" 0 "$_resurrect_save_rc"
+_assert_contains "resurrect metadata: appends managed session identity" \
+  $'ds-v1\tds\tbash' "$(cat "$_resurrect_file")"
+_assert_not_contains "resurrect metadata: omits native tmux sessions" \
+  $'ds-v1\tnative\t' "$(cat "$_resurrect_file")"
+_resurrect_mode=$(stat -c '%a' "$_resurrect_file" 2>/dev/null ||
+  stat -f '%Lp' "$_resurrect_file" 2>/dev/null || true)
+_assert_eq "resurrect metadata: protects snapshot contents" "600" "$_resurrect_mode"
+
+export MOCK_DS_SHELL_UNSET=1
+if _session_shell_name ds >/dev/null; then
+  _fail "resurrect metadata: rejects tmux unset-environment sentinel"
+else
+  _pass "resurrect metadata: rejects tmux unset-environment sentinel"
+fi
+unset MOCK_DS_SHELL_UNSET
+
+_resurrect_dash_dir=$(_tmpdir)
+printf 'pane\tds\t1\n' >"$_resurrect_dash_dir/--reference=other"
+(
+  cd "$_resurrect_dash_dir"
+  _do_resurrect_save '--reference=other'
+)
+_assert_contains "resurrect metadata: option-looking paths stay files" \
+  $'ds-v1\tds\tbash' "$(cat "$_resurrect_dash_dir/--reference=other")"
+
+_reset_tmux_log
+printf 'pane\trestored-ds\t1\nds-v1\trestored-ds\tbash\n' >"$_resurrect_file"
+export MOCK_SESSIONS="restored-ds"
+export MOCK_DS_MANAGED=""
+set +e
+_do_resurrect_restore "$_resurrect_file"
+_resurrect_restore_rc=$?
+set -e
+_assert_exit "resurrect metadata: restore succeeds" 0 "$_resurrect_restore_rc"
+_resurrect_restore_log=$(_tmux_log)
+_assert_contains "resurrect metadata: restores ds ownership" \
+  "tmux set-environment -t restored-ds DS_MANAGED 1" \
+  "$_resurrect_restore_log"
+_assert_contains "resurrect metadata: restores selected shell" \
+  "tmux set-environment -t restored-ds DS_SHELL_NAME bash" \
+  "$_resurrect_restore_log"
+_assert_contains "resurrect metadata: restores login-shell default" \
+  "tmux set-option -t restored-ds default-command exec $(command -v bash) -l" \
+  "$_resurrect_restore_log"
+_assert_contains "resurrect metadata: marks this server restore complete" \
+  "tmux set-option -g @ds_resurrect_restored_at 1234567890" \
+  "$_resurrect_restore_log"
+_reset_tmux_log
+_do_resurrect_begin
+_assert_contains "resurrect metadata: marks this server restore in progress" \
+  "tmux set-option -g @ds_resurrect_restoring_at 1234567890" "$(_tmux_log)"
+
+_resurrect_wait_dir=$(_tmpdir)
+_resurrect_wait_marker=$(_tmpdir)/marker
+touch "$_resurrect_wait_dir/last"
+export MOCK_CONTINUUM_RESTORE=on
+export MOCK_RESURRECT_DIR="$_resurrect_wait_dir"
+export MOCK_RESURRECT_MARKER_FILE="$_resurrect_wait_marker"
+if _resurrect_restore_expected; then
+  _pass "resurrect wait: detects a pending saved environment"
+else
+  _fail "resurrect wait: detects a pending saved environment"
+fi
+(
+  sleep 0.2
+  printf '1234567890\n' >"$_resurrect_wait_marker"
+) &
+_resurrect_marker_writer=$!
+if _wait_for_resurrect_restore 1234567890; then
+  _pass "resurrect wait: completes when this server is restored"
+else
+  _fail "resurrect wait: completes when this server is restored"
+fi
+wait "$_resurrect_marker_writer"
+rm "$_resurrect_wait_marker"
+
+# The first list-sessions call cannot connect on a true cold start. Creating
+# the bootstrap starts tmux; ds must then detect continuum and wait for the
+# restore hooks before applying a profile.
+_cold_server_file=$(_tmpdir)/server
+_resurrect_begin_marker=$(_tmpdir)/begin
+export MOCK_TMUX_SERVER_FILE="$_cold_server_file"
+export MOCK_RESURRECT_BEGIN_FILE="$_resurrect_begin_marker"
+SESSION="cold"
+PROFILE="dev"
+DS_NO_ATTACH=1
+_reset_tmux_log
+(
+  while [[ ! -f "$_cold_server_file" ]]; do sleep 0.01; done
+  sleep 0.1
+  printf '1234567890\n' >"$_resurrect_begin_marker"
+  sleep 0.1
+  printf '1234567890\n' >"$_resurrect_wait_marker"
+) &
+_cold_restore_writer=$!
+_do_session
+wait "$_cold_restore_writer"
+_cold_log=$(_tmux_log)
+_cold_create_line=$(awk '/new-session -d -s cold/ { print NR; exit }' \
+  <<<"$_cold_log")
+_cold_wait_line=$(awk '/@ds_resurrect_restored_at/ { print NR; exit }' \
+  <<<"$_cold_log")
+if [[ -n "$_cold_create_line" && -n "$_cold_wait_line" &&
+  "$_cold_create_line" -lt "$_cold_wait_line" ]]; then
+  _pass "resurrect wait: cold bootstrap waits after starting tmux"
+else
+  _fail "resurrect wait: cold bootstrap waits after starting tmux"
+fi
+rm "$_cold_server_file" "$_resurrect_begin_marker" "$_resurrect_wait_marker"
+unset MOCK_TMUX_SERVER_FILE
+# shellcheck disable=SC2034  # sourced helpers read this global dynamically.
+DS_NO_ATTACH=0
+
+_resurrect_begin_marker=$(_tmpdir)/begin
+export MOCK_RESURRECT_BEGIN_FILE="$_resurrect_begin_marker"
+(
+  sleep 0.1
+  printf '1234567890\n' >"$_resurrect_begin_marker"
+  sleep 0.2
+  printf '1234567890\n' >"$_resurrect_wait_marker"
+) &
+_resurrect_lifecycle_writer=$!
+if _wait_for_resurrect_restore 1234567890 10 10; then
+  _pass "resurrect wait: waits from begin through completion"
+else
+  _fail "resurrect wait: waits from begin through completion"
+fi
+wait "$_resurrect_lifecycle_writer"
+rm "$_resurrect_begin_marker" "$_resurrect_wait_marker"
+if _wait_for_resurrect_restore 1234567890 1 1; then
+  _fail "resurrect wait: no begin marker times out"
+else
+  _pass "resurrect wait: no begin marker times out"
+fi
+export MOCK_TMUX_START_TIME=1234567800
+if _resurrect_restore_expected; then
+  _fail "resurrect wait: skips warm servers with saved snapshots"
+else
+  _pass "resurrect wait: skips warm servers with saved snapshots"
+fi
+unset MOCK_TMUX_START_TIME
+rm "$_resurrect_wait_dir/last"
+if _resurrect_restore_expected; then
+  _fail "resurrect wait: skips servers without a saved environment"
+else
+  _pass "resurrect wait: skips servers without a saved environment"
+fi
+touch "$_resurrect_wait_dir/last" "$HOME/tmux_no_auto_restore"
+if _resurrect_restore_expected; then
+  _fail "resurrect wait: honors continuum halt file"
+else
+  _pass "resurrect wait: honors continuum halt file"
+fi
+rm "$HOME/tmux_no_auto_restore"
+
+# A concurrent cold-start caller sees the first caller's placeholder. It must
+# wait for the current server restore before creating its own session.
+printf '1234567890\n' >"$_resurrect_wait_marker"
+export MOCK_TMUX_SESSION_ROWS=$'other\t$9\t1:$9'
+export MOCK_SESSIONS="other"
+SESSION="dev"
+PROFILE="dev"
+DS_NO_ATTACH=1
+_reset_tmux_log
+_do_session
+_concurrent_log=$(_tmux_log)
+if [[ -e "$(_resurrect_startup_lock_dir)" ]]; then
+  _fail "resurrect wait: startup coordinator is always released"
+else
+  _pass "resurrect wait: startup coordinator is always released"
+fi
+_lock_path=$(XDG_STATE_HOME=relative _resurrect_startup_lock_dir)
+_assert_eq "resurrect wait: lock uses normalized ds state directory" \
+  "$DS_STATE_DIR/resurrect-startup.$(hostname).lock" "$_lock_path"
+mkdir -p "${_lock_path%/*}"
+printf '%s wrong-process-start\n' "$$" >"$_lock_path"
+_recovered_lock=$(_acquire_resurrect_startup_lock)
+_assert_eq "resurrect wait: recovers a reused owner pid" \
+  "$_lock_path" "$_recovered_lock"
+_release_resurrect_startup_lock "$_recovered_lock"
+_concurrent_wait_line=$(awk '/@ds_resurrect_restored_at/ { print NR; exit }' \
+  <<<"$_concurrent_log")
+_concurrent_create_line=$(awk '/new-session -d -s dev/ { print NR; exit }' \
+  <<<"$_concurrent_log")
+if [[ -n "$_concurrent_wait_line" && -n "$_concurrent_create_line" &&
+  "$_concurrent_wait_line" -lt "$_concurrent_create_line" ]]; then
+  _pass "resurrect wait: concurrent caller waits before creating a session"
+else
+  _fail "resurrect wait: concurrent caller waits before creating a session"
+fi
+unset MOCK_TMUX_SESSION_ROWS MOCK_SESSIONS
+# shellcheck disable=SC2034  # sourced helpers read this global dynamically.
+DS_NO_ATTACH=0
+
+export MOCK_RESURRECT_DIR=""
+_resurrect_xdg=$(_tmpdir)
+_resurrect_xdg_path=$(XDG_DATA_HOME="$_resurrect_xdg" _resurrect_dir)
+_assert_eq "resurrect path: current default uses XDG data" \
+  "$_resurrect_xdg/tmux/resurrect" "$_resurrect_xdg_path"
+mkdir -p "$HOME/.tmux/resurrect"
+_resurrect_legacy_path=$(XDG_DATA_HOME="$_resurrect_xdg" _resurrect_dir)
+_assert_eq "resurrect path: preserves an existing legacy directory" \
+  "$HOME/.tmux/resurrect" "$_resurrect_legacy_path"
+rmdir "$HOME/.tmux/resurrect" "$HOME/.tmux"
+
+unset MOCK_SESSIONS MOCK_DS_MANAGED MOCK_DS_SHELL_NAME MOCK_CONTINUUM_RESTORE
+unset MOCK_RESURRECT_DIR MOCK_RESURRECT_MARKER_FILE MOCK_RESURRECT_BEGIN_FILE
+unset MOCK_CONTINUUM_RESTORE_MAX_DELAY MOCK_NOW MOCK_TMUX_START_TIME
+unset MOCK_TMUX_SERVER_FILE
+
 # The public warm path is invoked frequently from shell navigation. A current
 # status-label marker lets one exact session query serve both existence and
 # reconciliation checks, independent of the number of windows.
@@ -5352,6 +5636,8 @@ _assert_contains "existing session: refreshes future pane titles" \
 _assert_contains "existing session: refreshes current pane title" \
   "set-window-option -t %1 pane-border-format  #{pane_current_command}" "$log"
 _assert_not_contains "existing session: display label does not rename session" "rename-session" "$log"
+_assert_not_contains "existing native session: does not claim ds ownership" \
+  "set-environment -t ds DS_MANAGED 1" "$log"
 
 _reset_tmux_log
 export MOCK_TMUX_WINDOWS=$'%1\n%2'
@@ -5503,6 +5789,8 @@ _assert_contains "usage shows -l" "-l" "$result"
 _assert_contains "usage shows -k" "-k" "$result"
 _assert_contains "usage shows --share" "--share" "$result"
 _assert_contains "usage shows --unshare" "--unshare" "$result"
+_assert_contains "usage shows resurrect integration" "resurrect save FILE" "$result"
+_assert_contains "usage shows resurrect begin hook" "resurrect begin" "$result"
 _assert_contains "usage shows profile-instance" "profile-instance" "$result"
 
 # ---------------------------------------------------------------------------
@@ -5536,6 +5824,41 @@ _assert_contains "ds -h: shows usage" "[session]" "$result"
 # Invalid flag → error + usage
 result=$("$SCRIPT_DIR/../bin/ds" --invalid 2>&1 || true)
 _assert_contains "ds --invalid: shows usage" "[session]" "$result"
+
+_cli_resurrect_file=$(_tmpdir)/resurrect.txt
+printf 'pane\tds\t1\n' >"$_cli_resurrect_file"
+export MOCK_SESSIONS="ds"
+export MOCK_DS_MANAGED=" ds"
+export MOCK_DS_SHELL_NAME="bash"
+"$SCRIPT_DIR/../bin/ds" resurrect save "$_cli_resurrect_file"
+_assert_contains "ds resurrect save: appends metadata" $'ds-v1\tds\tbash' \
+  "$(cat "$_cli_resurrect_file")"
+_reset_tmux_log
+"$SCRIPT_DIR/../bin/ds" resurrect restore "$_cli_resurrect_file"
+_assert_contains "ds resurrect restore: restores metadata" \
+  "tmux set-environment -t ds DS_MANAGED 1" "$(_tmux_log)"
+_reset_tmux_log
+"$SCRIPT_DIR/../bin/ds" resurrect begin
+_assert_contains "ds resurrect begin: publishes lifecycle marker" \
+  "tmux set-option -g @ds_resurrect_restoring_at 1234567890" "$(_tmux_log)"
+result=$("$SCRIPT_DIR/../bin/ds" resurrect save 2>&1 || true)
+_assert_contains "ds resurrect save: requires a snapshot" \
+  "requires a snapshot file" "$result"
+result=$("$SCRIPT_DIR/../bin/ds" resurrect restore one two 2>&1 || true)
+_assert_contains "ds resurrect restore: rejects extra arguments" \
+  "takes at most one snapshot file" "$result"
+_cli_option_path_dir=$(_tmpdir)
+printf 'ds-v1\tds\tbash\n' >"$_cli_option_path_dir/@snapshot"
+_reset_tmux_log
+(
+  cd "$_cli_option_path_dir"
+  "$SCRIPT_DIR/../bin/ds" resurrect restore '@snapshot'
+)
+_assert_contains "ds resurrect restore: consumes @-prefixed file literally" \
+  "tmux has-session -t =ds" "$(_tmux_log)"
+export MOCK_SESSIONS=""
+export MOCK_DS_MANAGED=""
+unset MOCK_DS_SHELL_NAME
 
 # -l with no sessions
 result=$("$SCRIPT_DIR/../bin/ds" -l 2>&1)
