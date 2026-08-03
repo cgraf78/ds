@@ -7038,7 +7038,7 @@ _assert_contains "symlinked checkout ds: repo lib/plugins loads bundled dev prof
 _ci_workflow=$(cat "$SCRIPT_DIR/../.github/workflows/ci.yml")
 _ds_ci=$(cat "$SCRIPT_DIR/ds-ci")
 _assert_contains "CI: pins shared ShellCheck inventory revision" \
-  'cgraf78/actions/.github/workflows/shell-ci.yml@f9a9074b2d43fb3812067477d29307ef1e84e70e' \
+  'cgraf78/actions/.github/workflows/shell-ci.yml@6258122bd79dc9296b5d529c33fc3aad8f4d5796' \
   "$_ci_workflow"
 _assert_contains "CI: delegates the typed shell inventory" \
   'shellcheck-inventory-path: .github/shellcheck-files.txt' "$_ci_workflow"
