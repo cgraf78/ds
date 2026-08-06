@@ -7035,11 +7035,56 @@ _source_link_tmux_calls=$(cat "$_source_link_tmux_log")
 _assert_contains "symlinked checkout ds: repo lib/plugins loads bundled dev profile" \
   "split-window" "$_source_link_tmux_calls"
 
-_ci_workflow=$(cat "$SCRIPT_DIR/../.github/workflows/ci.yml")
+_actions_lock="$SCRIPT_DIR/../.github/cgraf78-actions.lock"
+_actions_sha=missing-lock
+if [[ -f "$_actions_lock" && ! -L "$_actions_lock" ]]; then
+  _actions_sha=$(tr -d '\n' <"$_actions_lock")
+  if [[ "$_actions_sha" =~ ^[0-9a-f]{40}$ ]] &&
+    [[ $(wc -l <"$_actions_lock") -eq 1 ]]; then
+    _pass "CI: has one canonical cgraf78/actions lock"
+  else
+    _fail "CI: has one canonical cgraf78/actions lock"
+  fi
+else
+  _fail "CI: has one canonical cgraf78/actions lock"
+fi
+
+_ci_workflow_path="$SCRIPT_DIR/../.github/workflows/ci.yml"
+_ci_workflow=$(cat "$_ci_workflow_path")
+_retry_workflow=$(cat "$SCRIPT_DIR/../.github/workflows/retry-infrastructure.yml")
+_actions_sync_job=$(awk '
+  /^  actions-sync:$/ { in_sync = 1 }
+  in_sync && /^  [^ ]/ && $0 != "  actions-sync:" { exit }
+  in_sync { print }
+' "$_ci_workflow_path")
 _ds_ci=$(cat "$SCRIPT_DIR/ds-ci")
+_assert_contains "CI: pushes only the maintained main branch" \
+  'branches: [main]' "$_ci_workflow"
 _assert_contains "CI: pins shared ShellCheck inventory revision" \
-  'cgraf78/actions/.github/workflows/shell-ci.yml@fb1777c6f248ece2ed02c8cb6d82533d011d3218' \
+  "cgraf78/actions/.github/workflows/shell-ci.yml@$_actions_sha" \
   "$_ci_workflow"
+_assert_contains "CI: has the required actions synchronization job" \
+  'actions-sync:' "$_actions_sync_job"
+_assert_contains "CI: gives the synchronization job its stable check name" \
+  'name: cgraf78/actions sync' "$_actions_sync_job"
+_assert_contains "CI: synchronization job uses the standard runner" \
+  'runs-on: ubuntu-24.04' "$_actions_sync_job"
+_assert_contains "CI: synchronization job has read-only contents access" \
+  'contents: read' "$_actions_sync_job"
+if [[ $(printf '%s\n' "$_actions_sync_job" | grep -Ec \
+  '^[[:space:]]+- uses:[[:space:]]+actions/checkout@[0-9a-f]{40}([[:space:]]+#[^[:cntrl:]]*)?$') -eq 1 ]]; then
+  _pass "CI: synchronization checkout is immutable"
+else
+  _fail "CI: synchronization checkout is immutable"
+fi
+_assert_contains "CI: synchronization checkout does not persist credentials" \
+  'persist-credentials: false' "$_actions_sync_job"
+_assert_contains "CI: verifier uses the locked actions revision" \
+  "cgraf78/actions/.github/actions/verify-consumer-sync@$_actions_sha" \
+  "$_actions_sync_job"
+_assert_contains "CI: infrastructure retry uses the locked actions revision" \
+  "cgraf78/actions/.github/actions/infra-retry@$_actions_sha" \
+  "$_retry_workflow"
 _assert_contains "CI: delegates the typed shell inventory" \
   'shellcheck-inventory-path: .github/shellcheck-files.txt' "$_ci_workflow"
 _assert_contains "CI: runtime skips only delegated ShellCheck" \
