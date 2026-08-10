@@ -1,4 +1,4 @@
-.TH DS 1 "2026-08-01" "ds" "User Commands"
+.TH DS 1 "2026-08-10" "ds" "User Commands"
 .SH NAME
 ds \- create and manage local or remote tmux dev sessions
 .SH SYNOPSIS
@@ -165,8 +165,22 @@ Configure the plugin hooks as follows:
 .nf
 set -g @resurrect-hook-post-save-layout 'ds resurrect save'
 set -g @resurrect-hook-pre-restore-all 'ds resurrect begin'
-set -g @resurrect-hook-pre-restore-pane-processes 'ds resurrect restore'
+set -g @resurrect-hook-post-restore-all 'ds resurrect restore'
 .fi
+.PP
+When the tmux-tools default-server coordinator disables continuum's native
+restore, it publishes
+.B @tmux-tools-resurrect-auto-restore
+as
+.BR on .
+The
+.B ds
+command consumes that provider-owned tmux option to select the same startup
+wait and halt-file behavior. The option is the complete integration boundary:
+.B ds
+does not invoke or otherwise require the
+.B tmux-tools
+executable.
 .SH EXIT STATUS
 .TP
 .B 0
