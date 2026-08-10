@@ -138,7 +138,11 @@ and may contain spaces (omit it for a rename-only profile). Rows become regular
 profiles, so they resolve, list, and accept instances (`argus-foo`) like any
 other. A `profile-<name>.sh` of the same name always overrides a row, so use a
 `.sh` file when a profile needs a real multi-window/pane layout. See
-[`examples/profile.conf`](examples/profile.conf).
+[`examples/profile.conf`](examples/profile.conf). A complete function-based
+layout is available as
+[`examples/profile-workspace.sh`](examples/profile-workspace.sh); copy it to
+the configuration directory and run
+`DS_WORKSPACE_DIR=/path/to/project ds workspace`.
 
 ### Bundled profiles
 

@@ -1,6 +1,7 @@
 # type<TAB>repository-relative path
 # `fixture` records are discovered but intentionally excluded from ShellCheck.
 program	bin/ds
+program	examples/profile-workspace.sh
 program	install.sh
 program	lib/plugins/connect-autossh.sh
 program	lib/plugins/connect-et.sh

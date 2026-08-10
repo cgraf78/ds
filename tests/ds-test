@@ -1175,6 +1175,69 @@ _assert_contains "data profile: later .sh definition overrides .conf" "argus_fro
 rm -f "$CONF_DIR/profile.conf" "$CONF_DIR/profile-argus.sh"
 
 # ---------------------------------------------------------------------------
+# Tests: checked-in examples are executable consumer contracts
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== Checked-in examples ==="
+
+example_dir="$SCRIPT_DIR/../examples"
+if [[ -f "$example_dir/profile-workspace.sh" ]]; then
+  # shellcheck source=../examples/profile-workspace.sh
+  . "$example_dir/profile-workspace.sh"
+  _reset_tmux_log
+  DS_WORKSPACE_DIR="$TEST_HOME/workspace with spaces" \
+    _profile_workspace "example-session"
+  log=$(_tmux_log)
+  printf -v example_cd 'cd %q' "$TEST_HOME/workspace with spaces"
+  _assert_contains "example profile: renames the first window" \
+    "rename-window -t example-session:1 editor" "$log"
+  _assert_contains "example profile: quotes its working directory" \
+    "send-keys -t example-session:1 $example_cd C-m" "$log"
+  _assert_contains "example profile: creates a shell pane in the workspace" \
+    "split-window -h -t example-session:1 -c $TEST_HOME/workspace with spaces" "$log"
+  _assert_contains "example profile: creates a second workspace window" \
+    "new-window -d -t example-session -n shell -c $TEST_HOME/workspace with spaces" "$log"
+else
+  _fail "example profile: profile-workspace.sh exists"
+fi
+
+saved_conf_dir="$CONF_DIR"
+saved_lib_dir="${DS_LIB_DIR:-}"
+CONF_DIR="$example_dir"
+DS_LIB_DIR=""
+
+_reset_lookup
+lookup_host "example-box"
+_assert_eq "example connect config: glob selects the public SSH transport" \
+  "ssh" "$CONNECT"
+_reset_lookup
+lookup_host "local-example"
+_assert_eq "example connect config: local host disables transport" "-" "$CONNECT"
+
+_load_data_profiles
+_reset_tmux_log
+_profile_editor "example-session"
+log=$(_tmux_log)
+_assert_contains "example data profile: renames the first window" \
+  "rename-window -t example-session:1 editor" "$log"
+# shellcheck disable=SC2016 # Assert the literal expansion deferred to the pane shell.
+_assert_contains "example data profile: preserves the runtime editor command" \
+  'send-keys -t example-session:1 ${EDITOR:-vi} . C-m' "$log"
+
+DS_UPTERM_HOST=""
+DS_UPTERM_SHARE_TTL=""
+_share_load_config
+_assert_eq "example share config: uses Upterm's public service" \
+  "uptermd.upterm.dev:22" "$DS_UPTERM_HOST"
+_assert_eq "example share config: supplies a bounded lifetime" \
+  "3600" "$DS_UPTERM_SHARE_TTL"
+
+CONF_DIR="$saved_conf_dir"
+DS_LIB_DIR="$saved_lib_dir"
+unset saved_conf_dir saved_lib_dir example_dir example_cd
+
+# ---------------------------------------------------------------------------
 # Tests: bundled dev/chat profiles quote the cd target
 # ---------------------------------------------------------------------------
 # Regression: `cd '$dir'` produced an unbalanced command when DS_DEV_DIR /
