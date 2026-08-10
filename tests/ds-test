@@ -196,8 +196,8 @@ case "${args[0]:-}" in
         exit 0
         ;;
     show-options)
-        if [[ " ${args[*]} " == *" @ds-resurrect-auto-restore"* ]]; then
-            echo "${MOCK_DS_AUTO_RESTORE:-}"
+        if [[ " ${args[*]} " == *" @tmux-tools-resurrect-auto-restore"* ]]; then
+            echo "${MOCK_TMUX_TOOLS_AUTO_RESTORE:-}"
             exit 0
         fi
         if [[ " ${args[*]} " == *" @continuum-restore-max-delay"* ]]; then
@@ -5360,27 +5360,35 @@ else
   _fail "resurrect wait: detects a pending saved environment"
 fi
 export MOCK_CONTINUUM_RESTORE=off
-export MOCK_DS_AUTO_RESTORE=on
+# The coordinator publishes provider-owned state through tmux. DS consumes that
+# narrow protocol without needing to know how the coordinator is installed or
+# invoking any tmux-tools command itself.
+export MOCK_TMUX_TOOLS_AUTO_RESTORE=on
+_reset_tmux_log
 if _resurrect_restore_expected; then
-  _pass "resurrect wait: accepts default-server restore ownership"
+  _pass "resurrect wait: accepts provider-owned restore ownership"
 else
-  _fail "resurrect wait: accepts default-server restore ownership"
+  _fail "resurrect wait: accepts provider-owned restore ownership"
 fi
+_provider_restore_log=$(_tmux_log)
+_assert_contains "resurrect wait: reads the provider-owned restore signal" \
+  "tmux show-options -gqv @tmux-tools-resurrect-auto-restore" \
+  "$_provider_restore_log"
 touch "$HOME/tmux_no_auto_restore"
 if _resurrect_restore_expected; then
-  _fail "resurrect wait: default ownership still honors the halt file"
+  _fail "resurrect wait: provider ownership still honors the halt file"
 else
-  _pass "resurrect wait: default ownership still honors the halt file"
+  _pass "resurrect wait: provider ownership still honors the halt file"
 fi
 rm "$HOME/tmux_no_auto_restore" "$_resurrect_wait_dir/last"
 if _resurrect_restore_expected; then
-  _fail "resurrect wait: default ownership still requires a snapshot"
+  _fail "resurrect wait: provider ownership still requires a snapshot"
 else
-  _pass "resurrect wait: default ownership still requires a snapshot"
+  _pass "resurrect wait: provider ownership still requires a snapshot"
 fi
 touch "$_resurrect_wait_dir/last"
 export MOCK_CONTINUUM_RESTORE=on
-unset MOCK_DS_AUTO_RESTORE
+unset MOCK_TMUX_TOOLS_AUTO_RESTORE
 (
   sleep 0.2
   printf '1234567890\n' >"$_resurrect_wait_marker"

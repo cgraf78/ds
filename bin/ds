@@ -683,11 +683,14 @@ _resurrect_dir() {
 }
 
 _resurrect_restore_expected() {
-  local default_enabled enabled max_delay now server_start
+  local enabled max_delay now provider_enabled server_start
   enabled=$(tmux show-options -gqv @continuum-restore 2>/dev/null) || enabled=""
-  default_enabled=$(tmux show-options -gqv @ds-resurrect-auto-restore \
-    2>/dev/null) || default_enabled=""
-  [[ ("$enabled" == "on" || "$default_enabled" == "on") &&
+  # tmux-tools owns the default-server coordinator and publishes only this
+  # tmux option. Reading that narrow signal keeps DS a pure consumer: DS does
+  # not need to execute, install, or otherwise depend on tmux-tools itself.
+  provider_enabled=$(tmux show-options -gqv \
+    @tmux-tools-resurrect-auto-restore 2>/dev/null) || provider_enabled=""
+  [[ ("$enabled" == "on" || "$provider_enabled" == "on") &&
     ! -f "$HOME/tmux_no_auto_restore" &&
     -f "$(_resurrect_dir)/last" ]] || return 1
 
