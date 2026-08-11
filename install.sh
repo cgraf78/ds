@@ -22,28 +22,28 @@
   }
 
   require_delegate() {
-    local checkout_root=$1 delegate
+    local checkout_root=$1 delegate_path=${2:-$checkout_delegate} delegate
 
-    delegate="$checkout_root/$checkout_delegate"
+    delegate="$checkout_root/$delegate_path"
     [[ -f "$delegate" && ! -L "$delegate" ]] ||
       die "checkout installer is missing: $delegate"
   }
 
   exec_bootstrap_git() {
-    local config_count=${GIT_CONFIG_COUNT:-0} config_index
-
-    if [[ "$config_count" =~ ^[0-9]+$ ]]; then
-      for ((config_index = 0; config_index < config_count; config_index++)); do
-        unset "GIT_CONFIG_KEY_$config_index"
-        unset "GIT_CONFIG_VALUE_$config_index"
-      done
-    fi
+    [[ -n ${CHECKOUT_INSTALLER_GIT_HOME:-} ]] ||
+      die 'internal Git configuration home is not set'
     unset GIT_ALTERNATE_OBJECT_DIRECTORIES
     unset GIT_COMMON_DIR
+    unset GIT_CEILING_DIRECTORIES
     unset GIT_CONFIG
     unset GIT_CONFIG_COUNT
+    unset GIT_CONFIG_GLOBAL
+    unset GIT_CONFIG_NOSYSTEM
     unset GIT_CONFIG_PARAMETERS
+    unset GIT_CONFIG_SYSTEM
     unset GIT_DIR
+    unset GIT_DISCOVERY_ACROSS_FILESYSTEM
+    unset GIT_EXEC_PATH
     unset GIT_GRAFT_FILE
     unset GIT_IMPLICIT_WORK_TREE
     unset GIT_INDEX_FILE
@@ -52,19 +52,48 @@
     unset GIT_NO_REPLACE_OBJECTS
     unset GIT_OBJECT_DIRECTORY
     unset GIT_PREFIX
+    unset GIT_PROXY_COMMAND
+    unset GIT_ALLOW_PROTOCOL
+    unset GIT_PROTOCOL_FROM_USER
     unset GIT_REPLACE_REF_BASE
     unset GIT_SHALLOW_FILE
+    unset GIT_SSH
+    unset GIT_SSH_VARIANT
+    unset GIT_SSL_NO_VERIFY
+    unset GIT_TEMPLATE_DIR
     unset GIT_WORK_TREE
-    GIT_TERMINAL_PROMPT=0 exec git \
+    GIT_CONFIG_GLOBAL=/dev/null \
+      GIT_CONFIG_NOSYSTEM=1 \
+      GIT_PROTOCOL_FROM_USER=0 \
+      GIT_TERMINAL_PROMPT=0 \
+      HOME="$CHECKOUT_INSTALLER_GIT_HOME" \
+      XDG_CONFIG_HOME="$CHECKOUT_INSTALLER_GIT_HOME/xdg" \
+      exec git \
       -c core.hooksPath=/dev/null \
       -c core.fsmonitor=false \
       -c submodule.recurse=false \
       -c fetch.recurseSubmodules=false \
+      -c protocol.allow=never \
+      -c protocol.file.allow=always \
+      -c protocol.https.allow=always \
+      -c protocol.ssh.allow=always \
       "$@"
   }
 
   bootstrap_git() {
-    (exec_bootstrap_git "$@")
+    local isolated_home status
+
+    isolated_home=$(mktemp -d \
+      "${TMPDIR:-/tmp}/cgraf78-checkout-installer.git.XXXXXX") ||
+      die 'cannot create isolated Git configuration home'
+    if (CHECKOUT_INSTALLER_GIT_HOME="$isolated_home" \
+      exec_bootstrap_git "$@"); then
+      status=0
+    else
+      status=$?
+    fi
+    rm -rf -- "$isolated_home"
+    return "$status"
   }
 
   trusted_checkout_git() {
@@ -78,10 +107,16 @@
   network_git() {
     local status
 
+    active_git_home=$(mktemp -d \
+      "${TMPDIR:-/tmp}/cgraf78-checkout-installer.git.XXXXXX") ||
+      die 'cannot create isolated Git configuration home'
+
     (
       GIT_ASKPASS=/bin/false
       SSH_ASKPASS=/bin/false
       GIT_SSH_COMMAND='ssh -oBatchMode=yes'
+      CHECKOUT_INSTALLER_GIT_HOME=$active_git_home
+      export CHECKOUT_INSTALLER_GIT_HOME
       export GIT_ASKPASS SSH_ASKPASS GIT_SSH_COMMAND
       exec_bootstrap_git -c credential.helper= "$@"
     ) </dev/null &
@@ -91,41 +126,31 @@
     status=$?
     active_child_pid=
     set -e
-    return "$status"
-  }
-
-  tracked_git() {
-    local status
-
-    (exec_bootstrap_git "$@") &
-    active_child_pid=$!
-    set +e
-    wait "$active_child_pid"
-    status=$?
-    active_child_pid=
-    set -e
+    rm -rf -- "$active_git_home"
+    active_git_home=
     return "$status"
   }
 
   require_tracked_delegate() {
-    local checkout_root=$1
+    local checkout_root=$1 delegate_path=${2:-$checkout_delegate}
 
-    require_delegate "$checkout_root"
+    require_delegate "$checkout_root" "$delegate_path"
     bootstrap_git -C "$checkout_root" ls-files --error-unmatch -- \
-      "$checkout_delegate" >/dev/null 2>&1 ||
-      die "checkout installer is not tracked: $checkout_root/$checkout_delegate"
+      "$delegate_path" >/dev/null 2>&1 ||
+      die "checkout installer is not tracked: $checkout_root/$delegate_path"
   }
 
   require_tree_delegate() {
-    local checkout_root=$1 revision=$2 entry mode type object path
+    local checkout_root=$1 revision=$2
+    local delegate_path=${3:-$checkout_delegate} entry mode type object path
 
     entry=$(bootstrap_git -C "$checkout_root" ls-tree "$revision" -- \
-      "$checkout_delegate") ||
+      "$delegate_path") ||
       die "cannot inspect checkout installer in revision $revision"
     IFS=$' \t' read -r mode type object path <<<"$entry"
     [[ ("$mode" == 100644 || "$mode" == 100755) &&
-      "$type" == blob && -n "$object" && "$path" == "$checkout_delegate" ]] ||
-      die "checkout installer is missing from revision $revision: $checkout_delegate"
+      "$type" == blob && -n "$object" && "$path" == "$delegate_path" ]] ||
+      die "checkout installer is missing from revision $revision: $delegate_path"
   }
 
   checkout_source_root() {
@@ -153,7 +178,7 @@
 
     require_delegate "$checkout_root"
     umask "$caller_umask"
-    exec /bin/bash "$checkout_root/$checkout_delegate" "$@"
+    exec "$BASH" "$checkout_root/$checkout_delegate" "$@"
   }
 
   # A generated installer committed at the repository root keeps ordinary
@@ -189,6 +214,8 @@
       die "managed checkout path must be absolute: $checkout_dir"
       ;;
   esac
+  [[ "$checkout_dir" != *$'\n'* && "$checkout_dir" != *$'\r'* ]] ||
+    die 'managed checkout path must not contain line breaks'
 
   checkout_parent=${checkout_dir%/*}
   checkout_name=${checkout_dir##*/}
@@ -204,7 +231,18 @@
   staging=
   publish_identity=
   active_child_pid=
-  lock_dir="$checkout_parent/.${checkout_slug}.install.lock"
+  active_git_home=
+  lock_dir="$checkout_parent/.${checkout_name}.install.lock"
+  update_transaction="$checkout_parent/.${checkout_name}.install.transaction"
+  update_identity=
+  update_next="$update_transaction/next"
+  update_previous="$update_transaction/previous"
+  update_candidate_head="$update_transaction/candidate-head"
+  update_previous_head="$update_transaction/previous-head"
+  update_recorded_delegate=
+  update_next_marker=.git/cgraf78-update-next-identity
+  update_previous_marker=.git/cgraf78-update-previous-identity
+  update_transaction_created=0
   lock_held=0
 
   # shellcheck disable=SC2329 # Called by cleanup through the EXIT trap.
@@ -231,12 +269,221 @@
     fi
   }
 
+  validate_managed_checkout() {
+    local candidate=$1 top branch origin status
+
+    [[ -d "$candidate" && ! -L "$candidate" ]] ||
+      die "destination is not a managed Git checkout: $candidate"
+    top=$(bootstrap_git -C "$candidate" rev-parse --show-toplevel 2>/dev/null) ||
+      die "destination is not a managed Git checkout: $candidate"
+    top=$(cd -P -- "$top" && pwd -P) ||
+      die "cannot resolve managed Git checkout: $candidate"
+    candidate=$(cd -P -- "$candidate" && pwd -P) ||
+      die "cannot resolve managed Git checkout: $candidate"
+    [[ "$top" == "$candidate" ]] ||
+      die "destination is not the root of its Git checkout: $candidate"
+
+    origin=$(bootstrap_git -C "$candidate" remote get-url origin 2>/dev/null) ||
+      die "managed Git checkout has no origin: $candidate"
+    [[ "$origin" == "$repo_url" ]] ||
+      die "managed Git checkout origin differs: $origin"
+    branch=$(bootstrap_git -C "$candidate" symbolic-ref --quiet --short HEAD 2>/dev/null) ||
+      die "managed Git checkout is detached: $candidate"
+    [[ "$branch" == "$checkout_ref" ]] ||
+      die "managed Git checkout branch differs: $branch"
+    status=$(bootstrap_git -C "$candidate" status --porcelain \
+      --untracked-files=normal) ||
+      die "cannot inspect managed Git checkout: $candidate"
+    [[ -z "$status" ]] ||
+      die "managed Git checkout is dirty; refusing to update: $candidate"
+  }
+
+  locate_update_identity() {
+    local candidate count=0
+
+    update_identity=
+    for candidate in "$update_transaction"/identity.*; do
+      [[ -e "$candidate" || -L "$candidate" ]] || continue
+      count=$((count + 1))
+      update_identity=$candidate
+    done
+    [[ "$count" -eq 1 && -f "$update_identity" &&
+      ! -L "$update_identity" ]] || return 1
+    update_recorded_delegate=$(sed -n '5p' "$update_identity")
+    case "$update_recorded_delegate" in
+      '' | install.sh | -* | . | .. | /* | ./* | */./* | */. | *[!A-Za-z0-9._/-]* | *//* | ../* | */../* | */..)
+        return 1
+        ;;
+    esac
+    [[ $(sed -n '1p' "$update_identity") == 'cgraf78 checkout installer update transaction v1' &&
+    $(sed -n '2p' "$update_identity") == "$checkout_dir" &&
+    $(sed -n '3p' "$update_identity") == "$checkout_repo" &&
+    $(sed -n '4p' "$update_identity") == "$checkout_ref" ]]
+  }
+
+  update_identity_matches() {
+    local marker=$1
+
+    [[ -f "$update_identity" && ! -L "$update_identity" &&
+      -f "$marker" && ! -L "$marker" &&
+      "$update_identity" -ef "$marker" ]]
+  }
+
+  reclaim_nested_update_checkout() {
+    local nested=$1 destination=$2 marker=$3
+
+    [[ ! -e "$destination" && ! -L "$destination" ]] || return 1
+    update_identity_matches "$nested/$marker" || return 1
+    mv -n "$nested" "$destination" || return 1
+    update_identity_matches "$destination/$marker"
+  }
+
+  validate_recorded_checkout() {
+    local candidate=$1 head_file=$2 require_recorded_delegate=$3 actual expected
+
+    [[ -f "$head_file" && ! -L "$head_file" ]] || return 1
+    expected=$(sed -n '1p' "$head_file")
+    [[ "$expected" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]] || return 1
+    if ! (
+      validate_managed_checkout "$candidate"
+      if [[ "$require_recorded_delegate" == true ]]; then
+        require_tree_delegate "$candidate" HEAD "$update_recorded_delegate"
+        require_tracked_delegate "$candidate" "$update_recorded_delegate"
+      fi
+    ); then
+      return 1
+    fi
+    actual=$(bootstrap_git -C "$candidate" rev-parse HEAD) || return 1
+    [[ "$actual" == "$expected" ]]
+  }
+
+  # Finish or roll back an update transaction using only hard-link identity
+  # proofs. This also handles a transaction left after SIGKILL once the user
+  # has confirmed no installer is active and removed the stale directory lock.
+  recover_update_transaction() {
+    local current_next current_previous nested_next nested_previous
+    local previous_next previous_previous
+
+    [[ -e "$update_transaction" || -L "$update_transaction" ]] || return 0
+    if [[ ! -d "$update_transaction" || -L "$update_transaction" ]]; then
+      printf 'install.sh: update transaction is not a regular directory: %s\n' \
+        "$update_transaction" >&2
+      return 1
+    fi
+    if ! locate_update_identity; then
+      if [[ "$update_transaction_created" -eq 1 ]] &&
+        rmdir "$update_transaction" 2>/dev/null; then
+        update_transaction_created=0
+        return 0
+      fi
+      printf 'install.sh: update transaction has no valid ownership identity: %s\n' \
+        "$update_transaction" >&2
+      return 1
+    fi
+
+    current_next="$checkout_dir/$update_next_marker"
+    current_previous="$checkout_dir/$update_previous_marker"
+    nested_next="$checkout_dir/${update_next##*/}"
+    nested_previous="$checkout_dir/${update_previous##*/}"
+    previous_next="$update_previous/$update_next_marker"
+    previous_previous="$update_previous/$update_previous_marker"
+
+    # Portable mv nests a source when a same-UID race creates the target
+    # directory. Reclaim only a child carrying this transaction's hard-link
+    # identity, and leave the foreign target itself untouched.
+    if [[ ! -e "$update_next" && ! -L "$update_next" &&
+      -d "$nested_next" && ! -L "$nested_next" ]] &&
+      update_identity_matches "$nested_next/$update_next_marker"; then
+      reclaim_nested_update_checkout "$nested_next" "$update_next" \
+        "$update_next_marker" || return 1
+    fi
+    if [[ ! -e "$update_previous" && ! -L "$update_previous" &&
+      -d "$nested_previous" && ! -L "$nested_previous" ]] &&
+      update_identity_matches "$nested_previous/$update_previous_marker"; then
+      reclaim_nested_update_checkout "$nested_previous" "$update_previous" \
+        "$update_previous_marker" || return 1
+    fi
+
+    if [[ -e "$update_previous" || -L "$update_previous" ]]; then
+      if [[ ! -d "$update_previous" || -L "$update_previous" ]]; then
+        printf 'install.sh: update rollback is not a regular directory: %s\n' \
+          "$update_previous" >&2
+        return 1
+      fi
+      if update_identity_matches "$current_next"; then
+        # The fully validated candidate reached the stable path. Publication
+        # is the commit point, so finish retiring the old checkout.
+        validate_recorded_checkout "$checkout_dir" \
+          "$update_candidate_head" true ||
+          return 1
+        rm -rf -- "$update_previous" || return 1
+        rm -f -- "$current_next" || return 1
+      elif [[ ! -e "$checkout_dir" && ! -L "$checkout_dir" ]] &&
+        update_identity_matches "$previous_previous"; then
+        # The old checkout moved but candidate publication did not complete.
+        validate_recorded_checkout "$update_previous" \
+          "$update_previous_head" false || return 1
+        mv -n "$update_previous" "$checkout_dir" || return 1
+        if ! update_identity_matches "$current_previous"; then
+          if [[ -d "$nested_previous" && ! -L "$nested_previous" ]]; then
+            reclaim_nested_update_checkout "$nested_previous" \
+              "$update_previous" "$update_previous_marker" || return 1
+          fi
+          return 1
+        fi
+        rm -f -- "$current_previous" || return 1
+      else
+        printf 'install.sh: cannot safely recover managed checkout update: %s\n' \
+          "$checkout_dir" >&2
+        return 1
+      fi
+    elif update_identity_matches "$current_previous"; then
+      # The transaction stopped before moving the old checkout.
+      validate_recorded_checkout "$checkout_dir" \
+        "$update_previous_head" false ||
+        return 1
+      rm -f -- "$current_previous" || return 1
+    elif update_identity_matches "$current_next"; then
+      # The old checkout was already retired; finish the committed update.
+      validate_recorded_checkout "$checkout_dir" \
+        "$update_candidate_head" true ||
+        return 1
+      rm -f -- "$current_next" || return 1
+    elif [[ -e "$current_next" || -L "$current_next" ||
+      -e "$current_previous" || -L "$current_previous" ||
+      -e "$previous_next" || -L "$previous_next" ||
+      -e "$previous_previous" || -L "$previous_previous" ]]; then
+      printf 'install.sh: update transaction identity does not match checkout: %s\n' \
+        "$checkout_dir" >&2
+      return 1
+    fi
+
+    if [[ -e "$update_next" || -L "$update_next" ]]; then
+      if [[ ! -d "$update_next" || -L "$update_next" ]]; then
+        printf 'install.sh: staged update is not a regular directory: %s\n' \
+          "$update_next" >&2
+        return 1
+      fi
+      rm -rf -- "$update_next" || return 1
+    fi
+    [[ ! -e "$update_previous" && ! -L "$update_previous" ]] || return 1
+    rm -f -- "$update_candidate_head" "$update_previous_head" || return 1
+    rm -f -- "$update_identity" || return 1
+    rmdir "$update_transaction" || return 1
+    update_transaction_created=0
+  }
+
   # shellcheck disable=SC2329 # Installed as the EXIT trap below.
   cleanup() {
     local status=$?
 
     trap - EXIT HUP INT TERM
+    recover_update_transaction || true
     recover_staging_location
+    if [[ -n "$active_git_home" && -d "$active_git_home" &&
+      ! -L "$active_git_home" ]]; then
+      rm -rf -- "$active_git_home"
+    fi
     if [[ -n "$staging" && -d "$staging" && ! -L "$staging" ]]; then
       rm -rf -- "$staging"
     fi
@@ -275,11 +522,15 @@
 
   # shellcheck disable=SC2329 # Installed as the signal traps below.
   forward_signal() {
-    local signal=$1 status=$2
+    local signal=$1 status=$2 child_signal=$1
 
     trap - HUP INT TERM
     if [[ -n "$active_child_pid" ]]; then
-      signal_process_tree "$active_child_pid" "$signal"
+      # Non-job-control Bash starts asynchronous children with SIGINT ignored.
+      # Use a catchable termination signal for those owned children while the
+      # bootstrap still reports the conventional interrupt status to callers.
+      [[ "$signal" == INT ]] && child_signal=TERM
+      signal_process_tree "$active_child_pid" "$child_signal"
       wait "$active_child_pid" 2>/dev/null || true
       active_child_pid=
     fi
@@ -292,54 +543,63 @@
   trap 'forward_signal TERM 143' TERM
 
   if ! mkdir "$lock_dir" 2>/dev/null; then
-    die "another install is using the managed checkout lock: $lock_dir"
+    die "another install may be using the managed checkout lock: $lock_dir; if no install is running, remove that exact empty directory with rmdir and retry"
   fi
   lock_held=1
 
-  validate_managed_checkout() {
-    local candidate=$1 top branch origin status
-
-    [[ -d "$candidate" && ! -L "$candidate" ]] ||
-      die "destination is not a managed Git checkout: $candidate"
-    top=$(bootstrap_git -C "$candidate" rev-parse --show-toplevel 2>/dev/null) ||
-      die "destination is not a managed Git checkout: $candidate"
-    top=$(cd -P -- "$top" && pwd -P) ||
-      die "cannot resolve managed Git checkout: $candidate"
-    candidate=$(cd -P -- "$candidate" && pwd -P) ||
-      die "cannot resolve managed Git checkout: $candidate"
-    [[ "$top" == "$candidate" ]] ||
-      die "destination is not the root of its Git checkout: $candidate"
-
-    origin=$(bootstrap_git -C "$candidate" remote get-url origin 2>/dev/null) ||
-      die "managed Git checkout has no origin: $candidate"
-    [[ "$origin" == "$repo_url" ]] ||
-      die "managed Git checkout origin differs: $origin"
-    branch=$(bootstrap_git -C "$candidate" symbolic-ref --quiet --short HEAD 2>/dev/null) ||
-      die "managed Git checkout is detached: $candidate"
-    [[ "$branch" == "$checkout_ref" ]] ||
-      die "managed Git checkout branch differs: $branch"
-    status=$(bootstrap_git -C "$candidate" status --porcelain \
-      --untracked-files=normal) ||
-      die "cannot inspect managed Git checkout: $candidate"
-    [[ -z "$status" ]] ||
-      die "managed Git checkout is dirty; refusing to update: $candidate"
-  }
+  recover_update_transaction ||
+    die "cannot recover interrupted managed checkout update: $update_transaction"
 
   if [[ -e "$checkout_dir" || -L "$checkout_dir" ]]; then
     validate_managed_checkout "$checkout_dir"
     printf 'install.sh: updating %s\n' "$checkout_dir"
-    network_git -C "$checkout_dir" \
-      fetch --quiet --no-tags origin "$checkout_ref" </dev/null ||
-      die "cannot fetch $checkout_repo branch $checkout_ref"
-    fetched_head=$(bootstrap_git -C "$checkout_dir" rev-parse FETCH_HEAD) ||
-      die "cannot resolve fetched $checkout_repo revision"
-    require_tree_delegate "$checkout_dir" "$fetched_head"
-    tracked_git -C "$checkout_dir" merge --quiet --ff-only "$fetched_head" ||
-      die "managed Git checkout cannot fast-forward: $checkout_dir"
+    mkdir "$update_transaction" ||
+      die "cannot create update transaction: $update_transaction"
+    update_transaction_created=1
+    update_identity=$(mktemp "$update_transaction/identity.XXXXXX") ||
+      die "cannot create update transaction identity: $update_identity"
+    if ! printf '%s\n%s\n%s\n%s\n%s\n' \
+      'cgraf78 checkout installer update transaction v1' \
+      "$checkout_dir" "$checkout_repo" "$checkout_ref" \
+      "$checkout_delegate" >"$update_identity"; then
+      rm -f -- "$update_identity"
+      die "cannot write update transaction identity: $update_transaction"
+    fi
+    update_recorded_delegate=$checkout_delegate
+    network_git -c init.templateDir= \
+      clone --quiet --single-branch --branch "$checkout_ref" \
+      --no-tags -- "$repo_url" "$update_next" </dev/null ||
+      die "cannot clone $checkout_repo branch $checkout_ref for update"
+    validate_managed_checkout "$update_next"
+    require_tree_delegate "$update_next" HEAD
+    require_tracked_delegate "$update_next"
     current_head=$(bootstrap_git -C "$checkout_dir" rev-parse HEAD) ||
-      die "cannot resolve managed Git checkout revision: $checkout_dir"
-    [[ "$current_head" == "$fetched_head" ]] ||
-      die "managed Git checkout contains commits outside origin/$checkout_ref"
+      die "cannot resolve managed checkout revision: $checkout_dir"
+    candidate_head=$(bootstrap_git -C "$update_next" rev-parse HEAD) ||
+      die "cannot resolve staged managed checkout revision: $update_next"
+    bootstrap_git -C "$update_next" merge-base --is-ancestor \
+      "$current_head" "$candidate_head" ||
+      die "managed Git checkout cannot fast-forward: $checkout_dir"
+    if [[ "$current_head" != "$candidate_head" ]]; then
+      printf '%s\n' "$candidate_head" >"$update_candidate_head" ||
+        die "cannot record staged managed checkout revision: $candidate_head"
+      printf '%s\n' "$current_head" >"$update_previous_head" ||
+        die "cannot record previous managed checkout revision: $current_head"
+      ln "$update_identity" "$update_next/$update_next_marker" ||
+        die 'cannot prepare staged update identity'
+      ln "$update_identity" "$checkout_dir/$update_previous_marker" ||
+        die 'cannot prepare managed checkout rollback identity'
+      mv -n "$checkout_dir" "$update_previous" ||
+        die "cannot stage previous managed checkout: $checkout_dir"
+      update_identity_matches "$update_previous/$update_previous_marker" ||
+        die "cannot verify previous managed checkout identity: $update_previous"
+      mv -n "$update_next" "$checkout_dir" ||
+        die "cannot publish managed checkout update: $checkout_dir"
+      update_identity_matches "$checkout_dir/$update_next_marker" ||
+        die "cannot verify published managed checkout update: $checkout_dir"
+    fi
+    recover_update_transaction ||
+      die "cannot finish managed checkout update: $update_transaction"
     validate_managed_checkout "$checkout_dir"
     require_tracked_delegate "$checkout_dir"
   else
@@ -376,7 +636,7 @@
   require_delegate "$checkout_dir"
   umask "$caller_umask"
   set +e
-  /bin/bash "$checkout_dir/$checkout_delegate" "$@" <&0 &
+  "$BASH" "$checkout_dir/$checkout_delegate" "$@" <&0 &
   active_child_pid=$!
   wait "$active_child_pid"
   delegate_status=$?
