@@ -6960,89 +6960,258 @@ _assert_eq "host2 found (blank lines ignored)" "et" "$CONNECT"
 echo ""
 echo "=== Installer ==="
 
-_inst_repo=$(_tmpdir)
-mkdir -p "$_inst_repo/bin" "$_inst_repo/lib/plugins" "$_inst_repo/man/man1"
-cat >"$_inst_repo/bin/ds" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "mock ds"
-SH
-chmod +x "$_inst_repo/bin/ds"
-printf '%s\n' "# mock plugin" >"$_inst_repo/lib/plugins/mock-plugin.sh"
-printf '%s\n' ".TH DS 1" >"$_inst_repo/man/man1/ds.1"
+_installer_root=$(cd "$SCRIPT_DIR/.." && pwd)
 
-_inst_mock_bin=$(_tmpdir)
-_inst_git_log="$(_tmpdir)/git.log"
-cat >"$_inst_mock_bin/git" <<'SH'
+_installer_inventory() {
+  local variable="$1"
+
+  awk -v start="$variable=(" '
+    $0 == start { inside = 1; next }
+    inside && $0 == ")" { exit }
+    inside {
+      sub(/^[[:space:]]+/, "")
+      sub(/[[:space:]]+$/, "")
+      if (length($0) > 0) print
+    }
+  ' "$SCRIPT_DIR/../install.sh"
+}
+
+_assert_path_missing() {
+  local description="$1" path="$2"
+
+  if [[ ! -e "$path" && ! -L "$path" ]]; then
+    _pass "$description"
+  else
+    _fail "$description (path should not exist: $path)"
+  fi
+}
+
+_public_commands=$(
+  for path in "$SCRIPT_DIR/../bin/"*; do
+    [[ -f "$path" && -x "$path" ]] || continue
+    basename "$path"
+  done | LC_ALL=C sort
+)
+_public_manpages=$(
+  for path in "$SCRIPT_DIR/../man/man1/"*.1; do
+    [[ -f "$path" ]] || continue
+    basename "$path"
+  done | LC_ALL=C sort
+)
+_matching_manpages=$(
+  while IFS= read -r command; do
+    [[ -n "$command" ]] && printf '%s.1\n' "$command"
+  done <<<"$_public_commands"
+)
+_assert_eq "installer: command inventory covers every public executable" \
+  "$_public_commands" "$(_installer_inventory COMMANDS)"
+_assert_eq "installer: manpage inventory covers every public manpage" \
+  "$_public_manpages" "$(_installer_inventory MANPAGES)"
+_assert_eq "installer: every public command has one matching manpage" \
+  "$_matching_manpages" "$_public_manpages"
+
+_run_ds_installer() {
+  local installer="$1" prefix="$2" bin_dir="$3" man_dir="$4"
+
+  PREFIX="$prefix" BIN_DIR="$bin_dir" MAN_DIR="$man_dir" "$installer"
+}
+
+_install_prefix=$(_tmpdir)
+_install_output=$(
+  cd "$SCRIPT_DIR/.."
+  _run_ds_installer "$SCRIPT_DIR/../install.sh" "$_install_prefix" \
+    "$_install_prefix/bin" "$_install_prefix/share/man/man1" 2>&1
+)
+_assert_eq "installer: command link selects this checkout" \
+  "$_installer_root/bin/ds" "$(readlink "$_install_prefix/bin/ds")"
+_assert_eq "installer: manpage link selects this checkout" \
+  "$_installer_root/man/man1/ds.1" \
+  "$(readlink "$_install_prefix/share/man/man1/ds.1")"
+_assert_contains "installer: reports the command destination" \
+  "installed ds to $_install_prefix/bin/ds" "$_install_output"
+_assert_contains "installer: reports the manpage destination" \
+  "installed ds manpage to $_install_prefix/share/man/man1/ds.1" \
+  "$_install_output"
+_assert_path_missing "installer: keeps its library checkout-owned" \
+  "$_install_prefix/lib"
+
+(
+  cd "$SCRIPT_DIR/.."
+  _run_ds_installer "$SCRIPT_DIR/../install.sh" "$_install_prefix" \
+    "$_install_prefix/bin" "$_install_prefix/share/man/man1" >/dev/null
+)
+_assert_eq "installer: reinstall keeps the command target stable" \
+  "$_installer_root/bin/ds" "$(readlink "$_install_prefix/bin/ds")"
+_assert_eq "installer: reinstall keeps the manpage target stable" \
+  "$_installer_root/man/man1/ds.1" \
+  "$(readlink "$_install_prefix/share/man/man1/ds.1")"
+
+_custom_prefix=$(_tmpdir)
+_custom_bin=$(_tmpdir)/commands
+_custom_man=$(_tmpdir)/manuals
+(
+  cd "$SCRIPT_DIR/.."
+  _run_ds_installer "$SCRIPT_DIR/../install.sh" "$_custom_prefix" \
+    "$_custom_bin" "$_custom_man" >/dev/null
+)
+_assert_eq "installer: honors BIN_DIR" \
+  "$_installer_root/bin/ds" "$(readlink "$_custom_bin/ds")"
+_assert_eq "installer: honors MAN_DIR" \
+  "$_installer_root/man/man1/ds.1" "$(readlink "$_custom_man/ds.1")"
+_assert_path_missing "installer: custom destinations copy no library tree" \
+  "$_custom_prefix/lib"
+
+_retarget_prefix=$(_tmpdir)
+_retarget_old=$(_tmpdir)
+mkdir -p "$_retarget_prefix/bin" "$_retarget_prefix/share/man/man1"
+printf 'old command provider\n' >"$_retarget_old/ds"
+printf 'old manpage provider\n' >"$_retarget_old/ds.1"
+ln -s "$_retarget_old/ds" "$_retarget_prefix/bin/ds"
+ln -s "$_retarget_old/ds.1" "$_retarget_prefix/share/man/man1/ds.1"
+(
+  cd "$SCRIPT_DIR/.."
+  _run_ds_installer "$SCRIPT_DIR/../install.sh" "$_retarget_prefix" \
+    "$_retarget_prefix/bin" "$_retarget_prefix/share/man/man1" >/dev/null
+)
+_assert_eq "installer: retargets an existing command symlink" \
+  "$_installer_root/bin/ds" "$(readlink "$_retarget_prefix/bin/ds")"
+_assert_eq "installer: retargets an existing manpage symlink" \
+  "$_installer_root/man/man1/ds.1" \
+  "$(readlink "$_retarget_prefix/share/man/man1/ds.1")"
+_assert_file_content "installer: retargeting does not mutate the old command provider" \
+  "old command provider" "$_retarget_old/ds"
+_assert_file_content "installer: retargeting does not mutate the old manpage provider" \
+  "old manpage provider" "$_retarget_old/ds.1"
+
+_command_collision_prefix=$(_tmpdir)
+mkdir -p "$_command_collision_prefix/bin"
+printf 'owned command\n' >"$_command_collision_prefix/bin/ds"
+_command_collision_status=0
+_command_collision_output=$(
+  cd "$SCRIPT_DIR/.."
+  _run_ds_installer "$SCRIPT_DIR/../install.sh" \
+    "$_command_collision_prefix" "$_command_collision_prefix/bin" \
+    "$_command_collision_prefix/share/man/man1" 2>&1
+) || _command_collision_status=$?
+_assert_exit "installer: refuses a non-symlink command destination" \
+  1 "$_command_collision_status"
+_assert_file_content "installer: preserves a non-symlink command destination" \
+  "owned command" "$_command_collision_prefix/bin/ds"
+_assert_path_missing "installer: command collision publishes no manpage" \
+  "$_command_collision_prefix/share/man/man1/ds.1"
+_assert_path_missing "installer: command collision copies no library tree" \
+  "$_command_collision_prefix/lib"
+_assert_contains "installer: command collision refusal is actionable" \
+  "refusing to replace non-symlink" "$_command_collision_output"
+
+_collision_prefix=$(_tmpdir)
+mkdir -p "$_collision_prefix/share/man/man1"
+printf 'owned elsewhere\n' >"$_collision_prefix/share/man/man1/ds.1"
+_collision_status=0
+_collision_output=$(
+  cd "$SCRIPT_DIR/.."
+  _run_ds_installer "$SCRIPT_DIR/../install.sh" "$_collision_prefix" \
+    "$_collision_prefix/bin" "$_collision_prefix/share/man/man1" 2>&1
+) || _collision_status=$?
+_assert_exit "installer: refuses a non-symlink destination" \
+  1 "$_collision_status"
+_assert_file_content "installer: preserves a non-symlink destination" \
+  "owned elsewhere" "$_collision_prefix/share/man/man1/ds.1"
+_assert_path_missing "installer: destination preflight publishes no command" \
+  "$_collision_prefix/bin/ds"
+_assert_path_missing "installer: destination preflight copies no library tree" \
+  "$_collision_prefix/lib"
+_assert_contains "installer: destination refusal is actionable" \
+  "refusing to replace non-symlink" "$_collision_output"
+
+_missing_command_root=$(_tmpdir)
+_missing_command_prefix=$(_tmpdir)
+_missing_git_bin=$(_tmpdir)
+_missing_git_marker=$(_tmpdir)/git-called
+cp "$SCRIPT_DIR/../install.sh" "$_missing_command_root/install.sh"
+cat >"$_missing_git_bin/git" <<'SH'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >>"$DS_TEST_GIT_LOG"
-if [[ "$1" == "clone" && "$2" == "--depth" && "$3" == "1" ]]; then
-  case "$4" in
-    https://github.com/cgraf78/ds.git)
-      exit 128
-      ;;
-    git@github.com:cgraf78/ds.git)
-      mkdir -p "$5"
-      cp -R "$DS_TEST_REPO"/. "$5/"
-      exit 0
-      ;;
-  esac
-fi
-if [[ "$1" == "rev-parse" && "$2" == "--short" && "$3" == "HEAD" ]]; then
-  printf '%s\n' "abc1234"
-  exit 0
-fi
+: >"$DS_TEST_GIT_MARKER"
 exit 1
 SH
-chmod +x "$_inst_mock_bin/git"
+chmod +x "$_missing_git_bin/git"
+_missing_command_status=0
+_missing_command_output=$(
+  cd "$_missing_command_root"
+  PATH="$_missing_git_bin:$PATH" DS_TEST_GIT_MARKER="$_missing_git_marker" \
+    _run_ds_installer "$_missing_command_root/install.sh" \
+    "$_missing_command_prefix" "$_missing_command_prefix/bin" \
+    "$_missing_command_prefix/share/man/man1" 2>&1
+) || _missing_command_status=$?
+_assert_exit "installer: rejects a missing command source" \
+  1 "$_missing_command_status"
+_assert_path_missing "installer: missing command publishes no command" \
+  "$_missing_command_prefix/bin/ds"
+_assert_path_missing "installer: missing command publishes no manpage" \
+  "$_missing_command_prefix/share/man/man1/ds.1"
+_assert_contains "installer: missing command source is actionable" \
+  "command source is not executable" "$_missing_command_output"
+_assert_file_missing "installer: missing source does not attempt a clone" \
+  "$_missing_git_marker"
 
-_inst_root=$(_tmpdir)
-_inst_cwd=$(_tmpdir)
-_inst_output=$(
-  cd "$_inst_cwd"
-  PATH="$_inst_mock_bin:$PATH" \
-    DS_TEST_GIT_LOG="$_inst_git_log" \
-    DS_TEST_REPO="$_inst_repo" \
-    DS_INSTALL_DIR="$_inst_root/bin" \
-    DS_LIB_DIR="$_inst_root/plugins" \
-    DS_MAN_DIR="$_inst_root/man/man1" \
-    bash "$SCRIPT_DIR/../install.sh" 2>&1
-)
-_inst_git_calls=$(cat "$_inst_git_log")
-_assert_contains "installer: tries HTTPS clone first" \
-  "clone --depth 1 https://github.com/cgraf78/ds.git" "$_inst_git_calls"
-_assert_contains "installer: falls back to SSH clone" \
-  "clone --depth 1 git@github.com:cgraf78/ds.git" "$_inst_git_calls"
-_assert_contains "installer: reports resolved commit" "resolved commit abc1234" "$_inst_output"
-_assert_file_exists "installer: installs ds binary" "$_inst_root/bin/ds"
-_assert_file_exists "installer: installs plugin" "$_inst_root/plugins/mock-plugin.sh"
-_assert_file_exists "installer: installs manpage" "$_inst_root/man/man1/ds.1"
+_missing_man_root=$(_tmpdir)
+_missing_man_prefix=$(_tmpdir)
+mkdir -p "$_missing_man_root/bin"
+cp "$SCRIPT_DIR/../install.sh" "$_missing_man_root/install.sh"
+cp "$SCRIPT_DIR/../bin/ds" "$_missing_man_root/bin/ds"
+chmod +x "$_missing_man_root/bin/ds"
+_missing_man_status=0
+_missing_man_output=$(
+  cd "$_missing_man_root"
+  _run_ds_installer "$_missing_man_root/install.sh" "$_missing_man_prefix" \
+    "$_missing_man_prefix/bin" "$_missing_man_prefix/share/man/man1" 2>&1
+) || _missing_man_status=$?
+_assert_exit "installer: rejects a missing manpage source" \
+  1 "$_missing_man_status"
+_assert_path_missing "installer: source preflight publishes no command" \
+  "$_missing_man_prefix/bin/ds"
+_assert_contains "installer: missing manpage source is actionable" \
+  "manpage source is missing" "$_missing_man_output"
 
-_source_inst_root=$(_tmpdir)
-_source_inst_output=$(
+_late_link_prefix=$(_tmpdir)
+_late_link_bin=$(_tmpdir)
+_late_link_real_ln=$(command -v ln)
+_late_link_prior_target=--help
+_late_link_root=$(cd -P -- "$SCRIPT_DIR/.." && pwd -P)
+mkdir -p "$_late_link_prefix/bin"
+ln -s -- "$_late_link_prior_target" "$_late_link_prefix/bin/ds"
+cat >"$_late_link_bin/ln" <<'SH'
+#!/usr/bin/env bash
+ln_args=("$@")
+ln_operand_count=${#ln_args[@]}
+ln_source_operand=${ln_args[$((ln_operand_count - 2))]}
+ln_target_operand=${ln_args[$((ln_operand_count - 1))]}
+"$DS_TEST_REAL_LN" "$@" || exit $?
+if [[ $ln_source_operand == "$DS_TEST_LN_FAIL_SOURCE" &&
+  $ln_target_operand == "$DS_TEST_LN_FAIL_TARGET" ]]; then
+  printf 'injected late ln failure\n' >&2
+  exit 73
+fi
+SH
+chmod +x "$_late_link_bin/ln"
+_late_link_status=0
+_late_link_output=$(
   cd "$SCRIPT_DIR/.."
-  DS_INSTALL_DIR="$_source_inst_root/bin" \
-    DS_MAN_DIR="$_source_inst_root/man/man1" \
-    bash install.sh 2>&1
-)
-_assert_contains "installer: default plugin dir follows installed binary lookup" \
-  "Installed plugins to $_source_inst_root/lib/ds/plugins/" "$_source_inst_output"
-_assert_file_exists "installer: default plugin path receives bundled profile" \
-  "$_source_inst_root/lib/ds/plugins/profile-dev.sh"
-_assert_file_exists "installer: source install includes manpage by default" \
-  "$_source_inst_root/man/man1/ds.1"
-
-_custom_inst_root=$(_tmpdir)
-_custom_inst_output=$(
-  cd "$SCRIPT_DIR/.."
-  DS_INSTALL_DIR="$_custom_inst_root/bin" \
-    DS_LIB_DIR="$_custom_inst_root/plugins" \
-    DS_MAN_DIR="$_custom_inst_root/man/man1" \
-    bash install.sh 2>&1
-)
-_assert_contains "installer: custom plugin dir is reported" \
-  "Installed plugins to $_custom_inst_root/plugins/" "$_custom_inst_output"
-_assert_file_exists "installer: custom plugin path receives bundled profile" \
-  "$_custom_inst_root/plugins/profile-dev.sh"
+  PATH="$_late_link_bin:$PATH" \
+    DS_TEST_REAL_LN="$_late_link_real_ln" \
+    DS_TEST_LN_FAIL_SOURCE="$_late_link_root/man/man1/ds.1" \
+    DS_TEST_LN_FAIL_TARGET="$_late_link_prefix/share/man/man1/ds.1" \
+    _run_ds_installer "$SCRIPT_DIR/../install.sh" "$_late_link_prefix" \
+    "$_late_link_prefix/bin" "$_late_link_prefix/share/man/man1" 2>&1
+) || _late_link_status=$?
+_assert_exit "installer: late link failure preserves its status" \
+  73 "$_late_link_status"
+_assert_contains "installer: late link failure preserves its diagnostic" \
+  "injected late ln failure" "$_late_link_output"
+_assert_eq "installer: rollback restores an option-like command target" \
+  "$_late_link_prior_target" "$(readlink "$_late_link_prefix/bin/ds")"
+_assert_path_missing "installer: rollback removes a newly published manpage" \
+  "$_late_link_prefix/share/man/man1/ds.1"
 
 _runtime_home=$(_tmpdir)
 _runtime_mock_bin=$(_tmpdir)
@@ -7052,59 +7221,59 @@ cat >"$_runtime_mock_bin/tmux" <<'SH'
 #!/usr/bin/env bash
 printf 'tmux %s\n' "$*" >>"$DS_TEST_TMUX_LOG"
 case "${1:-}" in
-  has-session)
-    exit 1
-    ;;
+  has-session) exit 1 ;;
 esac
 exit 0
 SH
 chmod +x "$_runtime_mock_bin/tmux"
-
-# A split install only works if the runtime honors DS_LIB_DIR too. Use a clean
-# HOME so the dev profile can only come from the custom bundled plugin path.
 HOME="$_runtime_home" \
   PATH="$_runtime_mock_bin:$PATH" \
-  DS_LIB_DIR="$_custom_inst_root/plugins" \
+  DS_LIB_DIR="" \
   DS_STATE_DIR="$_runtime_home/.local/state/ds" \
   DS_SHELL_NAME="bash" \
   DS_SOURCED="" \
   DS_TEST_TMUX_LOG="$_runtime_tmux_log" \
-  "$_custom_inst_root/bin/ds" dev --no-attach
-_runtime_tmux_calls=$(cat "$_runtime_tmux_log")
-_assert_contains "installed ds: custom DS_LIB_DIR loads bundled dev profile" \
-  "split-window" "$_runtime_tmux_calls"
+  "$_install_prefix/bin/ds" dev --no-attach
+_assert_contains "installed symlink loads checkout-owned plugins" \
+  "split-window" "$(cat "$_runtime_tmux_log")"
 
-_source_link_root=$(_tmpdir)
-_source_link_home=$(_tmpdir)
-_source_link_mock_bin=$(_tmpdir)
-_source_link_tmux_log="$(_tmpdir)/tmux.log"
-mkdir -p "$_source_link_root/bin" "$_source_link_home/.config/ds"
-ln -s "$SCRIPT_DIR/../bin/ds" "$_source_link_root/bin/ds"
-cat >"$_source_link_mock_bin/tmux" <<'SH'
-#!/usr/bin/env bash
-printf 'tmux %s\n' "$*" >>"$DS_TEST_TMUX_LOG"
-case "${1:-}" in
-  has-session)
-    exit 1
-    ;;
-esac
-exit 0
+cat >"$_runtime_home/.config/ds/profile-overlay.sh" <<'SH'
+_profile_overlay() {
+  tmux rename-window -t "$1:1" overlay-fixture
+}
 SH
-chmod +x "$_source_link_mock_bin/tmux"
-
-# shdeps repo installs expose ds as a symlink into the checkout, not through
-# install.sh. With DS_LIB_DIR unset, that path must still find repo lib/plugins.
-HOME="$_source_link_home" \
-  PATH="$_source_link_mock_bin:$PATH" \
+: >"$_runtime_tmux_log"
+HOME="$_runtime_home" \
+  PATH="$_runtime_mock_bin:$PATH" \
   DS_LIB_DIR="" \
-  DS_STATE_DIR="$_source_link_home/.local/state/ds" \
+  DS_STATE_DIR="$_runtime_home/.local/state/ds" \
   DS_SHELL_NAME="bash" \
   DS_SOURCED="" \
-  DS_TEST_TMUX_LOG="$_source_link_tmux_log" \
-  "$_source_link_root/bin/ds" dev --no-attach
-_source_link_tmux_calls=$(cat "$_source_link_tmux_log")
-_assert_contains "symlinked checkout ds: repo lib/plugins loads bundled dev profile" \
-  "split-window" "$_source_link_tmux_calls"
+  DS_TEST_TMUX_LOG="$_runtime_tmux_log" \
+  "$_install_prefix/bin/ds" overlay --no-attach
+_assert_contains "installed symlink loads an XDG profile overlay" \
+  "rename-window -t overlay:1 overlay-fixture" \
+  "$(cat "$_runtime_tmux_log")"
+
+_package_root=$(_tmpdir)
+_package_home=$(_tmpdir)
+_package_tmux_log="$(_tmpdir)/tmux.log"
+mkdir -p "$_package_root/bin" "$_package_root/lib/ds/plugins" \
+  "$_package_home/.config/ds"
+cp "$SCRIPT_DIR/../bin/ds" "$_package_root/bin/ds"
+chmod +x "$_package_root/bin/ds"
+cp "$SCRIPT_DIR/../lib/plugins/profile-dev.sh" \
+  "$_package_root/lib/ds/plugins/profile-dev.sh"
+HOME="$_package_home" \
+  PATH="$_runtime_mock_bin:$PATH" \
+  DS_LIB_DIR="" \
+  DS_STATE_DIR="$_package_home/.local/state/ds" \
+  DS_SHELL_NAME="bash" \
+  DS_SOURCED="" \
+  DS_TEST_TMUX_LOG="$_package_tmux_log" \
+  "$_package_root/bin/ds" dev --no-attach
+_assert_contains "external package copy retains namespaced plugin discovery" \
+  "split-window" "$(cat "$_package_tmux_log")"
 
 _actions_lock="$SCRIPT_DIR/../.github/cgraf78-actions.lock"
 _actions_sha=missing-lock

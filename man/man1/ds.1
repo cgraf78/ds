@@ -48,7 +48,8 @@ selects a profile; a suffix after the first dash is treated as an instance tag
 when the prefix matches a known profile.
 .PP
 Profiles, connection methods, and share backends are plugin-based. Bundled
-plugins live with the installation. User overrides live under
+plugins live in the persistent checkout selected by the installed command
+symlink. User overrides live under
 .IR $XDG_CONFIG_HOME/ds
 when
 .B XDG_CONFIG_HOME
@@ -124,22 +125,33 @@ defaults to
 Complete runtime state directory. Overrides
 .BR XDG_STATE_HOME .
 .TP
-.B DS_INSTALL_DIR
-Destination for the installed
+.B PREFIX
+Base directory used by
+.IR install.sh
+for public links. Defaults to
+.IR ~/.local .
+.TP
+.B BIN_DIR
+Destination directory for the
 .B ds
-binary when running
+command link created by
 .IR install.sh .
+Defaults to
+.IR PREFIX/bin .
+.TP
+.B MAN_DIR
+Destination directory for the manual-page link created by
+.IR install.sh .
+Defaults to
+.IR PREFIX/share/man/man1 .
 .TP
 .B DS_LIB_DIR
-Directory for bundled plugin installation and runtime discovery. The installer
-default is
-.IR ../lib/ds/plugins
-relative to
-.BR DS_INSTALL_DIR .
-.TP
-.B DS_MAN_DIR
-Destination for installed manual pages. Defaults to
-.IR ~/.local/share/man/man1 .
+Explicit runtime plugin directory. When unset, the repository installer
+resolves its checkout-owned
+.I lib/plugins
+directory through the installed command symlink. External package layouts may
+instead place a copied command beside
+.IR ../lib/ds/plugins .
 .SH TMUX RESURRECT INTEGRATION
 The
 .B resurrect save
