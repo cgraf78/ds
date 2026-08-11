@@ -12,4 +12,5 @@ program	scripts/checkout-installer.conf
 program	support/install-checkout.sh
 program	tests/ds-ci
 program	tests/ds-test
+program	tests/install-test
 program	tests/test-helpers.sh

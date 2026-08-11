@@ -17,14 +17,17 @@ permissions:
 
 jobs:
   shell:
-    uses: cgraf78/actions/.github/workflows/shell-ci.yml@5c320ad3c24fc5f57e9402c588381ffb1dfe554e
+    uses: cgraf78/actions/.github/workflows/shell-ci.yml@464468328f050e43299298fc0eac8b971ddd38b7
     with:
       matrix-set: full
       profiles: base,openssh-netcat-lsof,procps
       shellcheck-inventory-path: .github/shellcheck-files.txt
-      termux-profiles: runtime
+      termux-profiles: base
       test-command: DS_SKIP_SHELLCHECK=1 bash tests/ds-ci
       termux-command: |-
+        set -euo pipefail
+        echo "Running installer integration"
+        bash tests/install-test
         echo "Running ds help smoke"
         timeout 30 bash bin/ds --help
 
@@ -42,4 +45,4 @@ jobs:
       # files, so `.github/cgraf78-actions.lock` cannot be interpolated. This gate
       # verifies every unavoidable cgraf78/actions literal still matches that
       # single reviewed dependency decision.
-      - uses: cgraf78/actions/.github/actions/verify-consumer-sync@5c320ad3c24fc5f57e9402c588381ffb1dfe554e
+      - uses: cgraf78/actions/.github/actions/verify-consumer-sync@464468328f050e43299298fc0eac8b971ddd38b7

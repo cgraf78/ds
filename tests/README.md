@@ -1,6 +1,8 @@
 # Tests
 
 `tests/ds-test` covers the local behavior of the `ds` command and plugins.
+`tests/install-test` runs the direct-checkout and piped managed-checkout
+installer paths on every supported CI runtime, including Termux.
 `tests/ds-ci` is the CI entrypoint and should stay safe on minimal runners where
 optional remote/session tools may be absent.
 

@@ -24,4 +24,5 @@ if [[ "${DS_SKIP_SHELLCHECK:-0}" != 1 ]]; then
   shellcheck -x -P SCRIPTDIR "${shell_files[@]}"
 fi
 
+bash tests/install-test
 bash tests/ds-test
