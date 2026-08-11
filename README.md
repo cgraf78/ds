@@ -9,6 +9,18 @@
 ## Install
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/cgraf78/ds/main/install.sh | bash
+```
+
+This keeps a shallow, updateable checkout under
+`${XDG_DATA_HOME:-$HOME/.local/share}/cgraf78/checkouts/ds` and publishes links to
+its `ds` command and manual page. It does not use a release asset or copy a
+second runtime tree. Git and Bash 4+ (available as `bash` on `PATH`) are
+required.
+
+To choose and manage the checkout yourself instead:
+
+```bash
 git clone https://github.com/cgraf78/ds.git
 cd ds
 bash install.sh
@@ -18,6 +30,8 @@ Keep that checkout in place: the installer publishes version-coupled links to
 `bin/ds` and the `ds(1)` manual page, while bundled plugins remain owned by the
 checkout under `lib/plugins`. Updating the checkout therefore updates the
 command and its plugins together without a second installed library tree.
+Rerunning the curl command safely fast-forwards its clean managed checkout
+before republishing the same links.
 
 The default prefix is `~/.local`. Set `PREFIX` to move both public links, or
 set `BIN_DIR` and `MAN_DIR` to choose their destinations independently. The

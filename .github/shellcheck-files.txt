@@ -8,6 +8,8 @@ program	lib/plugins/connect-et.sh
 program	lib/plugins/profile-chat.sh
 program	lib/plugins/profile-dev.sh
 program	lib/plugins/share-upterm.sh
+program	scripts/checkout-installer.conf
+program	support/install-checkout.sh
 program	tests/ds-ci
 program	tests/ds-test
 program	tests/test-helpers.sh
