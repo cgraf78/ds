@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# install-test — portable direct and piped installer integration coverage.
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ROOT_DIR=$(cd "$SCRIPT_DIR/.." && pwd -P)
+
+# shellcheck source=test-helpers.sh
+. "$SCRIPT_DIR/test-helpers.sh"
+
+echo ""
+echo "=== Installer integration ==="
+
+wrapper="$ROOT_DIR/install.sh"
+delegate="$ROOT_DIR/support/install-checkout.sh"
+_assert_file_exists "installer integration: generated wrapper is present" \
+  "$wrapper"
+_assert_file_exists "installer integration: checkout delegate is present" \
+  "$delegate"
+
+direct_prefix=$(_tmpdir)
+set +e
+PREFIX="$direct_prefix" \
+  BIN_DIR="$direct_prefix/bin" \
+  MAN_DIR="$direct_prefix/share/man/man1" \
+  bash "$wrapper" >/dev/null
+direct_installer_status=$?
+set -e
+_assert_exit "installer integration: direct installer succeeds" \
+  0 "$direct_installer_status"
+_assert_eq "installer integration: direct command selects this checkout" \
+  "$ROOT_DIR/bin/ds" "$(readlink "$direct_prefix/bin/ds")"
+_assert_eq "installer integration: direct manpage selects this checkout" \
+  "$ROOT_DIR/man/man1/ds.1" \
+  "$(readlink "$direct_prefix/share/man/man1/ds.1")"
+direct_status=0
+"$direct_prefix/bin/ds" --help >/dev/null || direct_status=$?
+_assert_exit "installer integration: direct command executes" 0 "$direct_status"
+
+source_checkout=$(_tmpdir)
+bare_remote=$(_tmpdir)/ds.git
+managed_parent=$(_tmpdir)
+managed_checkout="$managed_parent/ds"
+managed_physical="$(cd -P -- "$managed_parent" && pwd -P)/ds"
+piped_prefix=$(_tmpdir)
+cp "$wrapper" "$source_checkout/install.sh"
+cp -R "$ROOT_DIR/bin" "$ROOT_DIR/lib" "$ROOT_DIR/man" \
+  "$ROOT_DIR/support" "$source_checkout/"
+git -C "$source_checkout" init --quiet --initial-branch=main --template=''
+git -C "$source_checkout" config core.hooksPath /dev/null
+git -C "$source_checkout" config commit.gpgsign false
+git -C "$source_checkout" config user.name 'DS Installer Test'
+git -C "$source_checkout" config user.email ds-installer@example.invalid
+git -C "$source_checkout" add .
+git -C "$source_checkout" commit --quiet -m 'installer fixture'
+git init --quiet --bare --initial-branch=main "$bare_remote"
+git -C "$source_checkout" remote add origin "$bare_remote"
+git -C "$source_checkout" push --quiet --set-upstream origin main
+set +e
+curl --fail --silent --show-error "file://$wrapper" |
+  PREFIX="$piped_prefix" \
+    BIN_DIR="$piped_prefix/bin" \
+    MAN_DIR="$piped_prefix/share/man/man1" \
+    CGRAF78_CHECKOUT_INSTALL_DIR="$managed_checkout" \
+    CGRAF78_CHECKOUT_INSTALL_REPO_URL="file://$bare_remote" \
+    bash -s >/dev/null
+piped_statuses=("${PIPESTATUS[@]}")
+set -e
+_assert_exit "installer integration: curl transport succeeds" \
+  0 "${piped_statuses[0]}"
+_assert_exit "installer integration: piped installer succeeds" \
+  0 "${piped_statuses[1]}"
+_assert_file_exists "installer integration: piped mode keeps a checkout" \
+  "$managed_checkout/.git/HEAD"
+_assert_eq "installer integration: piped command selects the managed checkout" \
+  "$managed_physical/bin/ds" "$(readlink "$piped_prefix/bin/ds")"
+_assert_eq "installer integration: piped manpage selects the managed checkout" \
+  "$managed_physical/man/man1/ds.1" \
+  "$(readlink "$piped_prefix/share/man/man1/ds.1")"
+piped_status=0
+"$piped_prefix/bin/ds" --help >/dev/null || piped_status=$?
+_assert_exit "installer integration: piped command executes" 0 "$piped_status"
+
+_test_summary

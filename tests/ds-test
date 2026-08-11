@@ -7102,14 +7102,20 @@ git -C "$_curl_source" commit --quiet -m 'curl installer fixture'
 git init --quiet --bare --initial-branch=main "$_curl_remote"
 git -C "$_curl_source" remote add origin "$_curl_remote"
 git -C "$_curl_source" push --quiet --set-upstream origin main
-_curl_output=$(
+_curl_output_file="$(_tmpdir)/installer-output"
+set +e
+curl --fail --silent --show-error "file://$_installer_wrapper" |
   PREFIX="$_curl_prefix" \
     BIN_DIR="$_curl_prefix/bin" \
     MAN_DIR="$_curl_prefix/share/man/man1" \
     CGRAF78_CHECKOUT_INSTALL_DIR="$_curl_checkout" \
     CGRAF78_CHECKOUT_INSTALL_REPO_URL="file://$_curl_remote" \
-    /bin/bash -s <"$_installer_wrapper" 2>&1
-)
+    bash -s >"$_curl_output_file" 2>&1
+_curl_statuses=("${PIPESTATUS[@]}")
+set -e
+_curl_output=$(<"$_curl_output_file")
+_assert_exit "installer: curl transport succeeds" 0 "${_curl_statuses[0]}"
+_assert_exit "installer: curl bootstrap succeeds" 0 "${_curl_statuses[1]}"
 _assert_file_exists "installer: curl bootstrap keeps a durable checkout" \
   "$_curl_checkout/.git/HEAD"
 _assert_eq "installer: curl command link selects the managed checkout" \
@@ -7421,12 +7427,18 @@ _assert_contains "CI: runtime skips only delegated ShellCheck" \
   'test-command: DS_SKIP_SHELLCHECK=1 bash tests/ds-ci' "$_ci_workflow"
 _assert_not_contains "CI: runtime profile does not install ShellCheck" \
   'profiles: base,openssh-netcat-lsof,procps,shellcheck' "$_ci_workflow"
-_assert_contains "CI: Termux keeps the runtime profile" \
-  'termux-profiles: runtime' "$_ci_workflow"
+_assert_contains "CI: Termux installs Git and curl for installer coverage" \
+  'termux-profiles: base' "$_ci_workflow"
 _assert_not_contains "CI: Termux does not run ShellCheck" \
   'shellcheck -x' "$_ci_workflow"
 _assert_contains "CI: Termux retains the ds help smoke" \
   'timeout 30 bash bin/ds --help' "$_ci_workflow"
+_assert_contains "CI: Termux fails on the first broken installer check" \
+  $'termux-command: |-\n        set -euo pipefail' "$_ci_workflow"
+_assert_contains "CI: Termux exercises both installer modes" \
+  'bash tests/install-test' "$_ci_workflow"
+_assert_contains "local runner: exercises both installer modes" \
+  'bash tests/install-test' "$_ds_ci"
 _assert_contains "local runner: delegated mode has an exact lint guard" \
   "[[ \"\${DS_SKIP_SHELLCHECK:-0}\" != 1 ]]" "$_ds_ci"
 _assert_contains "ShellCheck: ds-test preserves SC2317 policy in-file" \
