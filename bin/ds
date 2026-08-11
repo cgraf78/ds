@@ -42,9 +42,11 @@ _xdg_dir() {
 }
 
 if [[ -z "${DS_LIB_DIR:-}" ]]; then
-  # A normal install keeps bundled plugins next to the binary, but packagers and
-  # tests can intentionally split those paths. Treat an explicit DS_LIB_DIR as
-  # the runtime contract and only fall back to self-relative discovery.
+  # The installer publishes one symlink into a persistent checkout. Resolve
+  # that link once so runtime discovery stays coupled to the checkout-owned
+  # lib/plugins tree. External packagers may instead copy the command beside a
+  # namespaced lib/ds/plugins tree; retain that established runtime layout, and
+  # let tests or other packagers select an explicit DS_LIB_DIR when needed.
   _ds_self="$0"
   if [[ -L "$_ds_self" ]]; then
     # readlink -f isn't portable (macOS); resolve one level which is enough
@@ -52,9 +54,6 @@ if [[ -z "${DS_LIB_DIR:-}" ]]; then
     # Handle relative symlink targets
     [[ "$_ds_self" != /* ]] && _ds_self="$(cd "$(dirname "$0")" && cd "$(dirname "$_ds_self")" && pwd)/$(basename "$_ds_self")"
   fi
-  # Installed copies use the namespaced lib/ds/plugins path. Source checkouts
-  # keep plugin sources in lib/plugins, so fall back there for direct repo
-  # execution and tests without weakening the installed default.
   _ds_lib_dir=""
   if _ds_lib_dir="$(cd "$(dirname "$_ds_self")/../lib/ds/plugins" 2>/dev/null && pwd)"; then
     DS_LIB_DIR="$_ds_lib_dir"

@@ -9,20 +9,20 @@
 ## Install
 
 ```bash
-curl -sL https://raw.githubusercontent.com/cgraf78/ds/main/install.sh | bash
-```
-
-Or from a repo checkout:
-
-```bash
 git clone https://github.com/cgraf78/ds.git
-cd ds && bash install.sh
+cd ds
+bash install.sh
 ```
 
-The installer also installs the `ds(1)` manual page. By default, bundled
-plugins are installed next to the binary's runtime lookup path
-(`../lib/ds/plugins` from `DS_INSTALL_DIR`). Set `DS_INSTALL_DIR`, `DS_LIB_DIR`,
-or `DS_MAN_DIR` to choose non-default destinations.
+Keep that checkout in place: the installer publishes version-coupled links to
+`bin/ds` and the `ds(1)` manual page, while bundled plugins remain owned by the
+checkout under `lib/plugins`. Updating the checkout therefore updates the
+command and its plugins together without a second installed library tree.
+
+The default prefix is `~/.local`. Set `PREFIX` to move both public links, or
+set `BIN_DIR` and `MAN_DIR` to choose their destinations independently. The
+installer retargets existing symlinks but refuses to replace real files or
+directories.
 
 ## Usage
 

@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 bash tests/ds-ci
 
 # Install locally
-bash install.sh    # installs to ~/.local/bin/ds + ~/.local/lib/ds/plugins/
+bash install.sh    # links ~/.local/bin/ds and its manpage to this checkout
 ```
 
 ## Architecture
