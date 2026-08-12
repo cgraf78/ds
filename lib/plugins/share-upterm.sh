@@ -129,6 +129,14 @@ _upterm_read_operation_lock() {
     "$_UPTERM_LOCK_TOKEN" =~ ^[[:xdigit:]]{32}$ ]]
 }
 
+# Start, stop, and TTL-triggered stop all mutate the same Upterm ownership and
+# lifecycle files, so they coordinate through one atomic-directory operation
+# lock rather than separate launch and cleanup locks. Bind ownership to PID plus
+# process-start identity so PID reuse cannot make a dead owner appear live; the
+# random token keeps an ordinary delayed release from removing a successor's
+# lock. A contender attempts bounded stale recovery only after a well-formed
+# owner is proven gone. Malformed or uninspectable ownership fails closed and
+# remains for explicit recovery.
 _upterm_acquire_operation_lock() {
   local target="$1" lock_dir lock_file operation_pid="" operation_identity=""
   local _upo_token attempt old_umask
