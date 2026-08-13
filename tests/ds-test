@@ -2493,6 +2493,277 @@ MOCK
   _assert_file_missing "host key: verification failure removes its trust snapshot" \
     "$lifecycle_snapshot"
 
+  # Two reclaimers can both prove the same owner dead before either unlinks it.
+  # Hold the second reclaimer at that boundary, let the first publish a live
+  # successor, and verify the delayed removal is generation-specific rather
+  # than path-specific. This is deliberately process-level: a sequential mock
+  # cannot expose the check/unlink interleaving that corrupted the lock.
+  operation_reclaim_lock=$(_upterm_operation_lock_dir)
+  operation_reclaim_stale_token=11111111111111111111111111111111
+  operation_reclaim_a_token=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  operation_reclaim_b_token=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  operation_reclaim_b_ready="$lifecycle_dir/operation-reclaim-b-ready"
+  operation_reclaim_b_resume="$lifecycle_dir/operation-reclaim-b-resume"
+  operation_reclaim_b_done="$lifecycle_dir/operation-reclaim-b-done"
+  operation_reclaim_a_ready="$lifecycle_dir/operation-reclaim-a-ready"
+  operation_reclaim_inspected="$lifecycle_dir/operation-reclaim-inspected"
+  operation_reclaim_a_result="$lifecycle_dir/operation-reclaim-a-result"
+  operation_reclaim_b_result="$lifecycle_dir/operation-reclaim-b-result"
+  operation_reclaim_real_rm=$(type -P rm)
+  # Operation-owner filenames are an internal storage detail. Locating the one
+  # regular owner lets this regression test cover both the legacy fixed name
+  # and a generation-specific representation without prescribing the fix.
+  _test_operation_lock_owner_file() {
+    local lock_dir="$1" target="$2" candidate found=""
+    for candidate in "$lock_dir/owner" "$lock_dir"/owner.*; do
+      [[ -f "$candidate" && ! -L "$candidate" ]] || continue
+      [[ -z "$found" ]] || return 1
+      found="$candidate"
+    done
+    [[ -n "$found" ]] || return 1
+    printf -v "$target" '%s' "$found"
+  }
+  _test_operation_wait_for_marker() {
+    local path="$1" attempt
+    for ((attempt = 0; attempt < 500; attempt++)); do
+      [[ -e "$path" ]] && return 0
+      sleep 0.01
+    done
+    return 1
+  }
+
+  (
+    # shellcheck disable=SC2329 # production acquisition invokes this token double.
+    _upterm_snapshot_token() {
+      printf '%s\n' "$operation_reclaim_stale_token"
+    }
+    operation_reclaim_token=""
+    _upterm_acquire_operation_lock operation_reclaim_token
+    printf '%s\n' "$operation_reclaim_token"
+  ) >"$lifecycle_dir/operation-reclaim-stale-result"
+  _assert_file_content "host key: stale-operation fixture publishes its generation" \
+    "$operation_reclaim_stale_token" \
+    "$lifecycle_dir/operation-reclaim-stale-result"
+
+  (
+    # shellcheck disable=SC2329 # production acquisition invokes this token double.
+    _upterm_snapshot_token() {
+      printf '%s\n' "$operation_reclaim_b_token"
+    }
+    operation_reclaim_paused=0
+    # shellcheck disable=SC2329 # stale recovery invokes this exact unlink barrier.
+    rm() {
+      local argument owner_unlink=0
+      for argument; do
+        [[ "$argument" == "$operation_reclaim_lock"/owner* ]] && owner_unlink=1
+      done
+      if ((operation_reclaim_paused == 0 && owner_unlink)); then
+        operation_reclaim_paused=1
+        : >"$operation_reclaim_b_ready"
+        _test_operation_wait_for_marker "$operation_reclaim_b_resume" || return 1
+      fi
+      "$operation_reclaim_real_rm" "$@"
+    }
+    operation_reclaim_token=""
+    set +e
+    _upterm_acquire_operation_lock operation_reclaim_token \
+      >"$lifecycle_dir/operation-reclaim-b-output" 2>&1
+    operation_reclaim_rc=$?
+    set -e
+    printf '%s|%s\n' "$operation_reclaim_rc" "$operation_reclaim_token" \
+      >"$operation_reclaim_b_result"
+    : >"$operation_reclaim_b_done"
+  ) &
+  operation_reclaim_b_job=$!
+  _track_test_pid "$operation_reclaim_b_job"
+  for ((operation_reclaim_attempt = 0; operation_reclaim_attempt < 500; operation_reclaim_attempt++)); do
+    [[ -e "$operation_reclaim_b_ready" ]] && break
+    kill -0 "$operation_reclaim_b_job" 2>/dev/null || break
+    sleep 0.01
+  done
+  _assert_file_exists "host key: delayed reclaimer reaches the stale unlink boundary" \
+    "$operation_reclaim_b_ready"
+
+  (
+    # shellcheck disable=SC2329 # production acquisition invokes this token double.
+    _upterm_snapshot_token() {
+      printf '%s\n' "$operation_reclaim_a_token"
+    }
+    operation_reclaim_token=""
+    set +e
+    _upterm_acquire_operation_lock operation_reclaim_token \
+      >"$lifecycle_dir/operation-reclaim-a-output" 2>&1
+    operation_reclaim_acquire_rc=$?
+    set -e
+    if ((operation_reclaim_acquire_rc == 0)); then
+      : >"$operation_reclaim_a_ready"
+      if _test_operation_wait_for_marker "$operation_reclaim_b_done" &&
+        _test_operation_wait_for_marker "$operation_reclaim_inspected"; then
+        set +e
+        _upterm_release_operation_lock "$operation_reclaim_token" \
+          >>"$lifecycle_dir/operation-reclaim-a-output" 2>&1
+        operation_reclaim_release_rc=$?
+        set -e
+      else
+        operation_reclaim_release_rc=98
+      fi
+    else
+      operation_reclaim_release_rc=99
+      : >"$operation_reclaim_a_ready"
+    fi
+    printf '%s|%s|%s\n' \
+      "$operation_reclaim_acquire_rc" "$operation_reclaim_release_rc" \
+      "$operation_reclaim_token" >"$operation_reclaim_a_result"
+  ) &
+  operation_reclaim_a_job=$!
+  _track_test_pid "$operation_reclaim_a_job"
+  for ((operation_reclaim_attempt = 0; operation_reclaim_attempt < 500; operation_reclaim_attempt++)); do
+    [[ -e "$operation_reclaim_a_ready" ]] && break
+    kill -0 "$operation_reclaim_a_job" 2>/dev/null || break
+    sleep 0.01
+  done
+  _assert_file_exists "host key: first stale reclaimer publishes a successor" \
+    "$operation_reclaim_a_ready"
+
+  : >"$operation_reclaim_b_resume"
+  for ((operation_reclaim_attempt = 0; operation_reclaim_attempt < 500; operation_reclaim_attempt++)); do
+    [[ -e "$operation_reclaim_b_done" ]] && break
+    kill -0 "$operation_reclaim_b_job" 2>/dev/null || break
+    sleep 0.01
+  done
+  _assert_file_exists "host key: delayed stale reclaimer completes" \
+    "$operation_reclaim_b_done"
+  operation_reclaim_owner_file=""
+  operation_reclaim_owner_token=""
+  if _test_operation_lock_owner_file \
+    "$operation_reclaim_lock" operation_reclaim_owner_file &&
+    _upterm_read_operation_lock "$operation_reclaim_owner_file"; then
+    operation_reclaim_owner_token=$_UPTERM_LOCK_TOKEN
+  fi
+  : >"$operation_reclaim_inspected"
+  wait "$operation_reclaim_a_job"
+  wait "$operation_reclaim_b_job"
+  _assert_file_content "host key: delayed stale reclaimer observes the live lock" \
+    "2|" "$operation_reclaim_b_result"
+  _assert_eq "host key: delayed stale reclaimer preserves the successor generation" \
+    "$operation_reclaim_a_token" "$operation_reclaim_owner_token"
+  _assert_file_content "host key: preserved successor releases its own lock" \
+    "0|0|$operation_reclaim_a_token" "$operation_reclaim_a_result"
+  unset -f _test_operation_lock_owner_file _test_operation_wait_for_marker
+  command rm -rf "$operation_reclaim_lock"
+
+  # A generation can turn over after discovery but before its file is opened.
+  # Simulate that exact observation window without a timing race: the first
+  # lookup returns the disappeared path after publishing a valid live
+  # successor, and the bounded retry must classify the successor as busy.
+  operation_turnover_old_token=33333333333333333333333333333333
+  operation_turnover_new_token=44444444444444444444444444444444
+  operation_turnover_pid=""
+  operation_turnover_identity=""
+  _upterm_current_pid operation_turnover_pid
+  _upterm_process_identity "$operation_turnover_pid" operation_turnover_identity
+  mkdir "$operation_reclaim_lock"
+  operation_turnover_old_file="$operation_reclaim_lock/owner.$operation_turnover_old_token"
+  operation_turnover_new_file="$operation_reclaim_lock/owner.$operation_turnover_new_token"
+  printf 'version=1\npid=%s\nidentity=%s\ntoken=%s\n' \
+    "$operation_turnover_pid" "$operation_turnover_identity" \
+    "$operation_turnover_old_token" >"$operation_turnover_old_file"
+  set +e
+  (
+    operation_turnover_lookup=0
+    # shellcheck disable=SC2329 # acquisition invokes this turnover boundary.
+    _upterm_operation_lock_file() {
+      local target="$2"
+      [[ "$target" == lock_file ]] || return 1
+      operation_turnover_lookup=$((operation_turnover_lookup + 1))
+      if ((operation_turnover_lookup == 1)); then
+        command rm "$operation_turnover_old_file"
+        printf 'version=1\npid=%s\nidentity=%s\ntoken=%s\n' \
+          "$operation_turnover_pid" "$operation_turnover_identity" \
+          "$operation_turnover_new_token" >"$operation_turnover_new_file"
+        # shellcheck disable=SC2034 # returns through the caller's local via dynamic scope.
+        lock_file="$operation_turnover_old_file"
+      else
+        # shellcheck disable=SC2034 # returns through the caller's local via dynamic scope.
+        lock_file="$operation_turnover_new_file"
+      fi
+    }
+    _upterm_acquire_operation_lock ignored_operation_token
+  ) >"$lifecycle_dir/operation-turnover-output" 2>&1
+  operation_turnover_rc=$?
+  set -e
+  _assert_exit "host key: owner turnover before read is ordinary contention" \
+    2 "$operation_turnover_rc"
+  _assert_file_exists "host key: owner turnover preserves the live successor" \
+    "$operation_turnover_new_file"
+  command rm -rf "$operation_reclaim_lock"
+
+  # The lock pathname itself is trusted state, not ordinary contention. A file
+  # or symlink there must fail closed and remain intact; otherwise a planted
+  # path can hide malformed state behind the normal "busy" result or redirect
+  # owner discovery outside the private state directory.
+  printf '%s\n' 'not a lock directory' >"$operation_reclaim_lock"
+  set +e
+  malformed_operation_output=$(
+    _upterm_acquire_operation_lock ignored_operation_token 2>&1
+  )
+  malformed_operation_rc=$?
+  set -e
+  _assert_exit "host key: non-directory operation lock fails closed" \
+    1 "$malformed_operation_rc"
+  _assert_contains "host key: non-directory operation lock is actionable" \
+    "malformed Upterm lifecycle operation lock" "$malformed_operation_output"
+  _assert_file_content "host key: non-directory operation lock is retained" \
+    "not a lock directory" "$operation_reclaim_lock"
+  command rm "$operation_reclaim_lock"
+
+  operation_reclaim_symlink_target="$lifecycle_dir/operation-lock-target"
+  mkdir "$operation_reclaim_symlink_target"
+  ln -s "$operation_reclaim_symlink_target" "$operation_reclaim_lock"
+  set +e
+  malformed_operation_output=$(
+    _upterm_acquire_operation_lock ignored_operation_token 2>&1
+  )
+  malformed_operation_rc=$?
+  set -e
+  _assert_exit "host key: symlink operation lock fails closed" \
+    1 "$malformed_operation_rc"
+  _assert_contains "host key: symlink operation lock is actionable" \
+    "malformed Upterm lifecycle operation lock" "$malformed_operation_output"
+  _assert_eq "host key: symlink operation lock is retained" \
+    "$operation_reclaim_symlink_target" "$(readlink "$operation_reclaim_lock")"
+  command rm "$operation_reclaim_lock"
+  rmdir "$operation_reclaim_symlink_target"
+
+  # A live fixed-name owner from an older ds remains a valid busy signal, but a
+  # dead one has no generation-specific pathname that can be removed safely.
+  # Fail closed instead of making rolling upgrades reintroduce the race.
+  legacy_operation_token=22222222222222222222222222222222
+  sleep 30 &
+  legacy_operation_pid=$!
+  _track_test_pid "$legacy_operation_pid"
+  legacy_operation_identity=""
+  _upterm_process_identity "$legacy_operation_pid" legacy_operation_identity
+  kill "$legacy_operation_pid" 2>/dev/null || true
+  wait "$legacy_operation_pid" 2>/dev/null || true
+  mkdir "$operation_reclaim_lock"
+  printf 'version=1\npid=%s\nidentity=%s\ntoken=%s\n' \
+    "$legacy_operation_pid" "$legacy_operation_identity" \
+    "$legacy_operation_token" >"$operation_reclaim_lock/owner"
+  set +e
+  legacy_operation_output=$(
+    _upterm_acquire_operation_lock ignored_operation_token 2>&1
+  )
+  legacy_operation_rc=$?
+  set -e
+  _assert_exit "host key: stale legacy operation ownership fails closed" \
+    1 "$legacy_operation_rc"
+  _assert_contains "host key: stale legacy operation ownership explains recovery" \
+    "cannot be recovered safely" "$legacy_operation_output"
+  _assert_file_exists "host key: stale legacy operation ownership is retained" \
+    "$operation_reclaim_lock/owner"
+  command rm -rf "$operation_reclaim_lock"
+
   unknown_probe_pid_file="$lifecycle_dir/unknown-probe-pid"
   sleep 30 &
   unknown_probe_pid=$!
