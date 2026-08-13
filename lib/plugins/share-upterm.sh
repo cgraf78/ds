@@ -90,8 +90,37 @@ _upterm_operation_lock_dir() {
   printf '%s.upterm.operation.lock\n' "$(_state_file_prefix)"
 }
 
+_upterm_operation_lock_file() {
+  local lock_dir="$1" target="$2" candidate owner_name found=""
+  [[ -d "$lock_dir" && ! -L "$lock_dir" ]] || return 1
+  for candidate in "$lock_dir/owner" "$lock_dir"/owner.*; do
+    [[ -e "$candidate" || -L "$candidate" ]] || continue
+    if [[ ! -f "$candidate" || -L "$candidate" ]]; then
+      # A regular owner can disappear between the existence and type probes
+      # during a normal release. Retry that turnover, but keep every extant
+      # non-regular or symlinked candidate fail-closed.
+      [[ ! -e "$candidate" && ! -L "$candidate" ]] && continue
+      return 1
+    fi
+    owner_name=${candidate##*/}
+    if [[ "$owner_name" != owner ]]; then
+      owner_name=${owner_name#owner.}
+      [[ "$owner_name" =~ ^[[:xdigit:]]{32}$ ]] || return 1
+    fi
+    # More than one owner means publication or manual recovery is incomplete.
+    # Picking either one would let file ordering decide lifecycle ownership.
+    [[ -z "$found" ]] || return 1
+    found="$candidate"
+  done
+  # No owner can be a short publication/turnover window. Report it separately
+  # so acquisition can retry without treating ordinary contention as corrupt
+  # state; an extant invalid or second candidate still fails closed above.
+  [[ -n "$found" ]] || return 2
+  printf -v "$target" '%s' "$found"
+}
+
 _upterm_read_operation_lock() {
-  local lock_file="$1" key value seen_version=0 seen_pid=0
+  local lock_file="$1" key value owner_name seen_version=0 seen_pid=0
   local seen_identity=0 seen_token=0
   _UPTERM_LOCK_PID=""
   _UPTERM_LOCK_IDENTITY=""
@@ -122,27 +151,30 @@ _upterm_read_operation_lock() {
       *) return 1 ;;
     esac
   done <"$lock_file" || return 1
+  owner_name=${lock_file##*/}
   [[ "$seen_version$seen_pid$seen_identity$seen_token" == 1111 &&
     "$_UPTERM_LOCK_PID" =~ ^[0-9]+$ &&
     ${#_UPTERM_LOCK_IDENTITY} -eq 48 &&
     "$_UPTERM_LOCK_IDENTITY" != *[!0-9a-f]* &&
-    "$_UPTERM_LOCK_TOKEN" =~ ^[[:xdigit:]]{32}$ ]]
+    "$_UPTERM_LOCK_TOKEN" =~ ^[[:xdigit:]]{32}$ ]] &&
+    { [[ "$owner_name" == owner ]] ||
+      [[ "$owner_name" == "owner.$_UPTERM_LOCK_TOKEN" ]]; }
 }
 
 # Start, stop, and TTL-triggered stop all mutate the same Upterm ownership and
 # lifecycle files, so they coordinate through one atomic-directory operation
 # lock rather than separate launch and cleanup locks. Bind ownership to PID plus
-# process-start identity so PID reuse cannot make a dead owner appear live; the
-# random token keeps an ordinary delayed release from removing a successor's
-# lock. A contender attempts bounded stale recovery only after a well-formed
-# owner is proven gone. Malformed or uninspectable ownership fails closed and
-# remains for explicit recovery.
+# process-start identity so PID reuse cannot make a dead owner appear live. The
+# random token is also part of the owner filename: stale reclaimers and delayed
+# releases can unlink only the exact generation they observed, never a
+# successor that reused the lock directory. A contender attempts bounded stale
+# recovery only after a well-formed owner is proven gone. Malformed or
+# uninspectable ownership fails closed and remains for explicit recovery.
 _upterm_acquire_operation_lock() {
-  local target="$1" lock_dir lock_file operation_pid="" operation_identity=""
-  local _upo_token attempt old_umask
+  local target="$1" lock_dir lock_file="" operation_pid="" operation_identity=""
+  local _upo_token attempt old_umask operation_file_status
   _ensure_state_dir
   lock_dir=$(_upterm_operation_lock_dir)
-  lock_file="$lock_dir/owner"
   _upterm_current_pid operation_pid || return 1
   _upterm_process_identity "$operation_pid" operation_identity || return 1
   _upo_token=$(_upterm_snapshot_token) || return 1
@@ -150,6 +182,7 @@ _upterm_acquire_operation_lock() {
     old_umask=$(umask)
     umask 077
     if mkdir "$lock_dir" 2>/dev/null; then
+      lock_file="$lock_dir/owner.$_upo_token"
       if ! printf 'version=1\npid=%s\nidentity=%s\ntoken=%s\n' \
         "$operation_pid" "$operation_identity" "$_upo_token" >"$lock_file" ||
         ! chmod 600 "$lock_file" || ! chmod 700 "$lock_dir"; then
@@ -164,7 +197,23 @@ _upterm_acquire_operation_lock() {
       return 0
     fi
     umask "$old_umask"
+    if _upterm_operation_lock_file "$lock_dir" lock_file; then
+      :
+    else
+      operation_file_status=$?
+      if ((operation_file_status == 2)); then
+        continue
+      fi
+      echo "ds: malformed Upterm lifecycle operation lock; state retained" >&2
+      return 1
+    fi
     if ! _upterm_read_operation_lock "$lock_file"; then
+      # The selected generation may release just before this read. Retry the
+      # directory protocol only when that exact pathname vanished; malformed
+      # content that still exists remains a hard, fail-closed error.
+      if [[ ! -e "$lock_file" && ! -L "$lock_file" ]]; then
+        continue
+      fi
       echo "ds: malformed Upterm lifecycle operation lock; state retained" >&2
       return 1
     fi
@@ -178,7 +227,25 @@ _upterm_acquire_operation_lock() {
         return 1
         ;;
     esac
-    if ! rm -f "$lock_file" || ! rmdir "$lock_dir"; then
+    # A fixed-name owner was published by an older ds. It is safe to honor
+    # while live, but once stale there is no generation-specific pathname on
+    # which to perform compare-and-remove. Retain it for explicit recovery
+    # rather than reintroducing the successor-deletion race during an upgrade.
+    if [[ "${lock_file##*/}" == owner ]]; then
+      echo "ds: stale legacy Upterm lifecycle operation lock cannot be recovered safely; state retained" >&2
+      return 1
+    fi
+    # Only the contender that unlinks the exact observed generation may remove
+    # the directory. A losing reclaimer sees the path disappear and reports the
+    # winning lifecycle operation as busy without touching its replacement.
+    if ! rm "$lock_file" 2>/dev/null; then
+      if [[ ! -e "$lock_file" && ! -L "$lock_file" ]]; then
+        return 2
+      fi
+      echo "ds: failed to recover a stale Upterm lifecycle operation lock" >&2
+      return 1
+    fi
+    if ! rmdir "$lock_dir"; then
       echo "ds: failed to recover a stale Upterm lifecycle operation lock" >&2
       return 1
     fi
@@ -187,15 +254,16 @@ _upterm_acquire_operation_lock() {
 }
 
 _upterm_release_operation_lock() {
-  local expected_token="$1" lock_dir lock_file
+  local expected_token="$1" lock_dir lock_file=""
   lock_dir=$(_upterm_operation_lock_dir)
-  lock_file="$lock_dir/owner"
-  if ! _upterm_read_operation_lock "$lock_file" ||
-    [[ "$_UPTERM_LOCK_TOKEN" != "$expected_token" ]]; then
+  if ! _upterm_operation_lock_file "$lock_dir" lock_file ||
+    ! _upterm_read_operation_lock "$lock_file" ||
+    [[ "$_UPTERM_LOCK_TOKEN" != "$expected_token" ]] ||
+    [[ "${lock_file##*/}" != "owner.$expected_token" ]]; then
     echo "ds: refusing to release another Upterm lifecycle operation" >&2
     return 1
   fi
-  if ! rm -f "$lock_file" || ! rmdir "$lock_dir"; then
+  if ! rm "$lock_file" || ! rmdir "$lock_dir"; then
     echo "ds: failed to release Upterm lifecycle operation ownership" >&2
     return 1
   fi
