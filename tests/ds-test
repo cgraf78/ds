@@ -6664,6 +6664,14 @@ echo "=== Remote command building ==="
 cp "$SCRIPT_DIR/../lib/plugins/connect-autossh.sh" "$CONF_DIR/" 2>/dev/null ||
   printf '_connect_autossh() { exec autossh -M0 "$1" -t "$2"; }\n' >"$CONF_DIR/connect-autossh.sh"
 cp "$SCRIPT_DIR/../lib/plugins/connect-et.sh" "$CONF_DIR/"
+termnav_plugin="$SCRIPT_DIR/../lib/plugins/connect-termnav.sh"
+_assert_file_exists "termnav connect method is bundled" "$termnav_plugin"
+if [[ -f "$termnav_plugin" ]]; then
+  cp "$termnav_plugin" "$CONF_DIR/"
+else
+  printf '%s\n' '_connect_termnav() { echo "ds: termnav connect method unavailable" >&2; return 127; }' \
+    >"$CONF_DIR/connect-termnav.sh"
+fi
 
 # Mock ssh/autossh to capture args instead of connecting
 cat >"$MOCK_BIN/ssh" <<'MOCK'
@@ -6702,6 +6710,19 @@ cat >"$MOCK_BIN/et" <<'MOCK'
 echo "ET_ARGS=$*" >> "${REMOTE_LOG:-/dev/null}"
 MOCK
 chmod +x "$MOCK_BIN/et"
+
+cat >"$MOCK_BIN/termnav-relay" <<'MOCK'
+#!/usr/bin/env bash
+{
+    printf 'TERMNAV_ARGC=%s\n' "$#"
+    _index=0
+    for _arg in "$@"; do
+        printf 'TERMNAV_ARG[%s]=<%s>\n' "$_index" "$_arg"
+        _index=$((_index + 1))
+    done
+} >"${REMOTE_LOG:-/dev/null}"
+MOCK
+chmod +x "$MOCK_BIN/termnav-relay"
 
 REMOTE_LOG="$MOCK_BIN/remote.log"
 export REMOTE_LOG
@@ -7116,6 +7137,54 @@ result=$(_run_remote "HOST=fileserver ACTION=session SESSION=ds \
     CONNECT_OVERRIDE=")
 remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
 _assert_contains "autossh remote: uses autossh" "AUTOSSH_ARGS=" "$remote_log"
+
+# The Termnav method is an ordinary commanded SSH transport plus one explicit
+# opt-in marker. The marker belongs to termnav-relay and must precede every SSH
+# argument; the generated remote shell remains one exact argv element.
+result=$(_run_remote "HOST=server1 ACTION=session SESSION='dev work' \
+    CONNECT_OVERRIDE=termnav")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "termnav remote: selects the relay SSH subcommand" \
+  "TERMNAV_ARG[0]=<ssh>" "$remote_log"
+_assert_contains "termnav remote: opts the explicit command into relaying" \
+  "TERMNAV_ARG[1]=<--relay-command>" "$remote_log"
+_assert_contains "termnav remote: requests a TTY" \
+  "TERMNAV_ARG[2]=<-t>" "$remote_log"
+_assert_contains "termnav remote: terminates SSH option parsing" \
+  "TERMNAV_ARG[3]=<-->" "$remote_log"
+_assert_contains "termnav remote: preserves the destination" \
+  "TERMNAV_ARG[4]=<server1>" "$remote_log"
+_assert_contains "termnav remote: keeps the generated command in one argument" \
+  "TERMNAV_ARGC=6" "$remote_log"
+# shellcheck disable=SC2016 # The mock records the remote shell source verbatim.
+_assert_contains "termnav remote: preserves remote ds resolution" \
+  'command\ -v\ ds' "$remote_log"
+
+result=$(_run_remote "HOST=server1 ACTION=session SESSION=ds \
+    CONNECT_OVERRIDE=termnav; FORWARDS=(3011:3012 8080:80); \
+    R_FORWARDS=(4011:4012);")
+remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
+_assert_contains "termnav forward: passes first local-forward flag" \
+  "=<-L>" "$remote_log"
+_assert_contains "termnav forward: preserves first local-forward target" \
+  "=<3011:localhost:3012>" "$remote_log"
+_assert_contains "termnav forward: preserves second local-forward target" \
+  "=<8080:localhost:80>" "$remote_log"
+_assert_contains "termnav reverse: passes reverse-forward flag" \
+  "=<-R>" "$remote_log"
+_assert_contains "termnav reverse: preserves reverse-forward target" \
+  "=<4011:localhost:4012>" "$remote_log"
+
+missing_termnav_path=$(_tmpdir)
+set +e
+missing_termnav_output=$(PATH="$missing_termnav_path:/usr/bin:/bin" \
+  bash -c '. "$1"; _connect_termnav test.example "printf hello"' \
+  _ "$termnav_plugin" 2>&1)
+missing_termnav_rc=$?
+set -e
+_assert_exit "termnav connect: missing relay exits 127" 127 "$missing_termnav_rc"
+_assert_contains "termnav connect: missing relay is actionable" \
+  "termnav-relay is required" "$missing_termnav_output"
 
 # Test local-only host (connect = "-")
 result=$(_run_remote "HOST=desktop ACTION=session SESSION=ds \

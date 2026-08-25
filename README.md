@@ -202,6 +202,12 @@ configuration directory (or bundled in `lib/plugins/`), defining
 | `ssh` | Standard SSH (built-in) |
 | `autossh` | Auto-reconnecting SSH |
 | `et` | Eternal Terminal (persistent connection) |
+| `termnav` | SSH with nested tmux navigation relay forwarding |
+
+The `termnav` method is intended for commanded interactive sessions such as
+DS's remote tmux attach. It invokes `termnav-relay ssh --relay-command`, which
+adds the parent relay only for that explicitly opted-in TTY connection. The
+remote OpenSSH server must accept `TERMNAV_PARENT_RELAY` with `AcceptEnv`.
 
 ## Sharing
 

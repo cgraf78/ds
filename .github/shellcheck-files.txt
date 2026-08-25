@@ -5,6 +5,7 @@ program	examples/profile-workspace.sh
 program	install.sh
 program	lib/plugins/connect-autossh.sh
 program	lib/plugins/connect-et.sh
+program	lib/plugins/connect-termnav.sh
 program	lib/plugins/profile-chat.sh
 program	lib/plugins/profile-dev.sh
 program	lib/plugins/share-upterm.sh
