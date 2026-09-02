@@ -1,6 +1,6 @@
 # ds — Dev Session Launcher
 
-![CI](https://github.com/cgraf78/ds/actions/workflows/ci.yml/badge.svg)
+![Tests](https://github.com/cgraf78/ds/actions/workflows/test.yml/badge.svg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ![Bash](https://img.shields.io/badge/bash-4%2B-blue)
 

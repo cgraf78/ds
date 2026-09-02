@@ -7656,7 +7656,7 @@ else
   _fail "CI: has one canonical cgraf78/actions lock"
 fi
 
-_ci_workflow_path="$SCRIPT_DIR/../.github/workflows/ci.yml"
+_ci_workflow_path="$SCRIPT_DIR/../.github/workflows/test.yml"
 _ci_workflow=$(cat "$_ci_workflow_path")
 _retry_workflow=$(cat "$SCRIPT_DIR/../.github/workflows/retry-infrastructure.yml")
 _actions_sync_job=$(awk '
@@ -7665,6 +7665,8 @@ _actions_sync_job=$(awk '
   in_sync { print }
 ' "$_ci_workflow_path")
 _ds_ci=$(cat "$SCRIPT_DIR/ds-ci")
+_assert_contains "CI: uses the standard Tests display name" \
+  'name: Tests' "$_ci_workflow"
 _assert_contains "CI: pushes only the maintained main branch" \
   'branches: [main]' "$_ci_workflow"
 _assert_contains "CI: pins shared ShellCheck inventory revision" \
@@ -7692,6 +7694,8 @@ _assert_contains "CI: verifier uses the locked actions revision" \
 _assert_contains "CI: infrastructure retry uses the locked actions revision" \
   "cgraf78/actions/.github/actions/infra-retry@$_actions_sha" \
   "$_retry_workflow"
+_assert_contains "CI: infrastructure retry watches Tests" \
+  'workflows: [Tests]' "$_retry_workflow"
 _assert_contains "CI: delegates the typed shell inventory" \
   'shellcheck-inventory-path: .github/shellcheck-files.txt' "$_ci_workflow"
 _assert_contains "CI: runtime skips only delegated ShellCheck" \
