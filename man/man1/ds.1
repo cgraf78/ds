@@ -45,7 +45,11 @@ ds \- create and manage local or remote tmux dev sessions
 .B ds
 creates tmux development sessions locally or on remote hosts. A session name
 selects a profile; a suffix after the first dash is treated as an instance tag
-when the prefix matches a known profile.
+when the prefix matches a known profile. Session names may contain only
+letters, digits, dash and underscore; sessions created directly by tmux
+under names outside that set cannot be addressed by
+.B ds
+(e.g. names containing spaces).
 .PP
 Profiles, connection methods, and share backends are plugin-based. Bundled
 plugins live in the persistent checkout selected by the installed command

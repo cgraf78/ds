@@ -75,6 +75,7 @@ PROFILE=""
 SESSION=""
 CONNECT_OVERRIDE=""
 HOST=""
+HOST_SEEN=""
 CONNECT="ssh"
 INIT_SHELL=""
 RESURRECT_FILE=""
@@ -125,6 +126,7 @@ _usage() {
   echo "Sessions can be a profile name (dev), profile-instance (dev-work),"
   echo "or any arbitrary name (myproject). Arbitrary names use the default"
   echo "ds profile (plain tmux). Default session is 'ds'."
+  echo "Session names may contain only letters, digits, dash and underscore."
   echo ""
   echo "Examples:"
   echo "  ds                     start or attach to default 'ds' session"
@@ -372,7 +374,7 @@ _load_data_profiles() {
   local file name window command
   while IFS= read -r file; do
     [[ -n "$file" ]] || continue
-    while read -r name window command; do
+    while read -r name window command || [[ -n "$name" ]]; do
       [[ -z "$name" || "$name" == \#* ]] && continue
       if [[ ! "$name" =~ ^[A-Za-z0-9_]+$ ]]; then
         printf 'ds: ignoring invalid profile name %q in %s\n' "$name" "$file" >&2
@@ -407,7 +409,7 @@ lookup_host() {
   local f
   while IFS= read -r f; do
     [[ -n "$f" ]] || continue
-    while read -r name connect; do
+    while read -r name connect || [[ -n "$name" ]]; do
       [[ -z "$name" || "$name" == \#* ]] && continue
       # shellcheck disable=SC2053  # intentional glob matching
       if [[ "$target" == $name ]]; then
@@ -743,10 +745,16 @@ _do_resurrect_begin() {
 _do_resurrect_save() {
   local file="$1" chmod_file records="" session shell
 
-  [[ -f "$file" && ! -L "$file" ]] || return 1
+  [[ -f "$file" && ! -L "$file" ]] || {
+    printf 'ds: resurrect snapshot not found or not a regular file: %s\n' "$file" >&2
+    return 1
+  }
   chmod_file="$file"
   [[ "$chmod_file" == -* ]] && chmod_file="./$chmod_file"
-  chmod 0600 "$chmod_file" || return 1
+  chmod 0600 "$chmod_file" || {
+    printf 'ds: cannot secure resurrect snapshot: %s\n' "$file" >&2
+    return 1
+  }
   while IFS= read -r session; do
     [[ -n "$session" && "$session" != *$'\t'* ]] || continue
     _session_is_managed "$session" || continue
@@ -760,7 +768,10 @@ _do_resurrect_save() {
 _do_resurrect_restore() {
   local file="${1:-}" kind session shell extra session_id server_start
   [[ -n "$file" ]] || file="$(_resurrect_dir)/last"
-  [[ -f "$file" ]] || return 1
+  [[ -f "$file" ]] || {
+    printf 'ds: resurrect snapshot not found: %s\n' "$file" >&2
+    return 1
+  }
 
   while IFS=$'\t' read -r kind session shell extra; do
     [[ "$kind" == "ds-v1" && -n "$session" && -z "$extra" ]] || continue
@@ -817,6 +828,16 @@ _resolve_session_target() {
     exit 1
   fi
   SESSION=$(_current_session) || exit 1
+}
+
+# Session names become tmux session names, and tmux silently rewrites ':' and
+# '.' to '_' at creation. ds addresses sessions by exact (=) match, so a name
+# outside the safe set would create a session ds can never re-find, attach,
+# or kill. Reject such names at parse time instead. Names resolved from an
+# existing tmux session (_resolve_session_target) intentionally bypass this:
+# they already exist and must remain operable.
+_validate_session_name() {
+  [[ "$1" =~ ^[A-Za-z0-9_-]+$ ]]
 }
 
 # Resolve PROFILE from SESSION for session creation.
@@ -989,7 +1010,7 @@ _do_session_prepare() {
   local shell_name shell_cmd
   shell_name="$(_shell_name)"
   shell_cmd="$(_shell_login_cmd)"
-  session_id=$(tmux new-session -d -s "$SESSION" -P -F '#{session_id}' "$shell_cmd")
+  session_id=$(tmux new-session -d -s "$SESSION" -P -F '#{session_id}' "$shell_cmd") || return 1
   if [[ "$startup_restore" == "detect" ]]; then
     startup_restore=0
     _resurrect_restore_expected && startup_restore=1
@@ -1217,7 +1238,7 @@ INIT_EOF
         local hosts="" name _conn f
         for f in "$conf_dir"/$connect_config_glob; do
             [[ -f "$f" ]] || continue
-            while read -r name _conn; do
+            while read -r name _conn || [[ -n "$name" ]]; do
                 [[ -z "$name" || "$name" == '#'* ]] && continue
                 [[ "$name" == *'*'* || "$name" == *'?'* ]] && continue
                 hosts+=" @$name"
@@ -1235,7 +1256,7 @@ INIT_EOF
     done
     for f in "$conf_dir"/$profile_config_glob; do
         [[ -f "$f" ]] || continue
-        while read -r pname _rest; do
+        while read -r pname _rest || [[ -n "$pname" ]]; do
             [[ -z "$pname" || "$pname" == \#* ]] && continue
             profiles+=" $pname"
         done < "$f"
@@ -1341,7 +1362,7 @@ INIT_EOF
     if [[ "$cur" == @* ]]; then
         for f in "$conf_dir"/${~connect_config_glob}(N); do
             [[ -f "$f" ]] || continue
-            while read -r name _conn; do
+            while read -r name _conn || [[ -n "$name" ]]; do
                 [[ -z "$name" || "$name" == '#'* ]] && continue
                 [[ "$name" == *'*'* || "$name" == *'?'* ]] && continue
                 hosts+=("@$name")
@@ -1358,7 +1379,7 @@ INIT_EOF
     done
     for f in "$conf_dir"/${~profile_config_glob}(N); do
         [[ -f "$f" ]] || continue
-        while read -r pname _rest; do
+        while read -r pname _rest || [[ -n "$pname" ]]; do
             [[ -z "$pname" || "$pname" == \#* ]] && continue
             profiles+=("$pname")
         done < "$f"
@@ -1597,10 +1618,26 @@ while [[ $# -gt 0 ]]; do
       exit 1
       ;;
     @*)
+      # A bare `@` sets an empty HOST (pre-existing local leniency), so
+      # emptiness cannot double as the seen-flag — `ds @ @beta` must
+      # still be a duplicate.
+      if [[ -n "$HOST_SEEN" ]]; then
+        echo "ds: only one @host allowed" >&2
+        exit 1
+      fi
+      HOST_SEEN=1
       HOST="${1#@}"
       shift
       ;;
     *)
+      if [[ -n "$SESSION" ]]; then
+        echo "ds: only one session name allowed" >&2
+        exit 1
+      fi
+      if ! _validate_session_name "$1"; then
+        echo "ds: invalid session name '$1' (allowed: letters, digits, dash, underscore)" >&2
+        exit 1
+      fi
       SESSION="$1"
       shift
       ;;
