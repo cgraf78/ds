@@ -13,6 +13,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REAL_ZSH=$(command -v zsh || true)
 REAL_SSH_KEYGEN=$(command -v ssh-keygen || true)
+REAL_TMUX=$(command -v tmux || true)
 
 # shellcheck source=test-helpers.sh
 . "$SCRIPT_DIR/test-helpers.sh"
@@ -266,6 +267,10 @@ case "${args[0]:-}" in
         exit 0
         ;;
     new-session)
+        if [[ "${MOCK_TMUX_NEW_SESSION_FAIL:-0}" == "1" ]]; then
+            echo "mock tmux: new-session failed" >&2
+            exit 1
+        fi
         if [[ -n "${MOCK_TMUX_SERVER_FILE:-}" ]]; then
             : >"$MOCK_TMUX_SERVER_FILE"
         fi
@@ -7720,6 +7725,157 @@ _assert_contains "ShellCheck: ds-test preserves SC2317 policy in-file" \
   '# shellcheck disable=SC2317' "$(head -n 10 "$SCRIPT_DIR/ds-test")"
 _assert_contains "ShellCheck: helpers preserve SC2317 policy in-file" \
   '# shellcheck disable=SC2317' "$(head -n 10 "$SCRIPT_DIR/test-helpers.sh")"
+
+# ---------------------------------------------------------------------------
+# Tests: CLI robustness (unterminated config lines, session names, dup args)
+# ---------------------------------------------------------------------------
+
+echo ""
+echo "=== CLI robustness ==="
+
+# A final config line without trailing newline must load, not silently drop.
+printf 'nlprof1 win1 echo one\nnlprof2 win2 echo two' >"$CONF_DIR/profile-nonl.conf"
+printf 'nlhost1 ssh\nnlhost2 autossh' >"$CONF_DIR/connect-nonl.conf"
+_load_data_profiles
+if declare -f _profile_nlprof2 >/dev/null 2>&1; then
+  _pass "nonl: data profile on unterminated last line loads"
+else
+  _fail "nonl: data profile on unterminated last line loads"
+fi
+if declare -f _profile_nlprof1 >/dev/null 2>&1; then
+  _pass "nonl: data profile on terminated line still loads"
+else
+  _fail "nonl: data profile on terminated line still loads"
+fi
+if lookup_host nlhost2; then
+  _pass "nonl: lookup_host finds host on unterminated last line"
+else
+  _fail "nonl: lookup_host finds host on unterminated last line"
+fi
+_assert_eq "nonl: lookup_host returns last-line connect method" "autossh" "$CONNECT"
+if lookup_host nlhost1; then
+  _pass "nonl: lookup_host still finds host on terminated line"
+else
+  _fail "nonl: lookup_host still finds host on terminated line"
+fi
+rm -f "$CONF_DIR/profile-nonl.conf" "$CONF_DIR/connect-nonl.conf"
+unset -f _profile_nlprof1 _profile_nlprof2 || true
+
+# The generated shell completions parse the same config files; both loops in
+# each snippet must carry the unterminated-line guard.
+_nonl_bash_init=$(_do_init bash)
+_nonl_bash_guards=$(printf '%s\n' "$_nonl_bash_init" | grep -c -F '|| [[ -n ' || true)
+_assert_eq "nonl: bash completion guards both config loops" "2" "$_nonl_bash_guards"
+_nonl_zsh_init=$(_do_init zsh)
+_nonl_zsh_guards=$(printf '%s\n' "$_nonl_zsh_init" | grep -c -F '|| [[ -n ' || true)
+_assert_eq "nonl: zsh completion guards both config loops" "2" "$_nonl_zsh_guards"
+
+# Session names outside [A-Za-z0-9_-] are rejected at parse time: tmux would
+# rewrite them at creation, leaving a session ds can never re-find.
+_robust_rc=0
+_robust_out=$(HOME="$TEST_HOME" TMUX="" DS_SOURCED="" "$SCRIPT_DIR/../bin/ds" 'a:b' --no-attach 2>&1) || _robust_rc=$?
+_assert_exit "session names: colon rejected" 1 "$_robust_rc"
+_assert_contains "session names: colon error is actionable" "invalid session name 'a:b'" "$_robust_out"
+_robust_rc=0
+_robust_out=$(HOME="$TEST_HOME" TMUX="" DS_SOURCED="" "$SCRIPT_DIR/../bin/ds" 'c.d' --no-attach 2>&1) || _robust_rc=$?
+_assert_exit "session names: dot rejected" 1 "$_robust_rc"
+_assert_contains "session names: dot error is actionable" "invalid session name 'c.d'" "$_robust_out"
+_robust_rc=0
+_robust_out=$(HOME="$TEST_HOME" TMUX="" DS_SOURCED="" "$SCRIPT_DIR/../bin/ds" 'with space' --no-attach 2>&1) || _robust_rc=$?
+_assert_exit "session names: space rejected" 1 "$_robust_rc"
+_robust_rc=0
+_robust_out=$(HOME="$TEST_HOME" TMUX="" DS_SOURCED="" MOCK_SESSIONS="" "$SCRIPT_DIR/../bin/ds" valid-name_1 --no-attach 2>&1) || _robust_rc=$?
+_assert_exit "session names: valid name accepted" 0 "$_robust_rc"
+
+# A failed tmux new-session must fail ds instead of configuring a phantom.
+_reset_tmux_log
+_robust_rc=0
+_robust_out=$(HOME="$TEST_HOME" TMUX="" DS_SOURCED="" MOCK_TMUX_NEW_SESSION_FAIL=1 MOCK_SESSIONS="" "$SCRIPT_DIR/../bin/ds" fresh --no-attach 2>&1) || _robust_rc=$?
+_assert_exit "new-session failure: ds exits nonzero" 1 "$_robust_rc"
+_assert_contains "new-session failure: creation was attempted" "new-session -d -s fresh" "$(_tmux_log)"
+_assert_not_contains "new-session failure: no setup after failed create" "set-environment" "$(_tmux_log)"
+
+# Repeated session/host args are a mistake, not last-wins.
+_robust_rc=0
+_robust_out=$(HOME="$TEST_HOME" TMUX="" DS_SOURCED="" "$SCRIPT_DIR/../bin/ds" prod db --no-attach 2>&1) || _robust_rc=$?
+_assert_exit "dup args: two session names rejected" 1 "$_robust_rc"
+_assert_contains "dup args: session error message" "only one session name allowed" "$_robust_out"
+_robust_rc=0
+_robust_out=$(HOME="$TEST_HOME" TMUX="" DS_SOURCED="" "$SCRIPT_DIR/../bin/ds" @a @b 2>&1) || _robust_rc=$?
+_assert_exit "dup args: two hosts rejected" 1 "$_robust_rc"
+_assert_contains "dup args: host error message" "only one @host allowed" "$_robust_out"
+_robust_rc=0
+_robust_out=$(HOME="$TEST_HOME" TMUX="" DS_SOURCED="" "$SCRIPT_DIR/../bin/ds" @ @b 2>&1) || _robust_rc=$?
+_assert_exit "dup args: bare @ then host rejected" 1 "$_robust_rc"
+_assert_contains "dup args: bare @ dup error message" "only one @host allowed" "$_robust_out"
+: >"$REMOTE_LOG"
+_robust_rc=0
+_robust_out=$(HOME="$TEST_HOME" TMUX="" DS_SOURCED="" "$SCRIPT_DIR/../bin/ds" dev @definitely-not-configured-xyz 2>&1) || _robust_rc=$?
+_assert_exit "dup args: single session plus host accepted" 0 "$_robust_rc"
+_assert_contains "dup args: single host dispatched" "SSH_HOST=definitely-not-configured-xyz" "$(cat "$REMOTE_LOG")"
+
+# Resurrect failures name the snapshot path instead of exiting silent.
+_robust_missing=$(_tmpdir)/no-such-snapshot
+_robust_rc=0
+_robust_out=$(_do_resurrect_save "$_robust_missing" 2>&1) || _robust_rc=$?
+_assert_exit "resurrect: save to missing file fails" 1 "$_robust_rc"
+_assert_contains "resurrect: save names the missing path" "$_robust_missing" "$_robust_out"
+_robust_rc=0
+_robust_out=$(_do_resurrect_restore "$_robust_missing" 2>&1) || _robust_rc=$?
+_assert_exit "resurrect: restore of missing file fails" 1 "$_robust_rc"
+_assert_contains "resurrect: restore names the missing path" "$_robust_missing" "$_robust_out"
+rm -f "$(_resurrect_dir)/last"
+_robust_rc=0
+_robust_out=$(_do_resurrect_restore "" 2>&1) || _robust_rc=$?
+_assert_exit "resurrect: restore with no last file fails" 1 "$_robust_rc"
+_assert_contains "resurrect: restore names the default path" "last" "$_robust_out"
+_robust_real=$(_tmpdir)/real.txt
+printf 'x\n' >"$_robust_real"
+_robust_link=$(_tmpdir)/link.txt
+ln -s "$_robust_real" "$_robust_link"
+_robust_rc=0
+_robust_out=$(_do_resurrect_save "$_robust_link" 2>&1) || _robust_rc=$?
+_assert_exit "resurrect: save through symlink fails" 1 "$_robust_rc"
+_assert_contains "resurrect: save names the symlink path" "$_robust_link" "$_robust_out"
+# shellcheck disable=SC2329  # _do_resurrect_save invokes this chmod shadow indirectly.
+chmod() { return 1; }
+_robust_rc=0
+_robust_out=$(_do_resurrect_save "$_robust_real" 2>&1) || _robust_rc=$?
+_assert_exit "resurrect: save with chmod failure fails" 1 "$_robust_rc"
+_assert_contains "resurrect: save names the unsecurable path" "$_robust_real" "$_robust_out"
+unset -f chmod
+
+# Live tmux proves the rejection happens before any server contact, and that a
+# valid name still creates an exactly-findable session. Isolated socket, no
+# user config, server killed afterwards.
+if [[ -n "$REAL_TMUX" ]]; then
+  _robust_sock="ds-test-robust-$$"
+  _robust_bin=$(_tmpdir)
+  # shellcheck disable=SC2016  # intentional — the shim needs a literal $@
+  cat >"$_robust_bin/tmux" <<EOF
+#!/usr/bin/env bash
+exec "$REAL_TMUX" -L "$_robust_sock" -f /dev/null "\$@"
+EOF
+  chmod +x "$_robust_bin/tmux"
+  _robust_rc=0
+  _robust_out=$(PATH="$_robust_bin:$PATH" HOME="$TEST_HOME" TMUX="" DS_SOURCED="" "$SCRIPT_DIR/../bin/ds" 'rej:ected' --no-attach 2>&1) || _robust_rc=$?
+  _assert_exit "tmux: colon name rejected" 1 "$_robust_rc"
+  _assert_contains "tmux: rejection message" "invalid session name" "$_robust_out"
+  if "$REAL_TMUX" -L "$_robust_sock" -f /dev/null ls >/dev/null 2>&1; then
+    _fail "tmux: rejected name starts no server"
+  else
+    _pass "tmux: rejected name starts no server"
+  fi
+  _robust_rc=0
+  PATH="$_robust_bin:$PATH" HOME="$TEST_HOME" TMUX="" DS_SOURCED="" "$SCRIPT_DIR/../bin/ds" oksession --no-attach >/dev/null 2>&1 || _robust_rc=$?
+  _assert_exit "tmux: valid name creates session" 0 "$_robust_rc"
+  if "$REAL_TMUX" -L "$_robust_sock" -f /dev/null has-session -t '=oksession' >/dev/null 2>&1; then
+    _pass "tmux: created session is exactly findable"
+  else
+    _fail "tmux: created session is exactly findable"
+  fi
+  "$REAL_TMUX" -L "$_robust_sock" -f /dev/null kill-server >/dev/null 2>&1 || true
+fi
 
 # Restore connect.conf
 cat >"$CONF_DIR/connect.conf" <<'EOF'
