@@ -8065,6 +8065,50 @@ _char_f2_unset_rc=$?
 set -e
 _assert_exit "window option detection tolerates tmux without -q (unset)" 1 "$_char_f2_unset_rc"
 
+echo ""
+echo "=== Shell-name memoization ==="
+
+# Isolated `ps` shim: counts invocations, delegates faithfully.
+_char_ps_bin=$(_tmpdir)/char-psbin
+mkdir -p "$_char_ps_bin"
+_char_real_ps=$(command -v ps)
+_char_ps_log=$(_tmpdir)/char-ps.log
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'printf "ps\\n" >>%q\n' "$_char_ps_log"
+  printf 'exec %q "$@"\n' "$_char_real_ps"
+} >"$_char_ps_bin/ps"
+chmod +x "$_char_ps_bin/ps"
+_char_old_path=$PATH
+
+# Repeated direct calls share one parent lookup (same PPID, same shell).
+unset _DS_SHELL_PARENT_PPID _DS_SHELL_PARENT_NAME
+: >"$_char_ps_log"
+export PATH="$_char_ps_bin:$PATH"
+_shell_name >/dev/null
+_shell_name >/dev/null
+export PATH="$_char_old_path"
+_assert_eq "shell-name memoizes parent lookup across direct calls" \
+  "1" "$(wc -l <"$_char_ps_log" | tr -d ' ')"
+
+# The create path resolves the parent shell once per process even though
+# every call site runs in its own command substitution (subshell writes
+# cannot propagate, so the answer is warmed process-wide instead).
+export MOCK_SESSIONS="" MOCK_DS_MANAGED="" MOCK_DS_OPTION_MANAGED=""
+: >"$_char_ps_log"
+(
+  unset DS_SHELL_NAME _DS_SHELL_PARENT_PPID _DS_SHELL_PARENT_NAME
+  PATH="$_char_ps_bin:$PATH"
+  # shellcheck disable=SC2034 # Consumed dynamically by _do_session_prepare.
+  SESSION="charnew" PROFILE="ds" DS_SHARE_VIA=""
+  _reset_tmux_log
+  _do_session_prepare 0 ""
+)
+_assert_eq "create path runs ps once per process" \
+  "1" "$(wc -l <"$_char_ps_log" | tr -d ' ')"
+_assert_contains "create path still wires login shell" \
+  "tmux set-option -t charnew default-command exec " "$(_tmux_log)"
+
 # Restore connect.conf
 cat >"$CONF_DIR/connect.conf" <<'EOF'
 # hostname    connect

@@ -146,9 +146,18 @@ _shell_name() {
   local parent=""
 
   if [[ -z "$shell" ]] && command -v ps >/dev/null 2>&1; then
-    parent="$(ps -p "$PPID" -o comm= 2>/dev/null || true)"
-    parent="${parent##*/}"
-    parent="${parent#-}"
+    # `ps` scans the whole process table (~85ms on a loaded host), so share
+    # one lookup per parent PID. This memo only short-circuits repeated
+    # direct calls: subshell results cannot propagate back to the parent.
+    if [[ "${_DS_SHELL_PARENT_PPID:-}" == "$PPID" ]]; then
+      parent="${_DS_SHELL_PARENT_NAME:-}"
+    else
+      parent="$(ps -p "$PPID" -o comm= 2>/dev/null || true)"
+      parent="${parent##*/}"
+      parent="${parent#-}"
+      _DS_SHELL_PARENT_PPID=$PPID
+      _DS_SHELL_PARENT_NAME=$parent
+    fi
     [[ -n "$parent" ]] && shell="$parent"
   fi
 
@@ -1011,6 +1020,11 @@ _do_session_prepare() {
 
   local shell_name shell_cmd
   shell_name="$(_shell_name)"
+  # One parent-shell lookup per process: every later _shell_name on this path
+  # (login-command builders, profiles) runs in a subshell with the same $PPID,
+  # where shell-variable memos cannot propagate back, so publish the answer
+  # process-wide instead of re-running `ps` (2-5x per unwrapped create).
+  DS_SHELL_NAME="$shell_name"
   shell_cmd="$(_shell_login_cmd)"
   session_id=$(tmux new-session -d -s "$SESSION" -P -F '#{session_id}' "$shell_cmd") || return 1
   if [[ "$startup_restore" == "detect" ]]; then
