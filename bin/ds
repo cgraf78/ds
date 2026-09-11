@@ -805,12 +805,32 @@ _do_resurrect_restore() {
     return 1
   }
 
+  # One batched query replaces per-record has-session + display-message.
+  # The old display-message used a `=session` target, which answers empty
+  # with rc 0 on tmux 3.6 and invalidated every published marker. Exact
+  # matching happens in bash instead, with `=` semantics.
+  local -A _restore_ids=() _restore_markers=() _restore_shells=()
+  local sessions qname qid qmarker qshell
+  sessions=$(tmux list-sessions -F $'#{session_name}\t#{session_id}\t#{@ds_status_labels_version}\t#{@ds_shell}' \
+    2>/dev/null) || sessions=""
+  while IFS=$'\t' read -r qname qid qmarker qshell; do
+    [[ -n "$qname" ]] || continue
+    _restore_ids["$qname"]="$qid"
+    _restore_markers["$qname"]="$qmarker"
+    _restore_shells["$qname"]="$qshell"
+  done <<<"$sessions"
+
   while IFS=$'\t' read -r kind session shell extra; do
     [[ "$kind" == "ds-v1" && -n "$session" && -z "$extra" ]] || continue
     [[ "$session" != *$'\n'* && "$shell" =~ ^[A-Za-z0-9._+-]+$ ]] || continue
-    tmux has-session -t "=$session" 2>/dev/null || continue
-    session_id=$(tmux display-message -p -t "=$session" '#{session_id}') ||
+    session_id="${_restore_ids[$session]:-}"
+    [[ -n "$session_id" ]] || continue
+    # Skip records already reconciled for this shell, matching the attach
+    # path, which leaves marked sessions (and local overrides) alone.
+    if [[ "${_restore_markers[$session]:-}" == "$_DS_STATUS_LABELS_VERSION:$session_id" &&
+      "${_restore_shells[$session]:-}" == "$shell" ]]; then
       continue
+    fi
     _reconcile_ds_session "$session" "$session_id" "$shell" || continue
   done <"$file"
 

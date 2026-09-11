@@ -6339,7 +6339,7 @@ _reset_tmux_log
   "$SCRIPT_DIR/../bin/ds" resurrect restore '@snapshot'
 )
 _assert_contains "ds resurrect restore: consumes @-prefixed file literally" \
-  "tmux has-session -t =ds" "$(_tmux_log)"
+  "tmux set-environment -t ds DS_MANAGED 1" "$(_tmux_log)"
 export MOCK_SESSIONS=""
 export MOCK_DS_MANAGED=""
 unset MOCK_DS_SHELL_NAME
@@ -8259,6 +8259,65 @@ _assert_contains "zsh completion queries @ds_managed" \
   '#{@ds_managed}' "$_opt_init_zsh"
 _assert_contains "zsh completion keeps env fallback" \
   'elif tmux show-environment' "$_opt_init_zsh"
+
+echo ""
+echo "=== Resurrect restore batching ==="
+
+# Restore publishes a valid marker under real tmux 3.6 display-message
+# semantics (`=session` targets answer empty with rc 0): session identity
+# now comes from the batched query instead.
+export MOCK_TMUX_36_DISPLAY_EMPTY=1
+export MOCK_TMUX_SESSION_ID="\$7"
+_opt_f1_file=$(_tmpdir)/opt-f1.txt
+printf 'ds-v1\tf1sess\tbash\n' >"$_opt_f1_file"
+export MOCK_SESSIONS="f1sess"
+export MOCK_DS_MANAGED=""
+export MOCK_DS_OPTION_MANAGED=""
+_reset_tmux_log
+_do_resurrect_restore "$_opt_f1_file"
+_assert_contains "restore publishes valid marker under tmux 3.6 display-message" \
+  "tmux set-option -t \$7 @ds_status_labels_version 1:\$7" "$(_tmux_log)"
+unset MOCK_TMUX_36_DISPLAY_EMPTY MOCK_TMUX_SESSION_ID
+
+# Records already reconciled for the recorded shell are skipped, so repeat
+# restores cost one batched query plus the completion marker.
+export MOCK_TMUX_SESSION_ID="\$3"
+export MOCK_DS_STATUS_LABELS_MARKER="1:\$3"
+export MOCK_DS_SHELL_NAME="bash"
+export MOCK_SESSIONS="sk1 sk2"
+export MOCK_DS_MANAGED=""
+export MOCK_DS_OPTION_MANAGED=" sk1 sk2"
+_opt_skip_file=$(_tmpdir)/opt-skip.txt
+printf 'ds-v1\tsk1\tbash\nds-v1\tsk2\tbash\nds-v1\tghost\tbash\n' \
+  >"$_opt_skip_file"
+_reset_tmux_log
+_do_resurrect_restore "$_opt_skip_file"
+_opt_skip_log=$(_tmux_log)
+_assert_contains "restore skip still lists sessions once" \
+  "tmux list-sessions -F" "$_opt_skip_log"
+_assert_not_contains "restore skip reconciles nothing" \
+  "set-environment -t sk" "$_opt_skip_log"
+_assert_contains "restore skip still marks server restore complete" \
+  "tmux set-option -g @ds_resurrect_restored_at" "$_opt_skip_log"
+_assert_eq "skipped restore uses three calls" \
+  "3" "$(grep -c '^tmux ' <<<"$_opt_skip_log")"
+unset MOCK_DS_STATUS_LABELS_MARKER MOCK_TMUX_SESSION_ID
+
+# A record whose shell differs from the session's is reconciled, not skipped.
+export MOCK_TMUX_SESSION_ID="\$3"
+export MOCK_DS_STATUS_LABELS_MARKER="1:\$3"
+export MOCK_DS_SHELL_NAME="bash"
+export MOCK_SESSIONS="sk1"
+export MOCK_DS_MANAGED=""
+export MOCK_DS_OPTION_MANAGED=" sk1"
+_opt_shell_file=$(_tmpdir)/opt-shell.txt
+printf 'ds-v1\tsk1\tzsh\n' >"$_opt_shell_file"
+_reset_tmux_log
+_do_resurrect_restore "$_opt_shell_file"
+_assert_contains "restore shell mismatch reconciles" \
+  "tmux set-environment -t sk1 DS_SHELL_NAME zsh" "$(_tmux_log)"
+unset MOCK_DS_STATUS_LABELS_MARKER MOCK_TMUX_SESSION_ID
+export MOCK_DS_SHELL_NAME="bash"
 
 # Restore connect.conf
 cat >"$CONF_DIR/connect.conf" <<'EOF'
