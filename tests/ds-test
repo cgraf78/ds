@@ -83,6 +83,32 @@ case "${args[0]:-}" in
         ;;
     list-sessions)
         for _arg in "${args[@]}"; do
+            if [[ "$_arg" == *'#{@ds_managed}'* || "$_arg" == *'#{@ds_shell}'* ]]; then
+                _opt_session_id="${MOCK_TMUX_SESSION_ID:-}"
+                [[ -n "$_opt_session_id" ]] || _opt_session_id='$1'
+                _opt_marker="${MOCK_DS_STATUS_LABELS_MARKER:-}"
+                if [[ -n "${MOCK_DS_STATUS_LABELS_STATE_FILE:-}" &&
+                    -f "$MOCK_DS_STATUS_LABELS_STATE_FILE" ]]; then
+                    _opt_marker=$(<"$MOCK_DS_STATUS_LABELS_STATE_FILE")
+                fi
+                for _session_name in ${MOCK_SESSIONS:-}; do
+                    _line="$_arg"
+                    _line="${_line//'#{session_name}'/$_session_name}"
+                    _line="${_line//'#{session_id}'/$_opt_session_id}"
+                    _line="${_line//'#{@ds_status_labels_version}'/$_opt_marker}"
+                    if [[ " ${MOCK_DS_OPTION_MANAGED:-} " == *" $_session_name "* ]]; then
+                        _line="${_line//'#{@ds_managed}'/1}"
+                        _line="${_line//'#{@ds_shell}'/${MOCK_DS_SHELL_NAME:-bash}}"
+                    else
+                        _line="${_line//'#{@ds_managed}'}"
+                        _line="${_line//'#{@ds_shell}'}"
+                    fi
+                    printf '%s\n' "$_line"
+                done
+                exit 0
+            fi
+        done
+        for _arg in "${args[@]}"; do
             if [[ "$_arg" == '#{session_name}' ]]; then
                 for _session_name in ${MOCK_SESSIONS:-}; do
                     printf '%s\n' "$_session_name"
@@ -124,6 +150,13 @@ case "${args[0]:-}" in
                 _line="${_line//'#{session_name}'/$_s}"
                 _line="${_line//'#{session_windows}'/3}"
                 _line="${_line//'#{?session_attached,attached,detached}'/detached}"
+                if [[ " ${MOCK_DS_OPTION_MANAGED:-} " == *" $_s "* ]]; then
+                    _line="${_line//'#{@ds_managed}'/1}"
+                    _line="${_line//'#{@ds_shell}'/${MOCK_DS_SHELL_NAME:-bash}}"
+                else
+                    _line="${_line//'#{@ds_managed}'}"
+                    _line="${_line//'#{@ds_shell}'}"
+                fi
                 echo "$_line"
             done < <(echo "${MOCK_TMUX_LS:-}" | grep -v '^$')
         fi
@@ -155,6 +188,14 @@ case "${args[0]:-}" in
         fi
         ;;
     display-message)
+        # Real tmux 3.6 answers display-message for `=session` targets with
+        # empty output and rc 0. Emulate only when asked: most fixtures
+        # predate the fix and rely on target-agnostic session-id answers.
+        if [[ "${MOCK_TMUX_36_DISPLAY_EMPTY:-0}" == "1" ]]; then
+            for _a in "${args[@]}"; do
+                [[ "$_a" == =* ]] && exit 0
+            done
+        fi
         # Support session name query and info format
         for _a in "${args[@]}"; do
             if [[ "$_a" == *'#{start_time}'* ]]; then
@@ -181,6 +222,13 @@ case "${args[0]:-}" in
         exit 0
         ;;
     show-window-options)
+        # Real tmux 3.6 has no -q flag here ("unknown flag -q"). Emulate only
+        # when asked until callers stop passing it.
+        if [[ "${MOCK_TMUX_STRICT_FLAGS:-0}" == "1" &&
+            " ${args[*]} " == *" -q "* ]]; then
+            echo "unknown flag -q" >&2
+            exit 1
+        fi
         if [[ " ${args[*]} " == *" pane-border-format"* ]]; then
             if [[ " ${args[*]} " == *" -v"* ]]; then
                 echo "${MOCK_TMUX_LOCAL_PANE_BORDER_FORMAT:-}"
@@ -197,6 +245,22 @@ case "${args[0]:-}" in
         exit 0
         ;;
     show-options)
+        if [[ " ${args[*]} " == *" @ds_managed"* ||
+            " ${args[*]} " == *" @ds_shell"* ]]; then
+            _se_opt_name=""
+            for ((_i = 0; _i < ${#args[@]}; _i++)); do
+                [[ "${args[_i]}" == "-t" ]] && _se_opt_name="${args[_i + 1]:-}"
+            done
+            _se_opt_name="${_se_opt_name#=}"
+            if [[ " ${MOCK_DS_OPTION_MANAGED:-} " == *" $_se_opt_name "* ]]; then
+                if [[ " ${args[*]} " == *" @ds_shell"* ]]; then
+                    echo "${MOCK_DS_SHELL_NAME:-bash}"
+                else
+                    echo "1"
+                fi
+            fi
+            exit 0
+        fi
         if [[ " ${args[*]} " == *" @tmux-tools-resurrect-auto-restore"* ]]; then
             echo "${MOCK_TMUX_TOOLS_AUTO_RESTORE:-}"
             exit 0
@@ -7876,6 +7940,119 @@ EOF
   fi
   "$REAL_TMUX" -L "$_robust_sock" -f /dev/null kill-server >/dev/null 2>&1 || true
 fi
+
+# ---------------------------------------------------------------------------
+# Tests: Hot-path characterization (behavior pins for latency work)
+# ---------------------------------------------------------------------------
+# These pin externally visible behavior (outputs, exit codes, ordering) ahead
+# of hot-path optimization. They must pass unchanged after the optimization.
+
+echo ""
+echo "=== Hot-path characterization ==="
+
+unset MOCK_TMUX_SESSION_ROWS MOCK_DS_OPTION_MANAGED
+export MOCK_DS_SHELL_NAME="bash"
+
+# _do_list: exact output, ordering, exit code.
+export MOCK_TMUX_LS=$'alpha\nbeta\ngamma'
+export MOCK_DS_MANAGED=" alpha gamma"
+set +e
+_char_list_out=$(_do_list)
+_char_list_rc=$?
+set -e
+_assert_exit "char: list exit code" 0 "$_char_list_rc"
+_assert_eq "char: list exact output and order" \
+  $'alpha: 3 windows (detached)\ngamma: 3 windows (detached)' "$_char_list_out"
+export MOCK_TMUX_LS="zzz-unmanaged"
+export MOCK_DS_MANAGED=""
+_assert_eq "char: list unmanaged-only message" "(no active ds sessions)" "$(_do_list)"
+export MOCK_TMUX_LS=""
+_assert_eq "char: list empty message" "(no active ds sessions)" "$(_do_list)"
+
+# _do_killall: exact kill set, order, messages, exit code.
+export MOCK_TMUX_LS=$'k1\nk2\nk3'
+export MOCK_DS_MANAGED=" k1 k3"
+_reset_tmux_log
+set +e
+_char_killall_out=$(_do_killall)
+_char_killall_rc=$?
+set -e
+_assert_exit "char: killall exit code" 0 "$_char_killall_rc"
+_assert_eq "char: killall messages in order" $'killed k1\nkilled k3' "$_char_killall_out"
+_char_killall_log=$(_tmux_log)
+_assert_contains "char: killall kills k1" "kill-session -t =k1" "$_char_killall_log"
+_assert_not_contains "char: killall skips k2" "kill-session -t =k2" "$_char_killall_log"
+export MOCK_TMUX_LS=""
+export MOCK_DS_MANAGED=""
+_assert_eq "char: killall empty message" "(no active ds sessions)" "$(_do_killall)"
+
+# Resurrect save: exact record bytes, mode, skips.
+_char_save_file=$(_tmpdir)/char-save.txt
+printf 'pane\ts1\t1\n' >"$_char_save_file"
+export MOCK_SESSIONS="s1 s2 s3"
+export MOCK_DS_MANAGED=" s1 s2"
+export MOCK_DS_SHELL_NAME="zsh"
+set +e
+_do_resurrect_save "$_char_save_file"
+_char_save_rc=$?
+set -e
+_assert_exit "char: save exit code" 0 "$_char_save_rc"
+_assert_eq "char: save exact records" \
+  $'pane\ts1\t1\nds-v1\ts1\tzsh\nds-v1\ts2\tzsh' "$(cat "$_char_save_file")"
+export MOCK_DS_SHELL_NAME="not a shell"
+printf 'pane\ts1\t1\n' >"$_char_save_file"
+_do_resurrect_save "$_char_save_file"
+_assert_eq "char: save skips invalid shells" \
+  $'pane\ts1\t1' "$(cat "$_char_save_file")"
+export MOCK_DS_SHELL_NAME="bash"
+
+# Resurrect restore: skips unknown sessions and malformed lines, exit code.
+printf 'ds-v1\tghost\tbash\nNOT-A-RECORD\nds-v1\tbad\thas\textra\n' >"$_char_save_file"
+export MOCK_SESSIONS="real"
+export MOCK_DS_MANAGED=""
+_reset_tmux_log
+set +e
+_do_resurrect_restore "$_char_save_file"
+_char_restore_rc=$?
+set -e
+_assert_exit "char: restore exit code" 0 "$_char_restore_rc"
+_assert_not_contains "char: restore skips unknown session" \
+  "DS_MANAGED" "$(_tmux_log)"
+_assert_contains "char: restore still marks server restore complete" \
+  "tmux set-option -g @ds_resurrect_restored_at" "$(_tmux_log)"
+
+# _shell_name: output pins (DS_SHELL_NAME wins; SHELL basename; default).
+_assert_eq "char: shell-name honors DS_SHELL_NAME" "zsh" "$(DS_SHELL_NAME=zsh _shell_name)"
+_char_no_ps_bin=$(_tmpdir)/char-no-ps
+mkdir -p "$_char_no_ps_bin"
+_assert_eq "char: shell-name falls back to SHELL basename" "fish" \
+  "$(PATH="$_char_no_ps_bin" SHELL=/usr/bin/fish _shell_name)"
+_assert_eq "char: shell-name defaults to bash" \
+  "$(PATH="$_char_no_ps_bin" SHELL='' _shell_name)" "bash"
+
+# Kill completion: managed sessions only (behavioral, via the real snippet).
+_char_killcomp_init=$(_tmpdir)/ds-init-killcomp.bash
+DS_SOURCED="" "$SCRIPT_DIR/../bin/ds" init bash >"$_char_killcomp_init"
+export MOCK_TMUX_LS=$'comp-a\ncomp-b\ncomp-c'
+export MOCK_DS_MANAGED=" comp-a comp-c"
+_char_killcomp_out=$(
+  PATH="$MOCK_BIN:$PATH" bash -c '
+    source "$1"
+    COMP_WORDS=(ds -k "")
+    COMP_CWORD=2
+    _ds
+    printf "%s\n" "${COMPREPLY[@]}"
+  ' bash "$_char_killcomp_init"
+)
+_assert_contains "char: kill completion offers managed comp-a" "comp-a" "$_char_killcomp_out"
+_assert_contains "char: kill completion offers managed comp-c" "comp-c" "$_char_killcomp_out"
+_assert_not_contains "char: kill completion skips unmanaged comp-b" "comp-b" "$_char_killcomp_out"
+_char_init_bash=$(DS_SOURCED="" bash "$SCRIPT_DIR/../bin/ds" init bash)
+_assert_contains "char: bash completion filters on DS_MANAGED" \
+  'DS_MANAGED' "$_char_init_bash"
+_char_init_zsh=$(DS_SOURCED="" bash "$SCRIPT_DIR/../bin/ds" init zsh)
+_assert_contains "char: zsh completion filters on DS_MANAGED" \
+  'DS_MANAGED' "$_char_init_zsh"
 
 # Restore connect.conf
 cat >"$CONF_DIR/connect.conf" <<'EOF'
