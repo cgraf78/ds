@@ -131,6 +131,14 @@ case "${args[0]:-}" in
             printf '%s\t%s\t%s\n' "$_session_name" "$_session_id" \
                 "$_status_marker"
         done
+        if [[ -n "${MOCK_TMUX_RACE_WINNER_FILE:-}" &&
+            -f "$MOCK_TMUX_RACE_WINNER_FILE" ]]; then
+            while IFS= read -r _race_name || [[ -n "$_race_name" ]]; do
+                [[ -n "$_race_name" ]] || continue
+                printf '%s\t%s\t%s\n' "$_race_name" "$_session_id" \
+                    "$_status_marker"
+            done <"$MOCK_TMUX_RACE_WINNER_FILE"
+        fi
         exit 0
         ;;
     ls)
@@ -334,6 +342,16 @@ case "${args[0]:-}" in
         ;;
     new-session)
         if [[ "${MOCK_TMUX_NEW_SESSION_FAIL:-0}" == "1" ]]; then
+            # Lost-race simulation: record the -s name as created by a
+            # concurrent creator so a later list-sessions adopts it.
+            if [[ -n "${MOCK_TMUX_RACE_WINNER_FILE:-}" ]]; then
+                for ((_i = 0; _i < ${#args[@]}; _i++)); do
+                    if [[ "${args[_i]}" == "-s" ]]; then
+                        printf '%s\n' "${args[_i + 1]:-}" \
+                            >>"$MOCK_TMUX_RACE_WINNER_FILE"
+                    fi
+                done
+            fi
             echo "mock tmux: new-session failed" >&2
             exit 1
         fi
@@ -7648,6 +7666,9 @@ cat >"$_runtime_mock_bin/tmux" <<'SH'
 printf 'tmux %s\n' "$*" >>"$DS_TEST_TMUX_LOG"
 case "${1:-}" in
   has-session) exit 1 ;;
+  # Real tmux prints the new session id on success; ds keys its
+  # create-failure detection on that output.
+  new-session) printf '%s\n' '$9' ;;
 esac
 exit 0
 SH
@@ -7860,6 +7881,19 @@ _robust_out=$(HOME="$TEST_HOME" TMUX="" DS_SOURCED="" MOCK_TMUX_NEW_SESSION_FAIL
 _assert_exit "new-session failure: ds exits nonzero" 1 "$_robust_rc"
 _assert_contains "new-session failure: creation was attempted" "new-session -d -s fresh" "$(_tmux_log)"
 _assert_not_contains "new-session failure: no setup after failed create" "set-environment" "$(_tmux_log)"
+
+# A lost create race (list snapshot predates a concurrent creator, so
+# new-session fails duplicate) adopts the winner instead of dying: logins
+# survive instead of dropping the ssh/et session.
+_reset_tmux_log
+_race_winner_file="$(_tmpdir)/race-winner"
+rm -f "$_race_winner_file"
+_robust_rc=0
+_robust_out=$(HOME="$TEST_HOME" TMUX="" DS_SOURCED="" MOCK_TMUX_NEW_SESSION_FAIL=1 MOCK_TMUX_RACE_WINNER_FILE="$_race_winner_file" MOCK_SESSIONS="" "$SCRIPT_DIR/../bin/ds" racesesh --no-attach 2>&1) || _robust_rc=$?
+_assert_exit "create race: ds exits zero" 0 "$_robust_rc"
+_assert_contains "create race: creation was attempted" "new-session -d -s racesesh" "$(_tmux_log)"
+_assert_contains "create race: winner adopted and reconciled" "set-environment" "$(_tmux_log)"
+_assert_not_contains "create race: duplicate noise stays silent" "new-session failed" "$_robust_out"
 
 # Repeated session/host args are a mistake, not last-wins.
 _robust_rc=0

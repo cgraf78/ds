@@ -1074,7 +1074,29 @@ _do_session_prepare() {
   # process-wide instead of re-running `ps` (2-5x per unwrapped create).
   DS_SHELL_NAME="$shell_name"
   shell_cmd="$(_shell_login_cmd)"
-  session_id=$(tmux new-session -d -s "$SESSION" -P -F '#{session_id}' "$shell_cmd") || return 1
+  # Capture stderr with stdout: tmux session ids are `$N`, so anything else
+  # is a failed create. A lost create race then degrades to an attach
+  # silently; only a genuine failure replays tmux's error.
+  local create_out
+  create_out=$(tmux new-session -d -s "$SESSION" -P -F '#{session_id}' "$shell_cmd" 2>&1) || true
+  if [[ "$create_out" =~ ^\$[0-9]+$ ]]; then
+    session_id="$create_out"
+  else
+    # Our list snapshot may predate a concurrent creator (resurrect
+    # restore, a second ds past the lock): adopt the winner instead of
+    # dying, so a lost create race degrades to an attach.
+    sessions=$(tmux list-sessions -F $'#{session_name}\t#{session_id}\t#{@ds_status_labels_version}' \
+      2>/dev/null) || sessions=""
+    session_id=""
+    while IFS=$'\t' read -r name session_id marker; do
+      [[ "$name" == "$SESSION" ]] && break
+      session_id=""
+    done <<<"$sessions"
+    if [[ -z "$session_id" ]]; then
+      [[ -n "$create_out" ]] && printf '%s\n' "$create_out" >&2
+      return 1
+    fi
+  fi
   if [[ "$startup_restore" == "detect" ]]; then
     startup_restore=0
     _resurrect_restore_expected && startup_restore=1
