@@ -800,7 +800,9 @@ _window_option_set() {
   local option="$2"
   local value
 
-  value=$(tmux show-window-options -q -t "$window" "$option" 2>/dev/null) || return 2
+  # No -q: tmux 3.6 show-window-options rejects it ("unknown flag -q",
+  # rc 1), which failed reconciliation and left the marker unset forever.
+  value=$(tmux show-window-options -t "$window" "$option" 2>/dev/null) || return 2
   [[ -n "$value" ]]
 }
 

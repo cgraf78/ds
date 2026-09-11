@@ -222,10 +222,9 @@ case "${args[0]:-}" in
         exit 0
         ;;
     show-window-options)
-        # Real tmux 3.6 has no -q flag here ("unknown flag -q"). Emulate only
-        # when asked until callers stop passing it.
-        if [[ "${MOCK_TMUX_STRICT_FLAGS:-0}" == "1" &&
-            " ${args[*]} " == *" -q "* ]]; then
+        # tmux 3.6 has no -q flag here ("unknown flag -q"); reject it like
+        # the real server so callers cannot regress to passing it.
+        if [[ " ${args[*]} " == *" -q "* ]]; then
             echo "unknown flag -q" >&2
             exit 1
         fi
@@ -238,9 +237,6 @@ case "${args[0]:-}" in
                 :
             fi
             exit 0
-        fi
-        if [[ " ${args[*]} " != *" -q "* ]]; then
-            exit 1
         fi
         exit 0
         ;;
@@ -6055,8 +6051,8 @@ _assert_not_contains "legacy labels: preserves all local pane borders" \
   "tmux set-window-option -t %" "$_local_override_log"
 _assert_eq "legacy labels: inspects all five local pane borders" \
   "10" "$(grep -c '^tmux show-window-options ' <<<"$_local_override_log")"
-_assert_not_contains "legacy labels: every local pane query is quiet" \
-  "tmux show-window-options -t" "$_local_override_log"
+_assert_not_contains "legacy labels: window-option queries avoid invalid -q" \
+  "tmux show-window-options -q" "$_local_override_log"
 _assert_eq "legacy labels: publishes after preserving local overrides" \
   "tmux set-option -t \$8 @ds_status_labels_version 1:\$8" \
   "$(tail -n 1 <<<"$_local_override_log")"
@@ -8053,6 +8049,21 @@ _assert_contains "char: bash completion filters on DS_MANAGED" \
 _char_init_zsh=$(DS_SOURCED="" bash "$SCRIPT_DIR/../bin/ds" init zsh)
 _assert_contains "char: zsh completion filters on DS_MANAGED" \
   'DS_MANAGED' "$_char_init_zsh"
+
+# Window-option detection must work on tmux without -q (3.6 rejects the
+# flag, which used to fail reconciliation and leave the marker unset).
+export MOCK_TMUX_LOCAL_PANE_BORDER_FORMAT=" custom "
+set +e
+_window_option_set "%9" pane-border-format
+_char_f2_set_rc=$?
+set -e
+_assert_exit "window option detection tolerates tmux without -q (set)" 0 "$_char_f2_set_rc"
+unset MOCK_TMUX_LOCAL_PANE_BORDER_FORMAT
+set +e
+_window_option_set "%9" pane-border-format
+_char_f2_unset_rc=$?
+set -e
+_assert_exit "window option detection tolerates tmux without -q (unset)" 1 "$_char_f2_unset_rc"
 
 # Restore connect.conf
 cat >"$CONF_DIR/connect.conf" <<'EOF'
