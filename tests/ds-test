@@ -247,7 +247,13 @@ case "${args[0]:-}" in
             for ((_i = 0; _i < ${#args[@]}; _i++)); do
                 [[ "${args[_i]}" == "-t" ]] && _se_opt_name="${args[_i + 1]:-}"
             done
-            _se_opt_name="${_se_opt_name#=}"
+            # Real tmux answers empty rc 0 for `=` targets under the `-qv`
+            # flags the code uses (verified on tmux 3.6b): never strip `=`
+            # and answer, or a `=`-target regression stays invisible in
+            # the call-count asserts (it would miss into env fallback).
+            if [[ "$_se_opt_name" == =* ]]; then
+                exit 0
+            fi
             if [[ " ${MOCK_DS_OPTION_MANAGED:-} " == *" $_se_opt_name "* ]]; then
                 if [[ " ${args[*]} " == *" @ds_shell"* ]]; then
                     echo "${MOCK_DS_SHELL_NAME:-bash}"
@@ -8160,17 +8166,21 @@ else
   _pass "single-session check rejects unmanaged"
 fi
 _reset_tmux_log
-_session_is_managed osess
+# Guarded: under `set -e` a bare failing call aborts the suite instead of
+# reporting FAIL; the log-count asserts below are the discriminators.
+_session_is_managed osess || true
 _assert_eq "option check uses one call" \
   "1" "$(grep -c '^tmux ' <<<"$(_tmux_log)")"
 _reset_tmux_log
-_session_is_managed lsess
+_session_is_managed lsess || true
 _assert_eq "legacy check probes option then env" \
   "2" "$(grep -c '^tmux ' <<<"$(_tmux_log)")"
 
 # Shell lookup: option value first, env fallback, validated both ways.
 export MOCK_DS_OPTION_MANAGED=" osess"
-export MOCK_DS_MANAGED=" osess lsess"
+# Uncoupled: osess is option-managed but not env-managed, so only the
+# option can answer and this test discriminates the option path.
+export MOCK_DS_MANAGED=" lsess"
 export MOCK_DS_SHELL_NAME="zsh"
 _assert_eq "shell lookup reads option" "zsh" "$(_session_shell_name osess)"
 _assert_eq "shell lookup falls back to env" "zsh" "$(_session_shell_name lsess)"
@@ -8184,7 +8194,8 @@ export MOCK_DS_SHELL_NAME="bash"
 
 # Reconcile publishes the option markers alongside env.
 _reset_tmux_log
-_reconcile_ds_session rsess "\$9" bash
+# Guarded: see the note above — a regression must FAIL, not abort the run.
+_reconcile_ds_session rsess "\$9" bash || true
 _opt_reconcile_log=$(_tmux_log)
 _assert_contains "reconcile publishes @ds_managed" \
   "tmux set-option -t rsess @ds_managed 1" "$_opt_reconcile_log"
@@ -8200,6 +8211,9 @@ export MOCK_DS_MANAGED=""
 _reset_tmux_log
 _opt_killall_out=$(_do_killall)
 _assert_eq "option killall messages" $'killed k1\nkilled k3' "$_opt_killall_out"
+# Paired asserts: the count (4) coincides with the pre-fix composition
+# (list + 3 probes + 0 kills vs list + 1 probe + 2 kills), so the
+# exact-messages assert above is the discriminator — keep both.
 _assert_eq "option killall uses one list plus kills" \
   "4" "$(grep -c '^tmux ' <<<"$(_tmux_log)")"
 
