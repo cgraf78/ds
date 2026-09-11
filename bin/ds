@@ -647,7 +647,7 @@ _set_status_labels() {
   return "$rc"
 }
 
-_session_shell_name() {
+_session_shell_name_from_env() {
   local session="$1" value
   value=$(tmux show-environment -t "=$session" DS_SHELL_NAME 2>/dev/null) ||
     return 1
@@ -657,7 +657,24 @@ _session_shell_name() {
   printf '%s\n' "$value"
 }
 
+_session_shell_name() {
+  local session="$1" value
+  # Plain target: tmux 3.6 rejects `=session` for show-options ("no such
+  # session"); an exact name resolves exactly while the session exists.
+  value=$(tmux show-options -t "$session" -qv @ds_shell 2>/dev/null) || value=""
+  if [[ "$value" =~ ^[A-Za-z0-9._+-]+$ ]]; then
+    printf '%s\n' "$value"
+    return 0
+  fi
+  _session_shell_name_from_env "$session"
+}
+
 _session_is_managed() {
+  local marker
+  # Option first (single batched column in list/kill/save paths); the env
+  # probe covers sessions last marked by older ds.
+  marker=$(tmux show-options -t "$1" -qv @ds_managed 2>/dev/null) || marker=""
+  [[ -n "$marker" ]] && return 0
   tmux show-environment -t "=$1" DS_MANAGED 2>/dev/null |
     grep -q '^DS_MANAGED='
 }
@@ -668,6 +685,8 @@ _reconcile_ds_session() {
   [[ "$shell" =~ ^[A-Za-z0-9._+-]+$ ]] || return 1
   tmux set-environment -t "$session" DS_MANAGED 1 || return 1
   tmux set-environment -t "$session" DS_SHELL_NAME "$shell" || return 1
+  tmux set-option -t "$session" @ds_managed 1 || return 1
+  tmux set-option -t "$session" @ds_shell "$shell" || return 1
   tmux set-option -t "$session" default-command \
     "$(_shell_login_cmd_for "$shell")" || return 1
   _set_status_labels "$session" || return 1
@@ -764,12 +783,16 @@ _do_resurrect_save() {
     printf 'ds: cannot secure resurrect snapshot: %s\n' "$file" >&2
     return 1
   }
-  while IFS= read -r session; do
+  while IFS=$'\t' read -r session managed shell; do
     [[ -n "$session" && "$session" != *$'\t'* ]] || continue
-    _session_is_managed "$session" || continue
-    shell=$(_session_shell_name "$session") || continue
+    if [[ -z "$managed" || ! "$shell" =~ ^[A-Za-z0-9._+-]+$ ]]; then
+      # Legacy sessions predate @ds_managed/@ds_shell: probe env directly
+      # (the batched columns already ruled out the option path).
+      tmux show-environment -t "=$session" DS_MANAGED 2>/dev/null | grep -q '^DS_MANAGED=' || continue
+      shell=$(_session_shell_name_from_env "$session") || continue
+    fi
     printf -v records '%sds-v1\t%s\t%s\n' "$records" "$session" "$shell"
-  done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null)
+  done < <(tmux list-sessions -F $'#{session_name}\t#{@ds_managed}\t#{@ds_shell}' 2>/dev/null)
 
   [[ -z "$records" ]] || printf '%s' "$records" >>"$file"
 }
@@ -882,26 +905,29 @@ _do_list() {
   if ! _share_obviously_inactive && _share_running; then
     shared_session=$(_share_current_session)
   fi
-  # Fetch name + window/attach info for every session in ONE call. Re-running
-  # `tmux ls` per session (to look up that session's info) made listing O(n^2)
-  # in tmux subprocesses; one combined query is O(n) and reads the same fields.
+  # Fetch name + window/attach info + managed marker for every session in
+  # ONE call. Re-running `tmux ls` per session (to look up that session's
+  # info) made listing O(n^2) in tmux subprocesses; one combined query is
+  # O(n) and reads the same fields. Sessions last marked by older ds
+  # predate @ds_managed and fall back to one env probe each.
   local all_sessions
-  all_sessions=$(tmux ls -F '#{session_name}	#{session_windows} windows (#{?session_attached,attached,detached})' 2>/dev/null) || true
+  all_sessions=$(tmux ls -F $'#{session_name}\t#{session_windows} windows (#{?session_attached,attached,detached})\t#{@ds_managed}' 2>/dev/null) || true
   [[ -z "$all_sessions" ]] && {
     echo "(no active ds sessions)"
     return
   }
   local output=""
-  local name info
-  while IFS=$'\t' read -r name info; do
+  local name info managed
+  while IFS=$'\t' read -r name info managed; do
     [[ -n "$name" ]] || continue
-    if tmux show-environment -t "=$name" DS_MANAGED 2>/dev/null | grep -q '^DS_MANAGED='; then
-      local line="$name: $info"
-      if [[ "$name" == "$shared_session" ]]; then
-        line="$line [shared]"
-      fi
-      output+="$line"$'\n'
+    if [[ -z "$managed" ]]; then
+      tmux show-environment -t "=$name" DS_MANAGED 2>/dev/null | grep -q '^DS_MANAGED=' || continue
     fi
+    local line="$name: $info"
+    if [[ "$name" == "$shared_session" ]]; then
+      line="$line [shared]"
+    fi
+    output+="$line"$'\n'
   done <<<"$all_sessions"
   if [[ -z "$output" ]]; then
     echo "(no active ds sessions)"
@@ -934,18 +960,20 @@ _do_killall() {
   fi
 
   local all_sessions
-  all_sessions=$(tmux ls -F '#{session_name}' 2>/dev/null) || true
+  all_sessions=$(tmux ls -F $'#{session_name}\t#{@ds_managed}' 2>/dev/null) || true
   [[ -z "$all_sessions" ]] && {
     echo "(no active ds sessions)"
     return
   }
   local found=0
-  while IFS= read -r s; do
-    if tmux show-environment -t "=$s" DS_MANAGED 2>/dev/null | grep -q '^DS_MANAGED='; then
-      tmux kill-session -t "=$s"
-      echo "killed $s"
-      found=1
+  while IFS=$'\t' read -r s managed; do
+    if [[ -z "$managed" ]]; then
+      # Legacy sessions predate @ds_managed; probe env as fallback.
+      tmux show-environment -t "=$s" DS_MANAGED 2>/dev/null | grep -q '^DS_MANAGED=' || continue
     fi
+    tmux kill-session -t "=$s"
+    echo "killed $s"
+    found=1
   done <<<"$all_sessions"
   if [[ "$found" -eq 0 ]]; then
     echo "(no active ds sessions)"
@@ -1241,8 +1269,9 @@ INIT_EOF
             return ;;
         -k|--kill|--share|--unshare)
             local sessions
-            sessions=$(tmux ls -F '#{session_name}' 2>/dev/null | while IFS= read -r s; do
-                tmux show-environment -t "=$s" DS_MANAGED 2>/dev/null | grep -q '^DS_MANAGED=' && echo "$s"
+            sessions=$(tmux ls -F '#{session_name}'$'\t''#{@ds_managed}' 2>/dev/null | while IFS=$'\t' read -r s managed; do
+                if [[ -n "$managed" ]]; then echo "$s"
+                elif tmux show-environment -t "=$s" DS_MANAGED 2>/dev/null | grep -q '^DS_MANAGED='; then echo "$s"; fi
             done 2>/dev/null)
             COMPREPLY=($(compgen -W "$sessions" -- "$cur"))
             return ;;
@@ -1359,8 +1388,9 @@ INIT_EOF
             return
             ;;
         -k|--kill|--share|--unshare)
-            sessions=(${(f)"$(tmux ls -F '#{session_name}' 2>/dev/null | while IFS= read -r s; do
-                tmux show-environment -t "=$s" DS_MANAGED 2>/dev/null | grep -q '^DS_MANAGED=' && echo "$s"
+            sessions=(${(f)"$(tmux ls -F '#{session_name}'$'\t''#{@ds_managed}' 2>/dev/null | while IFS=$'\t' read -r s managed; do
+                if [[ -n "$managed" ]]; then echo "$s"
+                elif tmux show-environment -t "=$s" DS_MANAGED 2>/dev/null | grep -q '^DS_MANAGED='; then echo "$s"; fi
             done 2>/dev/null)"})
             (( ${#sessions[@]} > 0 )) && compadd -- "${sessions[@]}"
             return

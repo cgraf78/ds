@@ -44,7 +44,8 @@ overrides the complete directory.
   (tests).
 - Tmux session names use an `=` prefix for exact matching
   (`tmux has-session -t "=$session"`).
-- `DS_MANAGED` marks sessions created by ds.
+- `@ds_managed` (session option; `DS_MANAGED` env as legacy fallback)
+  marks sessions created by ds.
 - Keep tests deterministic: temporary homes, explicit config, and mock
   `tmux`/`upterm`. Do not depend on a live tmux or SSH environment.
 
