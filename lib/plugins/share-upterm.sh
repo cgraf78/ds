@@ -17,7 +17,7 @@
 #   private-key        SSH private key for upterm (auto-detected if unset)
 #   github-user        GitHub user for ACL
 #   authorized-keys    authorized_keys file for SSH-key-based ACL
-#   push               user@host target for pushing share info via SCP
+#   push               user@host target for pushing share info over SSH
 #   proxy-session      (deprecated, ignored) previously used to create a proxy
 #                      tmux session for connecting clients. Connecting clients
 #                      now get a plain bash -l shell directly.

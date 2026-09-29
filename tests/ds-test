@@ -6562,6 +6562,50 @@ bash_completion_output=$(
 )
 _assert_contains "ds init bash: dynamic host completion honors XDG_CONFIG_HOME" \
   "@workhost" "$bash_completion_output"
+# A snapshot name with a space proves file completion keeps one candidate
+# per path instead of word-splitting it.
+completion_snapshot_dir=$(_tmpdir)
+: >"$completion_snapshot_dir/snap shot.txt"
+bash_completion_output=$(
+  HOME="$bash_completion_home" XDG_CONFIG_HOME="$bash_completion_xdg" \
+    PATH="$MOCK_BIN:$PATH" bash -c '
+      _complete() {
+        COMP_WORDS=("$@")
+        COMP_CWORD=$((${#COMP_WORDS[@]} - 1))
+        COMPREPLY=()
+        _ds
+      }
+      source "$1"
+      _complete ds ""
+      printf "top:%s\n" "${COMPREPLY[@]}"
+      _complete ds resurrect ""
+      printf "sub:%s\n" "${COMPREPLY[@]}"
+      _complete ds resurrect save "$2/snap"
+      printf "save:%s:%s\n" "${#COMPREPLY[@]}" "${COMPREPLY[@]}"
+      _complete ds resurrect restore "$2/snap"
+      printf "restore:%s:%s\n" "${#COMPREPLY[@]}" "${COMPREPLY[@]}"
+      _complete ds resurrect begin ""
+      printf "begin:%s\n" "${#COMPREPLY[@]}"
+      _complete ds resurrect save "$2/snap shot.txt" ""
+      printf "after-save:%s\n" "${#COMPREPLY[@]}"
+      _complete ds -k save ""
+      printf "session-save:%s\n" "${COMPREPLY[@]}"
+    ' bash "$bash_init_file" "$completion_snapshot_dir"
+)
+_assert_contains "ds init bash: completes the resurrect command" \
+  "top:resurrect" "$bash_completion_output"
+_assert_contains "ds init bash: completes resurrect subcommands" \
+  $'sub:save\nsub:begin\nsub:restore' "$bash_completion_output"
+_assert_contains "ds init bash: resurrect save completes one snapshot path" \
+  "save:1:$completion_snapshot_dir/snap shot.txt" "$bash_completion_output"
+_assert_contains "ds init bash: resurrect restore completes one snapshot path" \
+  "restore:1:$completion_snapshot_dir/snap shot.txt" "$bash_completion_output"
+_assert_contains "ds init bash: resurrect begin completes nothing" \
+  $'\nbegin:0\n' "$bash_completion_output"
+_assert_contains "ds init bash: resurrect save offers nothing after its path" \
+  $'\nafter-save:0\n' "$bash_completion_output"
+_assert_contains "ds init bash: a session named save completes normally" \
+  "session-save:--list" "$bash_completion_output"
 
 # init zsh emits zsh completion wiring
 result=$("$SCRIPT_DIR/../bin/ds" init zsh 2>&1)
@@ -6632,12 +6676,39 @@ EOF
         done
         print -r -- "$@"
       }
+      _files() {
+        print -r -- FILES
+      }
       words=(ds @)
       CURRENT=2
       _ds
       print -r -- --
       words=(ds "")
       CURRENT=2
+      _ds
+      print -r -- sub:
+      words=(ds resurrect "")
+      CURRENT=3
+      _ds
+      print -r -- save:
+      words=(ds resurrect save "")
+      CURRENT=4
+      _ds
+      print -r -- restore:
+      words=(ds resurrect restore "")
+      CURRENT=4
+      _ds
+      print -r -- begin:
+      words=(ds resurrect begin "")
+      CURRENT=4
+      _ds
+      print -r -- after-save:
+      words=(ds resurrect save snap "")
+      CURRENT=5
+      _ds
+      print -r -- session-save:
+      words=(ds -k save "")
+      CURRENT=4
       _ds
     ' zsh "$zsh_init_file"
   )
@@ -6649,6 +6720,20 @@ EOF
     "dev" "$zsh_completion_output"
   _assert_contains "ds init zsh: dynamic data profile completion expands glob variables" \
     "data" "$zsh_completion_output"
+  _assert_contains "ds init zsh: completes the resurrect command" \
+    "resurrect" "$zsh_completion_output"
+  _assert_contains "ds init zsh: completes resurrect subcommands" \
+    $'sub:\nsave begin restore\nsave:' "$zsh_completion_output"
+  _assert_contains "ds init zsh: resurrect save completes files" \
+    $'save:\nFILES\nrestore:' "$zsh_completion_output"
+  _assert_contains "ds init zsh: resurrect restore completes files" \
+    $'restore:\nFILES\nbegin:' "$zsh_completion_output"
+  _assert_contains "ds init zsh: resurrect begin completes nothing" \
+    $'begin:\nafter-save:' "$zsh_completion_output"
+  _assert_contains "ds init zsh: resurrect save offers nothing after its path" \
+    $'after-save:\nsession-save:' "$zsh_completion_output"
+  _assert_contains "ds init zsh: a session named save completes normally" \
+    $'session-save:\n--list' "$zsh_completion_output"
 else
   echo "  SKIP: zsh not installed"
 fi

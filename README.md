@@ -223,7 +223,7 @@ Config file: `share-upterm.conf` in the configuration directory (env vars
 | `private-key` | `DS_UPTERM_PRIVATE_KEY` | SSH private key (auto-detected if unset) |
 | `github-user` | `DS_UPTERM_GITHUB_USER` | Restrict access to a GitHub user |
 | `authorized-keys` | `DS_UPTERM_AUTHORIZED_KEYS` | Restrict access via authorized_keys |
-| `push` | `DS_UPTERM_PUSH` | `user@host` — push share info via SCP |
+| `push` | `DS_UPTERM_PUSH` | `user@host` — push share info over SSH |
 | `proxy-session` | `DS_UPTERM_PROXY_SESSION` | (deprecated, ignored) |
 | `share-ttl` | `DS_UPTERM_SHARE_TTL` | seconds before share auto-expires (default: `3600`, set to `0` to disable) |
 
