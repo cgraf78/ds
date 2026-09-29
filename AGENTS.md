@@ -22,7 +22,7 @@ back to `$HOME/.config`.
   synthesize wrappers before the `.sh` source loop; a `.sh` of the
   same name wins.
 - **Connect methods** (`connect-<method>.sh`): `_connect_<method>()`.
-  `ssh` is built-in. Bundled: `autossh`.
+  `ssh` is built-in. Bundled: `autossh`, `et`.
 - **Share backends** (`share-<backend>.sh`): `_share_start`,
   `_share_stop`, `_share_info`, `_share_running`,
   `_share_current_session`, `_share_load_config`. Bundled: `upterm`.

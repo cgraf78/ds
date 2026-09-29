@@ -1305,6 +1305,21 @@ _ds() {
 INIT_EOF
       _emit_completion_file_contract "    "
       cat <<'INIT_EOF'
+    # resurrect is a standalone hook command: `ds resurrect save FILE`,
+    # `ds resurrect begin`, or `ds resurrect restore [FILE]`. Only its
+    # snapshot slot takes a path; a session named save or restore elsewhere
+    # completes normally.
+    if [[ "${COMP_WORDS[1]:-}" == resurrect ]] && (( COMP_CWORD >= 2 )); then
+        if (( COMP_CWORD == 2 )); then
+            COMPREPLY=($(compgen -W "save begin restore" -- "$cur"))
+        elif (( COMP_CWORD == 3 )) && [[ "$prev" == save || "$prev" == restore ]]; then
+            local IFS=$'\n'
+            compopt -o filenames 2>/dev/null
+            COMPREPLY=($(compgen -f -- "$cur"))
+        fi
+        return
+    fi
+
     case "$prev" in
         init)
             COMPREPLY=($(compgen -W "bash zsh" -- "$cur"))
@@ -1357,7 +1372,7 @@ INIT_EOF
 
     # shellcheck disable=SC2086
     COMPREPLY=($(compgen -W \
-        "--list --kill --killall --share --unshare --no-attach --connect --forward --reverse --share-via init --help$profiles $sessions" \
+        "--list --kill --killall --share --unshare --no-attach --connect --forward --reverse --share-via init resurrect --help$profiles $sessions" \
         -- "$cur"))
 }
 complete -F _ds ds
@@ -1421,8 +1436,22 @@ INIT_EOF
         --reverse
         --share-via
         init
+        resurrect
         --help
     )
+
+    # resurrect is a standalone hook command: `ds resurrect save FILE`,
+    # `ds resurrect begin`, or `ds resurrect restore [FILE]`. Only its
+    # snapshot slot takes a path; a session named save or restore elsewhere
+    # completes normally.
+    if [[ "${words[2]:-}" == resurrect ]] && (( CURRENT >= 3 )); then
+        if (( CURRENT == 3 )); then
+            compadd -- save begin restore
+        elif (( CURRENT == 4 )) && [[ "$prev" == save || "$prev" == restore ]]; then
+            _files
+        fi
+        return
+    fi
 
     case "$prev" in
         init)

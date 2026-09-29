@@ -57,7 +57,7 @@ symlink. User overrides live under
 .IR $XDG_CONFIG_HOME/ds
 when
 .B XDG_CONFIG_HOME
-is nonempty, or under
+is an absolute path, or under
 .I ~/.config/ds
 otherwise.
 The configuration paths below are relative to that directory.
@@ -204,3 +204,23 @@ The requested session operation succeeded.
 .TP
 .B 1
 The requested session operation failed, or the command line was invalid.
+.PP
+For remote operations,
+.B ds
+exits with the connect method's status. With the built-in
+.B ssh
+method this is the status of
+.BR ssh :
+the remote
+.B ds
+exit status, 127 when
+.B ds
+is not found on the remote
+.BR PATH ,
+or 255 for
+.B ssh
+transport failures. Plugins return their own status; the bundled
+.B et
+method returns 2 when handoff arguments contain newlines, 1 when handoff
+seeding fails, and otherwise the status of
+.BR et .
