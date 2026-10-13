@@ -7836,6 +7836,7 @@ fi
 _ci_workflow_path="$SCRIPT_DIR/../.github/workflows/test.yml"
 _ci_workflow=$(cat "$_ci_workflow_path")
 _retry_workflow=$(cat "$SCRIPT_DIR/../.github/workflows/retry-infrastructure.yml")
+_automerge_workflow=$(cat "$SCRIPT_DIR/../.github/workflows/dependabot-automerge.yml")
 _actions_sync_job=$(awk '
   /^  actions-sync:$/ { in_sync = 1 }
   in_sync && /^  [^ ]/ && $0 != "  actions-sync:" { exit }
@@ -7873,6 +7874,12 @@ _assert_contains "CI: infrastructure retry uses the locked actions revision" \
   "$_retry_workflow"
 _assert_contains "CI: infrastructure retry watches Tests" \
   'workflows: [Tests]' "$_retry_workflow"
+_assert_contains "CI: Dependabot auto-merge uses the locked actions revision" \
+  "cgraf78/actions/.github/workflows/dependabot-automerge.yml@$_actions_sha" \
+  "$_automerge_workflow"
+_assert_contains "CI: Dependabot auto-merge enrolls only Dependabot PRs" \
+  "if: github.event.pull_request.user.login == 'dependabot[bot]'" \
+  "$_automerge_workflow"
 _assert_contains "CI: delegates the typed shell inventory" \
   'shellcheck-inventory-path: .github/shellcheck-files.txt' "$_ci_workflow"
 _assert_contains "CI: runtime skips only delegated ShellCheck" \
