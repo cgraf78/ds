@@ -4,16 +4,17 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ![Bash](https://img.shields.io/badge/bash-4%2B-blue)
 
-`ds` creates tmux dev sessions locally or on remote hosts. Profiles, connection methods, and share backends are all pluggable.
+`ds` creates and attaches tmux dev sessions, here or on another host, with one
+command (`ds dev`, `ds dev @myhost`). Remote use needs `ds` installed on both
+ends. Profiles, connection methods, and share backends are all pluggable.
 
-`ds` is one command for "get me into my tmux session, here or on that host".
-Unlike tmuxinator or tmuxp, it needs no YAML file per project: a layout is a
+Unlike tmuxinator or tmuxp, `ds` needs no YAML file per project: a layout is a
 small shell function or a one-line data row. Unlike sesh or tmux-sessionizer,
-which pick among local sessions and directories, the same command reaches a
-remote host over SSH, autossh, or Eternal Terminal (`ds dev @myhost`). It can
-also auto-attach on SSH login, and can use Upterm to give a collaborator a
-login shell on the host, optionally restricted to one GitHub user or an
-`authorized_keys` file.
+which pick among local sessions and directories, it reaches remote hosts over
+SSH, autossh, or Eternal Terminal. It can also auto-attach on SSH login, and can
+use Upterm to give a collaborator a login shell on the host, restricted to one
+GitHub user or an `authorized_keys` file. With neither restriction set, `ds`
+asks before sharing and aborts unless you confirm.
 
 ## Install
 
@@ -76,9 +77,14 @@ ds init bash                    # print Bash shell integration snippet
 ds init zsh                     # print Zsh shell integration snippet
 ```
 
-Every `@host` command runs `ds` on the remote host through a login shell, so
-install `ds` there too. If the remote login shell cannot find it, the command
-exits 127 with `ds: not found on remote PATH`.
+Remote commands (`@host`) need `ds` installed on the remote host:
+
+- With `ssh` (the default) or `autossh`, `ds` runs the remote `ds` through a
+  login shell. If that shell cannot find it, the command exits 127 with
+  `ds: not found on remote PATH`.
+- With `et`, `ds` records the request on the remote host over `ssh`, then
+  opens `et`. The remote interactive shell must run `eval "$(ds init bash)"`
+  (or `zsh`, see [Shell Integration](#shell-integration)) to pick it up.
 
 `-L` and `-R` cover ad-hoc forwards for one connection. For a declared set of
 forwards that stays up on its own, see
