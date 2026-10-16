@@ -6,6 +6,15 @@
 
 `ds` creates tmux dev sessions locally or on remote hosts. Profiles, connection methods, and share backends are all pluggable.
 
+`ds` is one command for "get me into my tmux session, here or on that host".
+Unlike tmuxinator or tmuxp, it needs no YAML file per project: a layout is a
+small shell function or a one-line data row. Unlike sesh or tmux-sessionizer,
+which pick among local sessions and directories, the same command reaches a
+remote host over SSH, autossh, or Eternal Terminal (`ds dev @myhost`). It can
+also auto-attach on SSH login, and can use Upterm to give a collaborator a
+login shell on the host, optionally restricted to one GitHub user or an
+`authorized_keys` file.
+
 ## Install
 
 ```bash
@@ -67,6 +76,44 @@ ds init bash                    # print Bash shell integration snippet
 ds init zsh                     # print Zsh shell integration snippet
 ```
 
+Every `@host` command runs `ds` on the remote host through a login shell, so
+install `ds` there too. If the remote login shell cannot find it, the command
+exits 127 with `ds: not found on remote PATH`.
+
+`-L` and `-R` cover ad-hoc forwards for one connection. For a declared set of
+forwards that stays up on its own, see
+[fwdports](https://github.com/cgraf78/fwdports).
+
+## Shell Integration
+
+Add to `~/.bashrc`:
+
+```bash
+eval "$(ds init bash)"
+```
+
+This provides tab completion and ET connect support.
+
+For Zsh, add this after `compinit` in `~/.zshrc`:
+
+```zsh
+eval "$(ds init zsh)"
+```
+
+This provides Zsh completion plus the same SSH auto-attach behavior.
+
+### Auto-attach on SSH login
+
+Set `DS_SSH_AUTO_ATTACH` **before** the `eval` line to auto-create/attach a tmux session on SSH login:
+
+```bash
+DS_SSH_AUTO_ATTACH=ds         # attach to default "ds" session
+# DS_SSH_AUTO_ATTACH=dev      # attach to "dev" session instead
+eval "$(ds init bash)"
+```
+
+Skip auto-attach for a single login with `NO_TMUX=1`.
+
 ## Tmux Resurrect Integration
 
 `ds` can preserve its session identity inside a tmux-resurrect snapshot. This
@@ -94,8 +141,9 @@ layouts. Warm attaches retain the normal single-query path.
 These hooks do not change tmux-resurrect's process policy. Choose any process
 allowlist separately in tmux configuration.
 
-When the tmux-tools default-server coordinator disables continuum's native
-restore to keep additional tmux sockets isolated, it publishes
+When the [tmux-tools](https://github.com/cgraf78/tmux-tools) default-server
+coordinator disables continuum's native restore to keep additional tmux sockets
+isolated, it publishes
 `@tmux-tools-resurrect-auto-restore` as `on`. `ds` then uses the same startup
 wait and halt-file behavior for that coordinator. This tmux option is the
 entire integration boundary: `ds` never invokes tmux-tools and does not require
@@ -224,7 +272,6 @@ Config file: `share-upterm.conf` in the configuration directory (env vars
 | `github-user` | `DS_UPTERM_GITHUB_USER` | Restrict access to a GitHub user |
 | `authorized-keys` | `DS_UPTERM_AUTHORIZED_KEYS` | Restrict access via authorized_keys |
 | `push` | `DS_UPTERM_PUSH` | `user@host` — push share info over SSH |
-| `proxy-session` | `DS_UPTERM_PROXY_SESSION` | (deprecated, ignored) |
 | `share-ttl` | `DS_UPTERM_SHARE_TTL` | seconds before share auto-expires (default: `3600`, set to `0` to disable) |
 
 See `examples/share-upterm.conf` for a template.
@@ -312,36 +359,6 @@ request/acknowledgement rather than signaling a PID recovered from state.
 Malformed or unverifiable watcher state is retained with an error. Running `ds
 --share` on an already-shared session resets the timer. Set `share-ttl = 0` to
 disable auto-expiry.
-
-## Shell Integration
-
-Add to `~/.bashrc`:
-
-```bash
-eval "$(ds init bash)"
-```
-
-This provides tab completion and ET connect support.
-
-For Zsh, add this after `compinit` in `~/.zshrc`:
-
-```zsh
-eval "$(ds init zsh)"
-```
-
-This provides Zsh completion plus the same SSH auto-attach behavior.
-
-### Auto-attach on SSH login
-
-Set `DS_SSH_AUTO_ATTACH` **before** the `eval` line to auto-create/attach a tmux session on SSH login:
-
-```bash
-DS_SSH_AUTO_ATTACH=ds         # attach to default "ds" session
-# DS_SSH_AUTO_ATTACH=dev      # attach to "dev" session instead
-eval "$(ds init bash)"
-```
-
-Skip auto-attach for a single login with `NO_TMUX=1`.
 
 ## State
 
