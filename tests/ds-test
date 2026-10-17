@@ -7327,6 +7327,40 @@ _assert_contains "remote share backend: passes --share-via" "--share-via" "$remo
 _assert_contains "remote share backend: passes upterm" "upterm" "$remote_log"
 _assert_contains "remote share backend: passes --no-attach" "--no-attach" "$remote_log"
 
+# --share/--unshare with @host are refused before any connection. _remote has
+# no share mapping, so a pass-through would run a bare remote ds that attaches
+# to the default session. The ET case also proves no connect plugin ran: it
+# would seed its handoff over ssh and then run et, both of which log.
+for _share_cli in "--share dev @server1" "--unshare dev @server1" \
+  "--share @server1" "--share dev @server1 -c et"; do
+  : >"$REMOTE_LOG"
+  set +e
+  # shellcheck disable=SC2086 # Each case is a word-split argument list.
+  result=$(HOME="$TEST_HOME" DS_LIB_DIR="$CONF_DIR" DS_STATE_DIR="$DS_STATE_DIR" \
+    DS_SOURCED='' "$SCRIPT_DIR/../bin/ds" $_share_cli 2>&1)
+  rc=$?
+  set -e
+  _assert_exit "ds $_share_cli: refused" 1 "$rc"
+  _assert_contains "ds $_share_cli: says local only" "is local only" "$result"
+  _assert_eq "ds $_share_cli: never connects" "" "$(cat "$REMOTE_LOG")"
+done
+unset _share_cli
+
+# The supported remote form still reaches _remote through the CLI.
+: >"$REMOTE_LOG"
+set +e
+result=$(HOME="$TEST_HOME" DS_LIB_DIR="$CONF_DIR" DS_STATE_DIR="$DS_STATE_DIR" \
+  DS_SOURCED='' "$SCRIPT_DIR/../bin/ds" dev @server1 --share-via upterm 2>&1)
+rc=$?
+set -e
+_assert_exit "ds dev @server1 --share-via upterm: dispatches" 0 "$rc"
+remote_log=$(cat "$REMOTE_LOG")
+_assert_contains "ds dev @server1 --share-via upterm: connects" \
+  "SSH_HOST=server1" "$remote_log"
+# The SSH mock records the %q-encoded remote command.
+_assert_contains "ds dev @server1 --share-via upterm: passes backend" \
+  'dev\ --share-via\ upterm' "$remote_log"
+
 # Array env-for-command (VAR=(a b) cmd) only works single-element in bash,
 # so split assignments with `;` for the FORWARDS / R_FORWARDS array setup.
 

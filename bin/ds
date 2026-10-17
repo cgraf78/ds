@@ -1001,11 +1001,6 @@ _do_killall() {
 }
 
 _do_share() {
-  if [[ -n "$HOST" ]]; then
-    echo "ds: --share is local only" >&2
-    exit 1
-  fi
-
   if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
     echo "ds: no session '$SESSION' to share — active sessions:" >&2
     _do_list >&2
@@ -1016,11 +1011,6 @@ _do_share() {
 }
 
 _do_unshare() {
-  if [[ -n "$HOST" ]]; then
-    echo "ds: --unshare is local only" >&2
-    exit 1
-  fi
-
   _share_stop "$SESSION"
 }
 
@@ -1811,6 +1801,13 @@ fi
 # Validate: init doesn't use @host
 if [[ "$ACTION" == "init" && -n "$HOST" ]]; then
   echo "ds: init does not support remote hosts" >&2
+  exit 1
+fi
+
+# Validate: --share/--unshare are local only. _remote has no share mapping, so
+# passing them through would attach to the remote default session instead.
+if [[ ("$ACTION" == "share" || "$ACTION" == "unshare") && -n "$HOST" ]]; then
+  echo "ds: --$ACTION is local only; run it on the host, or use 'ds SESSION @host --share-via BACKEND'" >&2
   exit 1
 fi
 
