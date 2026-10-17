@@ -1806,9 +1806,17 @@ fi
 
 # Validate: --share/--unshare are local only. _remote has no share mapping, so
 # passing them through would attach to the remote default session instead.
-if [[ ("$ACTION" == "share" || "$ACTION" == "unshare") && -n "$HOST" ]]; then
-  echo "ds: --$ACTION is local only; run it on the host, or use 'ds SESSION @host --share-via BACKEND'" >&2
-  exit 1
+if [[ -n "$HOST" ]]; then
+  case "$ACTION" in
+    share)
+      echo "ds: --share is local only; run it on the host, or use 'ds SESSION @host --share-via BACKEND'" >&2
+      exit 1
+      ;;
+    unshare)
+      echo "ds: --unshare is local only; run it on the host" >&2
+      exit 1
+      ;;
+  esac
 fi
 
 # Validate: -c without @host is meaningless

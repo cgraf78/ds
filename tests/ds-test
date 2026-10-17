@@ -7332,7 +7332,8 @@ _assert_contains "remote share backend: passes --no-attach" "--no-attach" "$remo
 # to the default session. The ET case also proves no connect plugin ran: it
 # would seed its handoff over ssh and then run et, both of which log.
 for _share_cli in "--share dev @server1" "--unshare dev @server1" \
-  "--share @server1" "--share dev @server1 -c et"; do
+  "--share @server1" "--share dev @server1 -c et" \
+  "--share dev @server1 --share-via upterm"; do
   : >"$REMOTE_LOG"
   set +e
   # shellcheck disable=SC2086 # Each case is a word-split argument list.
@@ -7343,6 +7344,11 @@ for _share_cli in "--share dev @server1" "--unshare dev @server1" \
   _assert_exit "ds $_share_cli: refused" 1 "$rc"
   _assert_contains "ds $_share_cli: says local only" "is local only" "$result"
   _assert_eq "ds $_share_cli: never connects" "" "$(cat "$REMOTE_LOG")"
+  if [[ "$_share_cli" == --unshare* ]]; then
+    # --share-via starts a share; it cannot stop one, so don't suggest it.
+    _assert_not_contains "ds $_share_cli: no share-via hint" "--share-via" \
+      "$result"
+  fi
 done
 unset _share_cli
 
