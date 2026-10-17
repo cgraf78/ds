@@ -1,8 +1,9 @@
 # ds — Dev Session Launcher
 
-![Tests](https://github.com/cgraf78/ds/actions/workflows/test.yml/badge.svg)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-![Bash](https://img.shields.io/badge/bash-4%2B-blue)
+[![Tests](https://github.com/cgraf78/ds/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/cgraf78/ds/actions/workflows/test.yml?query=branch%3Amain)
+[![License](https://img.shields.io/badge/license-MIT-67ac09)](LICENSE)
+[![Bash](https://img.shields.io/badge/bash-%3E%3D4.0-blue)](#install)
+[![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20WSL-lightgrey)](#install)
 
 `ds` creates and attaches tmux dev sessions, here or on another host, with one
 command (`ds dev`, `ds dev @myhost`). Remote use needs `ds` installed on both
