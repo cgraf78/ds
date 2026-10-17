@@ -4,7 +4,17 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 ![Bash](https://img.shields.io/badge/bash-4%2B-blue)
 
-`ds` creates tmux dev sessions locally or on remote hosts. Profiles, connection methods, and share backends are all pluggable.
+`ds` creates and attaches tmux dev sessions, here or on another host, with one
+command (`ds dev`, `ds dev @myhost`). Remote use needs `ds` installed on both
+ends. Profiles, connection methods, and share backends are all pluggable.
+
+Unlike tmuxinator or tmuxp, `ds` needs no YAML file per project: a layout is a
+small shell function or a one-line data row. Unlike sesh or tmux-sessionizer,
+which pick among local sessions and directories, it reaches remote hosts over
+SSH, autossh, or Eternal Terminal. It can also auto-attach on SSH login, and can
+use Upterm to give a collaborator a login shell on the host, restricted to one
+GitHub user or an `authorized_keys` file. With neither restriction set, `ds`
+asks before sharing and aborts unless you confirm.
 
 ## Install
 
@@ -67,6 +77,49 @@ ds init bash                    # print Bash shell integration snippet
 ds init zsh                     # print Zsh shell integration snippet
 ```
 
+Remote commands (`@host`) need `ds` installed on the remote host:
+
+- With `ssh` (the default) or `autossh`, `ds` runs the remote `ds` through a
+  login shell. If that shell cannot find it, the command exits 127 with
+  `ds: not found on remote PATH`.
+- With `et`, `ds` records the request on the remote host over `ssh`, then
+  opens `et`. The remote interactive shell must run `eval "$(ds init bash)"`
+  (or `zsh`, see [Shell Integration](#shell-integration)) to pick it up.
+
+`-L` and `-R` cover ad-hoc forwards for one connection. For a declared set of
+forwards that stays up on its own, see
+[fwdports](https://github.com/cgraf78/fwdports).
+
+## Shell Integration
+
+Add to `~/.bashrc`:
+
+```bash
+eval "$(ds init bash)"
+```
+
+This provides tab completion and ET connect support.
+
+For Zsh, add this after `compinit` in `~/.zshrc`:
+
+```zsh
+eval "$(ds init zsh)"
+```
+
+This provides Zsh completion plus the same SSH auto-attach behavior.
+
+### Auto-attach on SSH login
+
+Set `DS_SSH_AUTO_ATTACH` **before** the `eval` line to auto-create/attach a tmux session on SSH login:
+
+```bash
+DS_SSH_AUTO_ATTACH=ds         # attach to default "ds" session
+# DS_SSH_AUTO_ATTACH=dev      # attach to "dev" session instead
+eval "$(ds init bash)"
+```
+
+Skip auto-attach for a single login with `NO_TMUX=1`.
+
 ## Tmux Resurrect Integration
 
 `ds` can preserve its session identity inside a tmux-resurrect snapshot. This
@@ -94,8 +147,9 @@ layouts. Warm attaches retain the normal single-query path.
 These hooks do not change tmux-resurrect's process policy. Choose any process
 allowlist separately in tmux configuration.
 
-When the tmux-tools default-server coordinator disables continuum's native
-restore to keep additional tmux sockets isolated, it publishes
+When the [tmux-tools](https://github.com/cgraf78/tmux-tools) default-server
+coordinator disables continuum's native restore to keep additional tmux sockets
+isolated, it publishes
 `@tmux-tools-resurrect-auto-restore` as `on`. `ds` then uses the same startup
 wait and halt-file behavior for that coordinator. This tmux option is the
 entire integration boundary: `ds` never invokes tmux-tools and does not require
@@ -224,7 +278,6 @@ Config file: `share-upterm.conf` in the configuration directory (env vars
 | `github-user` | `DS_UPTERM_GITHUB_USER` | Restrict access to a GitHub user |
 | `authorized-keys` | `DS_UPTERM_AUTHORIZED_KEYS` | Restrict access via authorized_keys |
 | `push` | `DS_UPTERM_PUSH` | `user@host` — push share info over SSH |
-| `proxy-session` | `DS_UPTERM_PROXY_SESSION` | (deprecated, ignored) |
 | `share-ttl` | `DS_UPTERM_SHARE_TTL` | seconds before share auto-expires (default: `3600`, set to `0` to disable) |
 
 See `examples/share-upterm.conf` for a template.
@@ -312,36 +365,6 @@ request/acknowledgement rather than signaling a PID recovered from state.
 Malformed or unverifiable watcher state is retained with an error. Running `ds
 --share` on an already-shared session resets the timer. Set `share-ttl = 0` to
 disable auto-expiry.
-
-## Shell Integration
-
-Add to `~/.bashrc`:
-
-```bash
-eval "$(ds init bash)"
-```
-
-This provides tab completion and ET connect support.
-
-For Zsh, add this after `compinit` in `~/.zshrc`:
-
-```zsh
-eval "$(ds init zsh)"
-```
-
-This provides Zsh completion plus the same SSH auto-attach behavior.
-
-### Auto-attach on SSH login
-
-Set `DS_SSH_AUTO_ATTACH` **before** the `eval` line to auto-create/attach a tmux session on SSH login:
-
-```bash
-DS_SSH_AUTO_ATTACH=ds         # attach to default "ds" session
-# DS_SSH_AUTO_ATTACH=dev      # attach to "dev" session instead
-eval "$(ds init bash)"
-```
-
-Skip auto-attach for a single login with `NO_TMUX=1`.
 
 ## State
 

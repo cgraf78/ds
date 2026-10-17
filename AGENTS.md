@@ -3,24 +3,20 @@
 ## About
 
 `ds` is a Bash 4+ CLI that creates and manages tmux dev sessions
-locally or on remote hosts. Profiles, connection methods, and share
-backends are pluggable. It is distributed from the git checkout (no
-versioned release artifacts); the checked-out commit is the installed
-identity.
+locally or on remote hosts. It installs from the git checkout; the
+checked-out commit is the installed identity.
 
 ## Architecture
 
 Single-file CLI (`bin/ds`) plus plugins. Plugin discovery
-(`_find_plugin`, `_glob_plugins`) searches
-`${XDG_CONFIG_HOME:-$HOME/.config}/ds/` first, then `lib/plugins/`.
-Absolute `XDG_CONFIG_HOME` values select that root; other values fall
-back to `$HOME/.config`.
+(`_find_plugin`, `_glob_plugins`) searches the user config dir
+(absolute `XDG_CONFIG_HOME` or `$HOME/.config`, then `ds/`) before
+`lib/plugins/`.
 
 - **Profiles** (`profile-<name>.sh`): `_profile_<name>()` sets tmux
   layouts. Bundled: `dev`, `chat`. Built-in: `ds` (plain tmux, default).
-  Data rows in `profile*.conf` (`<name> <window> <command...>`)
-  synthesize wrappers before the `.sh` source loop; a `.sh` of the
-  same name wins.
+  Rows in `profile*.conf` (`<name> <window> <command...>`) become
+  profiles; a same-name `.sh` wins.
 - **Connect methods** (`connect-<method>.sh`): `_connect_<method>()`.
   `ssh` is built-in. Bundled: `autossh`, `et`.
 - **Share backends** (`share-<backend>.sh`): `_share_start`,
@@ -28,39 +24,70 @@ back to `$HOME/.config`.
   `_share_current_session`, `_share_load_config`. Bundled: `upterm`.
 
 Session name is the profile, `profile-instance` (split on the first
-`-`), or any arbitrary name (uses the `ds` profile). Default session
-is `ds` with the `ds` profile. Profile names must not contain dashes.
+`-`), or any other name (`ds` profile); profile names have no dashes.
+The default session is `ds` with the `ds` profile. `connect*.conf` maps
+host globs to methods (first match wins; default `ssh`). For `ssh` and
+`autossh`, `_remote` runs the remote `ds` via a login shell
+(`_remote_ds_command`); `et` seeds an `attach-next` file over ssh that
+the remote `ds init` snippet consumes.
 
-Host resolution: `connect*.conf` maps hostname globs to connect
-methods; first match wins.
-
-State lives under `${XDG_STATE_HOME:-$HOME/.local/state}/ds/` with
-mode `0700`. Only absolute XDG roots are used; `DS_STATE_DIR`
-overrides the complete directory.
+State lives under `${XDG_STATE_HOME:-$HOME/.local/state}/ds/` (mode
+`0700`); `DS_STATE_DIR` overrides it.
 
 ## Invariants
 
-- `DS_SOURCED=1` exports functions from `bin/ds` without arg parsing
-  (tests).
+- `DS_SOURCED=1` loads `bin/ds` functions without arg parsing (tests).
 - Tmux session names use an `=` prefix for exact matching
   (`tmux has-session -t "=$session"`).
 - `@ds_managed` (session option; `DS_MANAGED` env as legacy fallback)
   marks sessions created by ds.
-- Keep tests deterministic: temporary homes, explicit config, and mock
-  `tmux`/`upterm`. Do not depend on a live tmux or SSH environment.
+- `bin/ds` reads tmux-tools' `@tmux-tools-resurrect-auto-restore` to
+  wait out a restore; that option name is a cross-repo contract.
+- `support/install-checkout.sh` must stay Bash 3.2-safe: it runs under
+  macOS system Bash before checking that Bash 4+ is first on `PATH`.
 
 ## Testing
 
-CI (`DS_SKIP_SHELLCHECK=1` because the shared inventory job lints):
+- Local: `bash tests/ds-ci`. It runs ShellCheck over the `program` rows
+  of `.github/shellcheck-files.txt` unconditionally (fails without
+  `shellcheck`), then `tests/install-test` and `tests/ds-test`.
+- CI: `DS_SKIP_SHELLCHECK=1 bash tests/ds-ci` on the full matrix, on
+  every PR and push to `main`.
+- Termux: `bash tests/install-test` plus `timeout 30 bash bin/ds --help`.
+- `tests/ds-test` sources the checked-in `examples/`, so keep them valid.
 
-```sh
-DS_SKIP_SHELLCHECK=1 bash tests/ds-ci
-```
+## Test isolation
 
-Local (includes ShellCheck from `.github/shellcheck-files.txt`):
+- `tests/ds-test` sets `HOME` to a temporary `TEST_HOME`, unsets
+  `XDG_CONFIG_HOME` and `XDG_STATE_HOME`, sources `bin/ds` with
+  `DS_SOURCED=1`, and mocks `tmux` and `upterm`. Never depend on a live
+  tmux or SSH setup.
+- One block starts a real tmux when tmux is on `PATH` (CI has none): a
+  shim pins it to a unique `-L ds-test-robust-$$ -f /dev/null` server
+  with `TMUX` cleared and kills that server afterwards. New real-tmux
+  tests must do the same (or use `-S <tmpdir>/sock`), never the default.
 
-```sh
-bash tests/ds-ci
-```
+## CI and generated files
 
-`tests/ds-ci` runs `tests/install-test` and `tests/ds-test`.
+- CI's ShellCheck job fails on any shell program missing from
+  `.github/shellcheck-files.txt` (untracked files included) and on stale
+  rows; local `tests/ds-ci` does not detect this. Before pushing, run
+  `bash <actions@lock>/.github/actions/shellcheck-inventory/run.sh "$PWD" .github/shellcheck-files.txt`,
+  where `<actions@lock>` is a cgraf78/actions checkout at the SHA in
+  `.github/cgraf78-actions.lock`.
+- `install.sh` is generated by cgraf78/actions checkout-installer and
+  byte-checked by `actions-sync`; never edit it. Install logic lives in
+  `support/install-checkout.sh`. After editing
+  `scripts/checkout-installer.conf`, run `consumer-ci/sync.sh <this checkout>`
+  from a cgraf78/actions checkout at the SHA in
+  `.github/cgraf78-actions.lock`.
+- `.github/cgraf78-actions.lock` and every `uses: cgraf78/actions/...@sha`
+  move together, only via `consumer-ci/sync.sh`.
+- `tests/ds-test` pins workflow text (`test.yml`, the `actions-sync`
+  job, `retry-infrastructure.yml`, `dependabot-automerge.yml`) and the
+  lock SHA; edit it together with them.
+- `retry-infrastructure.yml` keys on the workflow name `Tests`; don't rename it.
+
+## Release
+
+None; installs track `main`.
