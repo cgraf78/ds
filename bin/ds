@@ -1278,21 +1278,22 @@ unset _ds_f _ds_arg _ds_args
 
 # Auto-attach on SSH login (opt-in via DS_SSH_AUTO_ATTACH, skip with NO_TMUX=1).
 # Also requires a real terminal (SSH_TTY) with no complete input line queued
-# on it. ET --command types its command into the pty (and sets SSH_TTY), so
-# attaching would feed that line to tmux as keystrokes. The builtin probe
-# consumes nothing and, in canonical mode, ignores a partial line; Enter or a
-# pasted line during a slow login also skips, and EOF (never seen on a real
-# login pty) reads as queued. Best-effort only: ET starts the shell first and
-# its client sends the command one network round trip later, so the probe
-# wins only when shell startup outlasts that RTT. For a guarantee, put
-# NO_TMUX=1 in the session environment (ET: ssh_config `SetEnv NO_TMUX=1`,
-# applied before the shell starts; plain ssh also needs sshd AcceptEnv).
+# on it. ET --command types its command into the pty (and recent ET sets
+# SSH_TTY), so attaching would feed that line to tmux as keystrokes. The
+# builtin probe consumes nothing and, in canonical mode, ignores a partial
+# line; Enter or a pasted line during a slow login also skips, and EOF (never
+# seen on a real login pty) reads as queued. Best-effort only: ET starts the
+# shell first and its client sends the command one network round trip later,
+# so the probe wins only when shell startup outlasts that RTT. For a
+# guarantee, put NO_TMUX=1 in the command session's environment (ET: an
+# ssh_config Host alias for those sessions with `SetEnv NO_TMUX=1`, applied
+# before the shell starts; plain ssh also needs sshd AcceptEnv).
 # bash 3.2's read -t 0 always fails without reading, so it attaches as before.
 # DS_SSH_AUTO_ATTACH=ds      → attach to default "ds" session
 # DS_SSH_AUTO_ATTACH=dev     → attach to "dev" session
 # NO_TMUX=1                  → skip auto-attach for this login
 if [[ -n "${DS_SSH_AUTO_ATTACH:-}" && -z "$TMUX" && $- == *i* && -n "$SSH_CONNECTION" && -z "$NO_TMUX" && -n "${SSH_TTY:-}" ]] && command -v tmux &>/dev/null; then
-    if ! read -t 0 2>/dev/null; then
+    if ! builtin read -t 0 2>/dev/null; then
 INIT_EOF
       echo "        DS_SHELL_NAME=$shell exec ds \"\$DS_SSH_AUTO_ATTACH\""
       cat <<'INIT_EOF'
@@ -1406,15 +1407,16 @@ unset _ds_f _ds_arg _ds_args
 
 # Auto-attach on SSH login (opt-in via DS_SSH_AUTO_ATTACH, skip with NO_TMUX=1).
 # Also requires a real terminal (SSH_TTY) with no complete input line queued
-# on it. ET --command types its command into the pty (and sets SSH_TTY), so
-# attaching would feed that line to tmux as keystrokes. The builtin probe
-# consumes nothing and, in canonical mode, ignores a partial line; Enter or a
-# pasted line during a slow login also skips, and EOF (never seen on a real
-# login pty) reads as queued. Best-effort only: ET starts the shell first and
-# its client sends the command one network round trip later, so the probe
-# wins only when shell startup outlasts that RTT. For a guarantee, put
-# NO_TMUX=1 in the session environment (ET: ssh_config `SetEnv NO_TMUX=1`,
-# applied before the shell starts; plain ssh also needs sshd AcceptEnv).
+# on it. ET --command types its command into the pty (and recent ET sets
+# SSH_TTY), so attaching would feed that line to tmux as keystrokes. The
+# builtin probe consumes nothing and, in canonical mode, ignores a partial
+# line; Enter or a pasted line during a slow login also skips, and EOF (never
+# seen on a real login pty) reads as queued. Best-effort only: ET starts the
+# shell first and its client sends the command one network round trip later,
+# so the probe wins only when shell startup outlasts that RTT. For a
+# guarantee, put NO_TMUX=1 in the command session's environment (ET: an
+# ssh_config Host alias for those sessions with `SetEnv NO_TMUX=1`, applied
+# before the shell starts; plain ssh also needs sshd AcceptEnv).
 # zsh attaches as before when the zsh/zselect module is unavailable.
 # DS_SSH_AUTO_ATTACH=ds      → attach to default "ds" session
 # DS_SSH_AUTO_ATTACH=dev     → attach to "dev" session

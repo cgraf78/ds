@@ -127,10 +127,18 @@ Eternal Terminal's `et --command`) runs instead of being fed to tmux. Pressing
 Enter or pasting a line while a slow login is still starting skips auto-attach
 the same way; a partially typed line does not. This check is best-effort: ET
 starts the shell before it sends the command, so a fast shell startup can still
-attach first. For a guarantee, set `NO_TMUX=1` in the session environment, for
-example with `SetEnv NO_TMUX=1` in the client's `ssh_config` (ET applies it
-before starting the shell; plain `ssh` also needs a matching `AcceptEnv NO_TMUX`
-in `sshd_config`).
+attach first. For a guarantee, set `NO_TMUX=1` in the command session's
+environment, for example with a dedicated `Host` alias in the client's
+`ssh_config` that those sessions use, so interactive logins keep auto-attach:
+
+```sshconfig
+Host devbox-cmd
+    HostName devbox.example.com
+    SetEnv NO_TMUX=1
+```
+
+ET applies `SetEnv` before starting the shell; plain `ssh` also needs a matching
+`AcceptEnv NO_TMUX` in the server's `sshd_config`.
 
 ## Tmux Resurrect Integration
 

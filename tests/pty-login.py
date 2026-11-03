@@ -8,7 +8,8 @@ against shell startup (unlike `script` or `pty.fork()` followed by a write).
 
 Usage: pty-login.py [--timeout SECS] INPUT -- SHELL [ARG...]
 
-INPUT is written to the pty verbatim. The child runs with exactly the caller's
+INPUT is written to the pty verbatim and must fit its input queue (a few KB;
+larger input is an error, not a hang). The child runs with exactly the caller's
 environment. Exits with the shell's exit status, or 124 after killing a shell
 that is still running at the deadline (its pty output goes to stderr).
 """
@@ -48,7 +49,13 @@ def spawn(argv: list[str], queued: bytes) -> tuple[int, int]:
     """
     master, slave = os.openpty()
     if queued:
-        os.write(master, queued)
+        # Nothing reads the pty yet, so a blocking write of more than its
+        # input queue holds would never return.
+        os.set_blocking(master, False)
+        written = os.write(master, queued)
+        if written != len(queued):
+            raise BlockingIOError(f"took {written} of {len(queued)} bytes")
+        os.set_blocking(master, True)
     pid = os.fork()
     if pid == 0:
         try:
@@ -104,7 +111,11 @@ def main() -> int:
     if not argv:
         parser.error("missing shell command after --")
 
-    pid, master = spawn(argv, args.input.encode())
+    try:
+        pid, master = spawn(argv, args.input.encode())
+    except BlockingIOError as exc:
+        sys.stderr.write(f"pty-login: input does not fit the pty input queue: {exc}\n")
+        return 2
     try:
         code, output = wait(pid, master, args.timeout)
     finally:
