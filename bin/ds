@@ -28,7 +28,8 @@
 #               so is one with a complete input line already queued, such as an
 #               ET --command or Enter pressed during a slow login — best-effort,
 #               so set NO_TMUX=1 in the session environment for a guarantee.
-#               Such logins also leave a pending ET connect handoff alone.)
+#               Such logins, and shells inside tmux, also leave a pending ET
+#               connect handoff alone; one older than five minutes is dropped.)
 
 _xdg_dir() {
   local value="$1" fallback="$2" suffix="$3" variable="$4"
@@ -107,6 +108,9 @@ _DS_PANE_BORDER_HOOK='after-new-window[99]'
 # Bump when DS-owned label setup changes. Session-local user changes remain
 # authoritative until then instead of being rewritten on every attachment.
 _DS_STATUS_LABELS_VERSION='1'
+# Connect plugins write the attach-next handoff just before connecting, so an
+# older one is a leftover that must not take over some later, unrelated shell.
+_DS_HANDOFF_TTL_MINUTES=5
 
 _usage() {
   echo "Usage: ds [session] [@host]          create or attach to a session"
@@ -375,18 +379,18 @@ _emit_init_opt_out_comment() {
 # complete input line already queued on the terminal. ET --command types its
 # command into the pty (and recent ET sets SSH_TTY), so exec'ing ds would feed
 # that line to tmux as keystrokes. The builtin probe consumes nothing and, in
-# canonical mode, ignores a partial line; Enter or a pasted line during a slow
-# login also counts, and EOF (never seen on a real login pty) reads as queued.
+# canonical mode, ignores a partial line; Enter, Ctrl-D, or a pasted line
+# during a slow login also counts, as does stdin at EOF (not a terminal).
 # The probe is best-effort: ET starts the shell first and its client sends the
 # command one network round trip later, so it wins only when shell startup
-# outlasts that RTT. For a guarantee, set NO_TMUX=1 in the command session's
-# environment (ET: an ssh_config Host alias for those sessions with
-# `SetEnv NO_TMUX=1`, applied before the shell starts; plain ssh also needs
-# sshd AcceptEnv).
+# outlasts that RTT; when it loses, the command is typed into tmux. For a
+# guarantee, set NO_TMUX=1 in the command session's environment (ET: an
+# ssh_config Host alias for those sessions with `SetEnv NO_TMUX=1`, applied
+# before the shell starts; plain ssh also needs sshd AcceptEnv).
 INIT_EOF
   case "$1" in
     bash) echo "# bash 3.2's read -t 0 always fails without reading, so it never skips." ;;
-    zsh) echo "# Without the zsh/zselect module the probe never skips." ;;
+    zsh) echo "# Without the zsh/zselect module the probe never skips; it stays loaded." ;;
   esac
 }
 
@@ -1298,12 +1302,21 @@ INIT_EOF
       _emit_init_opt_out_comment "$shell"
       cat <<'INIT_EOF'
 
-# Connect handoff: attach-next lets connect plugins request a session. A login
-# that must not enter tmux (above) leaves the file for the next login.
+# Connect handoff: attach-next lets connect plugins request a session. A shell
+# inside tmux or a login that must not enter tmux (above) leaves the file for
+# the next login. A file older than the -mmin limit is a leftover (connect
+# plugins write it just before connecting) and is dropped instead.
 INIT_EOF
       _emit_handoff_file_contract
       # shellcheck disable=SC2016 # Emitted shell code expands at login.
-      printf 'if [[ $- == *i* && -z "${NO_TMUX:-}" && -f "$_ds_f" ]] && ! %s; then\n' \
+      printf 'if [[ $- == *i* && -f "$_ds_f" && -z "$(find "$_ds_f" -mmin -%s 2>/dev/null)" ]]; then\n' \
+        "$_DS_HANDOFF_TTL_MINUTES"
+      cat <<'INIT_EOF'
+    rm -f "$_ds_f"
+fi
+INIT_EOF
+      # shellcheck disable=SC2016 # Emitted shell code expands at login.
+      printf 'if [[ $- == *i* && -z "${TMUX:-}" && -z "${NO_TMUX:-}" && -f "$_ds_f" ]] && ! %s; then\n' \
         "$(_init_queued_probe "$shell")"
       cat <<'INIT_EOF'
     _ds_args=()
@@ -1423,12 +1436,21 @@ INIT_EOF
       _emit_init_opt_out_comment "$shell"
       cat <<'INIT_EOF'
 
-# Connect handoff: attach-next lets connect plugins request a session. A login
-# that must not enter tmux (above) leaves the file for the next login.
+# Connect handoff: attach-next lets connect plugins request a session. A shell
+# inside tmux or a login that must not enter tmux (above) leaves the file for
+# the next login. A file older than the -mmin limit is a leftover (connect
+# plugins write it just before connecting) and is dropped instead.
 INIT_EOF
       _emit_handoff_file_contract
       # shellcheck disable=SC2016 # Emitted shell code expands at login.
-      printf 'if [[ -o interactive && -z "${NO_TMUX:-}" && -f "$_ds_f" ]] && ! %s; then\n' \
+      printf 'if [[ -o interactive && -f "$_ds_f" && -z "$(find "$_ds_f" -mmin -%s 2>/dev/null)" ]]; then\n' \
+        "$_DS_HANDOFF_TTL_MINUTES"
+      cat <<'INIT_EOF'
+    rm -f "$_ds_f"
+fi
+INIT_EOF
+      # shellcheck disable=SC2016 # Emitted shell code expands at login.
+      printf 'if [[ -o interactive && -z "${TMUX:-}" && -z "${NO_TMUX:-}" && -f "$_ds_f" ]] && ! %s; then\n' \
         "$(_init_queued_probe "$shell")"
       cat <<'INIT_EOF'
     _ds_args=()

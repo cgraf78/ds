@@ -6580,48 +6580,52 @@ _attach_probe_run() {
   wait "$pid" 2>/dev/null || true
 }
 
-# Start login shell "$@" on a fresh pty with $1 queued before it starts.
-# pty-login.py writes the input first, so unlike `script` nothing races.
+# Start login shell "$3..." on a fresh pty with $2 queued before it starts.
+# pty-login.py writes the input first, so unlike `script` nothing races. Every
+# case ends on its own (ds stub or `exit`), so any other outcome, including
+# the harness's deadline, fails check $1.
 _attach_probe_pty() {
-  local queued="$1"
-  shift
+  local desc="$1" queued="$2" rc=0
+  shift 2
   : >"$attach_probe_log"
-  if ! /usr/bin/env "${attach_probe_env[@]}" "$REAL_PYTHON3" -I "$SCRIPT_DIR/pty-login.py" \
-    --timeout 10 "$queued" -- "$@" >/dev/null 2>"$attach_probe_dir/pty.err"; then
+  /usr/bin/env "${attach_probe_env[@]}" "$REAL_PYTHON3" -I "$SCRIPT_DIR/pty-login.py" \
+    --timeout 10 "$queued" -- "$@" >/dev/null 2>"$attach_probe_dir/pty.err" || rc=$?
+  if ((rc != 0)); then
+    _fail "$desc (pty shell exited $rc)"
     sed 's/^/    pty-login: /' "$attach_probe_dir/pty.err" >&2
   fi
 }
 
 # Check idle, queued-line, and partial-line ptys for login shell "$2...".
 _assert_attach_probe_pty() {
-  local label="$1" marker="$attach_probe_dir/ran"
+  local label="$1" marker="$attach_probe_dir/ran" handoff="$attach_probe_dir/gen/attach-next"
   shift
-  _attach_probe_pty "" "$@"
+  rm -f "$handoff"
+  _attach_probe_pty "ds init $label: idle pty login" "" "$@"
   _assert_eq "ds init $label: idle pty attaches" "ATTACH ds" "$(cat "$attach_probe_log")"
   rm -f "$marker"
-  _attach_probe_pty ": >'$marker'; exit"$'\n' "$@"
+  _attach_probe_pty "ds init $label: queued pty login" ": >'$marker'; exit"$'\n' "$@"
   _assert_eq "ds init $label: queued pty line skips auto-attach" "" "$(cat "$attach_probe_log")"
   _assert_file_exists "ds init $label: queued pty line runs in the shell" "$marker"
-  _attach_probe_pty "echo partial" "$@"
+  _attach_probe_pty "ds init $label: partial pty login" "echo partial" "$@"
   _assert_eq "ds init $label: partial pty line still attaches" "ATTACH ds" \
     "$(cat "$attach_probe_log")"
   # An ET command session that logs in while `ds @host` via ET has its
   # attach-next pending must run its command and leave the handoff alone.
   mkdir -p "$attach_probe_dir/gen"
-  printf '%s\n' dev >"$attach_probe_dir/gen/attach-next"
+  printf '%s\n' dev >"$handoff"
   rm -f "$marker"
-  _attach_probe_pty ": >'$marker'; exit"$'\n' "$@"
+  _attach_probe_pty "ds init $label: queued pty login with a pending handoff" \
+    ": >'$marker'; exit"$'\n' "$@"
   _assert_eq "ds init $label: queued pty line skips a pending handoff" "" \
     "$(cat "$attach_probe_log")"
   _assert_file_exists "ds init $label: queued pty line runs despite a pending handoff" "$marker"
-  _assert_file_exists "ds init $label: queued pty line leaves the handoff pending" \
-    "$attach_probe_dir/gen/attach-next"
-  printf '%s\n' dev >"$attach_probe_dir/gen/attach-next"
-  _attach_probe_pty "" "$@"
+  _assert_file_exists "ds init $label: queued pty line leaves the handoff pending" "$handoff"
+  printf '%s\n' dev >"$handoff"
+  _attach_probe_pty "ds init $label: idle pty login with a pending handoff" "" "$@"
   _assert_eq "ds init $label: idle pty takes a pending handoff" "ATTACH dev" \
     "$(cat "$attach_probe_log")"
-  _assert_file_missing "ds init $label: idle pty consumes the handoff" \
-    "$attach_probe_dir/gen/attach-next"
+  _assert_file_missing "ds init $label: idle pty consumes the handoff" "$handoff"
 }
 
 DS_STATE_DIR="$attach_probe_dir/gen" "$SCRIPT_DIR/../bin/ds" init bash >"$bash_init_file"
@@ -6635,14 +6639,22 @@ _assert_eq "ds init bash: queued stdin skips auto-attach" "" "$(cat "$attach_pro
 # shellcheck disable=SC2016 # $1 expands inside the test shell program.
 _attach_probe_run "" "$BASH" --noprofile --norc -i -c 'source "$1"' bash "$bash_init_file"
 _assert_eq "ds init bash: idle stdin still attaches" "ATTACH ds" "$(cat "$attach_probe_log")"
+# shellcheck disable=SC2016 # $1 expands inside the test shell program.
+_attach_probe_run "" /usr/bin/env NO_TMUX=1 "$BASH" --noprofile --norc -i \
+  -c 'source "$1"; printf "CONTINUED\n"' bash "$bash_init_file"
+_assert_eq "ds init bash: NO_TMUX skips auto-attach" "|CONTINUED" \
+  "$(cat "$attach_probe_log")|$(cat "$attach_probe_out")"
 if [[ -n "$REAL_PYTHON3" ]]; then
   _assert_attach_probe_pty bash "$BASH" --noprofile --rcfile "$bash_init_file" -i
   # bash 3.2 (macOS /bin/bash) has no `read -t 0` probe: it always fails
   # without reading, so the login attaches as it did before the probe.
   if [[ -x /bin/bash ]] && /bin/bash -c '((BASH_VERSINFO[0] < 4))'; then
-    _attach_probe_pty ": queued; exit"$'\n' /bin/bash --noprofile --rcfile "$bash_init_file" -i
+    _attach_probe_pty "ds init bash 3: queued pty login" ": queued; exit"$'\n' \
+      /bin/bash --noprofile --rcfile "$bash_init_file" -i
     _assert_eq "ds init bash 3: queued pty line still attaches" "ATTACH ds" \
       "$(cat "$attach_probe_log")"
+  else
+    echo "  SKIP: /bin/bash is not bash 3 (macOS-only legacy probe case)"
   fi
 else
   echo "  SKIP: python3 not installed (bash pty auto-attach)"
@@ -6662,46 +6674,78 @@ done
 EOF
 chmod +x "$handoff_bin/ds"
 
-# Check the connect handoff for $1 with init file $2, where "$3..." starts that
-# shell running a -c program. An idle login takes the handoff; a login with a
-# command queued or with NO_TMUX=1 must leave attach-next for the next login.
+# Check the connect handoff of shell $1 (bash or zsh, at path $3) with init
+# file $2. An idle interactive login takes the handoff, without needing SSH
+# variables. A login with a command queued or NO_TMUX=1, a shell inside tmux,
+# and a non-interactive shell leave attach-next for the next login; one older
+# than the TTL is dropped. Each case seeds its own attach-next.
 _assert_handoff_gate() {
-  local label="$1" init_file="$2"
-  shift 2
-  local -a handoff_env=(/usr/bin/env -u DS_SSH_AUTO_ATTACH HOME="$handoff_home"
-    DS_HANDOFF_LOG="$handoff_log" PATH="$handoff_bin:/usr/bin:/bin")
+  local label="$1" init_file="$2" shell_path="$3" file="$handoff_state/attach-next"
+  local -a interactive noninteractive
+  case "$label" in
+    bash)
+      interactive=("$shell_path" --noprofile --norc -i -c)
+      noninteractive=("$shell_path" --noprofile --norc -c)
+      ;;
+    zsh)
+      interactive=("$shell_path" -f -i -c)
+      noninteractive=("$shell_path" -f -c)
+      ;;
+  esac
+  local -a handoff_env=(/usr/bin/env -u DS_SSH_AUTO_ATTACH -u SSH_TTY -u SSH_CONNECTION
+    HOME="$handoff_home" DS_HANDOFF_LOG="$handoff_log" PATH="$handoff_bin:/usr/bin:/bin")
   # shellcheck disable=SC2016 # $1 expands inside the test shell program.
-  local program='source "$1"; IFS= read -r _t_leftover || true; printf "LEFTOVER=[%s]\n" "$_t_leftover"'
+  local queued_program='source "$1"; IFS= read -r _t_leftover || true; printf "LEFTOVER=[%s]\n" "$_t_leftover"'
+  # shellcheck disable=SC2016 # $1 expands inside the test shell program.
+  local idle_program='source "$1"; printf "CONTINUED\n"'
 
   : >"$handoff_log"
-  printf '%s\n' -k 'dev work' 'dev*' >"$handoff_state/attach-next"
-  _attach_probe_run "" "${handoff_env[@]}" "$@" "$program" "$label" "$init_file"
+  printf '%s\n' -k 'dev work' 'dev*' >"$file"
+  _attach_probe_run "" "${handoff_env[@]}" "${interactive[@]}" "$idle_program" "$label" "$init_file"
   _assert_eq "ds init $label: connect handoff preserves argument boundaries" \
     $'COUNT=3\nARG=-k\nARG=dev work\nARG=dev*' "$(cat "$handoff_log")"
-  _assert_file_missing "ds init $label: connect handoff consumes attach-next" \
-    "$handoff_state/attach-next"
+  _assert_file_missing "ds init $label: connect handoff consumes attach-next" "$file"
 
   : >"$handoff_log"
-  printf '%s\n' dev >"$handoff_state/attach-next"
-  _attach_probe_run 'echo PROBE-KEPT' "${handoff_env[@]}" "$@" "$program" "$label" "$init_file"
+  printf '%s\n' dev >"$file"
+  _attach_probe_run 'echo PROBE-KEPT' "${handoff_env[@]}" "${interactive[@]}" "$queued_program" \
+    "$label" "$init_file"
   _assert_eq "ds init $label: queued command skips the connect handoff" "" "$(cat "$handoff_log")"
-  _assert_file_exists "ds init $label: queued command leaves attach-next pending" \
-    "$handoff_state/attach-next"
+  _assert_file_exists "ds init $label: queued command leaves attach-next pending" "$file"
   _assert_contains "ds init $label: queued command survives the handoff check" \
     "LEFTOVER=[echo PROBE-KEPT]" "$(cat "$attach_probe_out")"
 
+  local case_env
+  for case_env in NO_TMUX=1 TMUX=/tmp/ds-test-tmux,1,0; do
+    : >"$handoff_log"
+    printf '%s\n' dev >"$file"
+    _attach_probe_run "" "${handoff_env[@]}" "$case_env" "${interactive[@]}" "$idle_program" \
+      "$label" "$init_file"
+    _assert_eq "ds init $label: ${case_env%%=*} skips the connect handoff" "|CONTINUED" \
+      "$(cat "$handoff_log")|$(cat "$attach_probe_out")"
+    _assert_file_exists "ds init $label: ${case_env%%=*} leaves attach-next pending" "$file"
+  done
+
   : >"$handoff_log"
-  printf '%s\n' dev >"$handoff_state/attach-next"
-  _attach_probe_run "" "${handoff_env[@]}" NO_TMUX=1 "$@" "$program" "$label" "$init_file"
-  _assert_eq "ds init $label: NO_TMUX skips the connect handoff" "" "$(cat "$handoff_log")"
-  _assert_file_exists "ds init $label: NO_TMUX leaves attach-next pending" \
-    "$handoff_state/attach-next"
-  rm -f "$handoff_state/attach-next"
+  printf '%s\n' dev >"$file"
+  _attach_probe_run "" "${handoff_env[@]}" "${noninteractive[@]}" "$idle_program" \
+    "$label" "$init_file"
+  _assert_eq "ds init $label: non-interactive shell skips the connect handoff" "|CONTINUED" \
+    "$(cat "$handoff_log")|$(cat "$attach_probe_out")"
+  _assert_file_exists "ds init $label: non-interactive shell leaves attach-next pending" "$file"
+
+  : >"$handoff_log"
+  printf '%s\n' dev >"$file"
+  touch -t 200001010000 "$file"
+  _attach_probe_run "" "${handoff_env[@]}" "${interactive[@]}" "$idle_program" "$label" "$init_file"
+  _assert_eq "ds init $label: stale connect handoff is not taken" "|CONTINUED" \
+    "$(cat "$handoff_log")|$(cat "$attach_probe_out")"
+  _assert_file_missing "ds init $label: stale connect handoff is dropped" "$file"
 }
 
 HOME="$handoff_home" DS_STATE_DIR="$handoff_state" "$SCRIPT_DIR/../bin/ds" init bash \
   >"$bash_init_file"
-_assert_handoff_gate bash "$bash_init_file" "$BASH" --noprofile --norc -i -c
+_assert_handoff_gate bash "$bash_init_file" "$BASH"
 
 bash_completion_home=$(_tmpdir)
 bash_completion_xdg=$(_tmpdir)
@@ -6802,7 +6846,7 @@ if [[ -n "$REAL_ZSH" ]]; then
 
   HOME="$handoff_home" DS_STATE_DIR="$handoff_state" "$SCRIPT_DIR/../bin/ds" init zsh \
     >"$zsh_init_file"
-  _assert_handoff_gate zsh "$zsh_init_file" "$REAL_ZSH" -f -i -c
+  _assert_handoff_gate zsh "$zsh_init_file" "$REAL_ZSH"
 
   DS_STATE_DIR="$attach_probe_dir/gen" "$SCRIPT_DIR/../bin/ds" init zsh >"$zsh_init_file"
   # shellcheck disable=SC2016 # $1 and zsh parameters expand inside the zsh program.
@@ -6820,6 +6864,11 @@ if [[ -n "$REAL_ZSH" ]]; then
   # shellcheck disable=SC2016 # $1 expands inside the zsh program.
   _attach_probe_run "" "$REAL_ZSH" -fic 'source "$1"' zsh "$zsh_init_file"
   _assert_eq "ds init zsh: idle stdin still attaches" "ATTACH ds" "$(cat "$attach_probe_log")"
+  # shellcheck disable=SC2016 # $1 expands inside the zsh program.
+  _attach_probe_run "" /usr/bin/env NO_TMUX=1 "$REAL_ZSH" -fic 'source "$1"; print CONTINUED' \
+    zsh "$zsh_init_file"
+  _assert_eq "ds init zsh: NO_TMUX skips auto-attach" "|CONTINUED" \
+    "$(cat "$attach_probe_log")|$(cat "$attach_probe_out")"
   # Without zsh/zselect the probe cannot run, so the login attaches as before.
   # shellcheck disable=SC2016 # $1 expands inside the zsh program.
   _attach_probe_run 'echo PROBE-KEPT' "$REAL_ZSH" -fic 'zmodload() { return 1; }; source "$1"' \
@@ -8118,9 +8167,9 @@ _assert_not_contains "CI: runtime profile does not install ShellCheck" \
   'shellcheck' "$_ci_runtime_profiles"
 # The init snippet's zsh and real-pty auto-attach tests skip without these.
 _assert_contains "CI: runtime installs python3 for pty tests" \
-  ',python' "$_ci_runtime_profiles"
+  ',python,' ",$_ci_runtime_profiles,"
 _assert_contains "CI: runtime installs zsh for init snippet tests" \
-  ',zsh' "$_ci_runtime_profiles"
+  ',zsh,' ",$_ci_runtime_profiles,"
 _assert_contains "CI: Termux installs Git and curl for installer coverage" \
   'termux-profiles: base' "$_ci_workflow"
 _assert_not_contains "CI: Termux does not run ShellCheck" \
