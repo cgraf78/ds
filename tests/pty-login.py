@@ -10,8 +10,9 @@ Usage: pty-login.py [--timeout SECS] INPUT -- SHELL [ARG...]
 
 INPUT is written to the pty verbatim and must fit its input queue (a few KB;
 larger input is an error, not a hang). The child runs with exactly the caller's
-environment. Exits with the shell's exit status, or 124 after killing a shell
-that is still running at the deadline (its pty output goes to stderr).
+environment. The shell's pty output goes to stdout. Exits with the shell's
+exit status, or 124 after killing a shell that is still running at the
+deadline (its pty output then also goes to stderr).
 """
 
 from __future__ import annotations
@@ -68,6 +69,20 @@ def spawn(argv: list[str], queued: bytes) -> tuple[int, int]:
     return pid, master
 
 
+def _drain(master: int) -> bytes:
+    """Read whatever the exited child left in the pty, without blocking."""
+    output = bytearray()
+    while select.select([master], [], [], 0)[0]:
+        try:
+            chunk = os.read(master, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        output += chunk
+    return bytes(output)
+
+
 def wait(pid: int, master: int, timeout: float) -> tuple[int | None, bytes]:
     """Drain pty output until the child exits or the deadline passes.
 
@@ -79,6 +94,8 @@ def wait(pid: int, master: int, timeout: float) -> tuple[int | None, bytes]:
     while time.monotonic() < deadline:
         done, status = os.waitpid(pid, os.WNOHANG)
         if done:
+            if master_open:
+                output += _drain(master)
             return os.waitstatus_to_exitcode(status), bytes(output)
         if not master_open:
             # The child closed the pty but has not been reaped yet.
@@ -120,6 +137,7 @@ def main() -> int:
         code, output = wait(pid, master, args.timeout)
     finally:
         os.close(master)
+    sys.stdout.write(output.decode(errors="replace"))
     if code is None:
         sys.stderr.write(f"pty-login: {argv[0]} still running after {args.timeout}s; output:\n")
         sys.stderr.write(output.decode(errors="replace") + "\n")

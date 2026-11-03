@@ -6566,9 +6566,17 @@ attach_probe_env=(
 # `env` runs directly in the background so $! is the shell itself.
 attach_probe_out="$attach_probe_dir/out"
 attach_probe_err="$attach_probe_dir/err"
-# Errors the snippet itself could print (a missing attach-next, a bad builtin
-# option, strict-mode failures); shell job-control notices are not among them.
-attach_probe_error_re='attach-next|command not found|not found|syntax error|parse error|bad option|invalid (option|timeout)|unbound variable|parameter not set'
+# Error text a broken snippet prints in bash or zsh. Pty output also holds the
+# prompt and echoed input, so it can only be searched for these; FIFO stderr
+# must be empty apart from the shell's own startup notices below.
+attach_probe_error_re='attach-next|not found|No such file|Permission denied|syntax error|parse error|bad (option|pattern|substitution|math)|invalid|no such option|no matches found|error in flags|unbound variable|parameter not set'
+attach_probe_noise_re='cannot set terminal process group|no job control in this shell|setlocale'
+
+# Assert check $1: the last _attach_probe_run printed nothing on stderr except
+# known shell startup notices.
+_assert_attach_probe_quiet() {
+  _assert_eq "$1" "" "$(grep -Ev "$attach_probe_noise_re" "$attach_probe_err" || true)"
+}
 _attach_probe_run() {
   local queued="$1" pid deadline=$((SECONDS + 10))
   shift
@@ -6604,7 +6612,7 @@ _attach_probe_pty() {
   if ((rc != 0)); then
     _fail "$desc (pty shell exited $rc)"
     sed 's/^/    pty-login: /' "$attach_probe_dir/pty.err" >&2
-  elif grep -Eq "$attach_probe_error_re" "$attach_probe_dir/pty.out"; then
+  elif grep -v setlocale "$attach_probe_dir/pty.out" | grep -Eq "$attach_probe_error_re"; then
     _fail "$desc (snippet printed an error)"
     sed 's/^/    pty: /' "$attach_probe_dir/pty.out" >&2
   fi
@@ -6653,8 +6661,7 @@ _assert_eq "ds init bash: queued stdin skips auto-attach" "" "$(cat "$attach_pro
 # shellcheck disable=SC2016 # $1 expands inside the test shell program.
 _attach_probe_run "" "$BASH" --noprofile --norc -i -c 'source "$1"' bash "$bash_init_file"
 _assert_eq "ds init bash: idle stdin still attaches" "ATTACH ds" "$(cat "$attach_probe_log")"
-_assert_eq "ds init bash: idle login prints no snippet errors" "" \
-  "$(grep -E "$attach_probe_error_re" "$attach_probe_err" || true)"
+_assert_attach_probe_quiet "ds init bash: idle login prints no snippet errors"
 # shellcheck disable=SC2016 # $1 expands inside the test shell program.
 _attach_probe_run "" /usr/bin/env TMUX=/tmp/ds-test-tmux,1,0 "$BASH" --noprofile --norc -i \
   -c 'source "$1"; printf "CONTINUED\n"' bash "$bash_init_file"
@@ -6665,8 +6672,7 @@ _attach_probe_run "" /usr/bin/env NO_TMUX=1 "$BASH" --noprofile --norc -i \
   -c 'source "$1"; printf "CONTINUED\n"' bash "$bash_init_file"
 _assert_eq "ds init bash: NO_TMUX skips auto-attach" "|CONTINUED" \
   "$(cat "$attach_probe_log")|$(cat "$attach_probe_out")"
-_assert_eq "ds init bash: skipped login prints no snippet errors" "" \
-  "$(grep -E "$attach_probe_error_re" "$attach_probe_err" || true)"
+_assert_attach_probe_quiet "ds init bash: skipped login prints no snippet errors"
 if [[ -n "$REAL_PYTHON3" ]]; then
   _assert_attach_probe_pty bash "$BASH" --noprofile --rcfile "$bash_init_file" -i
   # bash 3.2 (macOS /bin/bash) has no `read -t 0` probe: it always fails
@@ -6736,6 +6742,7 @@ _assert_handoff_gate() {
   : >"$handoff_log"
   printf '%s\n' -k 'dev work' 'dev*' >"$file"
   _attach_probe_run "" "${handoff_env[@]}" "${interactive[@]}" "$idle_program" "$label" "$init_file"
+  _assert_attach_probe_quiet "ds init $label: an idle handoff login prints no snippet errors"
   _assert_eq "ds init $label: connect handoff preserves argument boundaries" \
     $'COUNT=3\nARG=-k\nARG=dev work\nARG=dev*' "$(cat "$handoff_log")"
   _assert_file_missing "ds init $label: connect handoff consumes attach-next" "$file"
@@ -6744,6 +6751,7 @@ _assert_handoff_gate() {
   printf '%s\n' dev >"$file"
   _attach_probe_run 'echo PROBE-KEPT' "${handoff_env[@]}" "${interactive[@]}" "$queued_program" \
     "$label" "$init_file"
+  _assert_attach_probe_quiet "ds init $label: a queued-command handoff login prints no snippet errors"
   _assert_eq "ds init $label: queued command skips the connect handoff" "" "$(cat "$handoff_log")"
   _assert_file_exists "ds init $label: queued command leaves attach-next pending" "$file"
   _assert_contains "ds init $label: queued command survives the handoff check" \
@@ -6755,6 +6763,7 @@ _assert_handoff_gate() {
     printf '%s\n' dev >"$file"
     _attach_probe_run "" "${handoff_env[@]}" "$case_env" "${interactive[@]}" "$idle_program" \
       "$label" "$init_file"
+    _assert_attach_probe_quiet "ds init $label: a $case_env handoff login prints no snippet errors"
     _assert_eq "ds init $label: $case_env skips the connect handoff" "|CONTINUED" \
       "$(cat "$handoff_log")|$(cat "$attach_probe_out")"
     _assert_file_exists "ds init $label: $case_env leaves attach-next pending" "$file"
@@ -6764,6 +6773,7 @@ _assert_handoff_gate() {
   printf '%s\n' dev >"$file"
   _attach_probe_run "" "${handoff_env[@]}" "${noninteractive[@]}" "$idle_program" \
     "$label" "$init_file"
+  _assert_attach_probe_quiet "ds init $label: a non-interactive handoff shell prints no snippet errors"
   _assert_eq "ds init $label: non-interactive shell skips the connect handoff" "|CONTINUED" \
     "$(cat "$handoff_log")|$(cat "$attach_probe_out")"
   _assert_file_exists "ds init $label: non-interactive shell leaves attach-next pending" "$file"
@@ -6774,6 +6784,7 @@ _assert_handoff_gate() {
   # shellcheck disable=SC2016 # $1 expands inside the test shell program.
   _attach_probe_run "" "${handoff_env[@]}" "${interactive[@]}" \
     'find() { return 1; }; rm() { return 0; }; source "$1"' "$label" "$init_file"
+  _assert_attach_probe_quiet "ds init $label: a handoff login with find and rm functions prints no snippet errors"
   _assert_eq "ds init $label: find and rm functions do not change the handoff" \
     $'COUNT=1\nARG=dev' "$(cat "$handoff_log")"
   _assert_file_missing "ds init $label: find and rm functions do not keep attach-next" "$file"
@@ -6782,6 +6793,7 @@ _assert_handoff_gate() {
   printf '%s\n' dev >"$file"
   touch -t 200001010000 "$file"
   _attach_probe_run "" "${handoff_env[@]}" "${interactive[@]}" "$idle_program" "$label" "$init_file"
+  _assert_attach_probe_quiet "ds init $label: a stale handoff login prints no snippet errors"
   _assert_eq "ds init $label: stale connect handoff is not taken" "|CONTINUED" \
     "$(cat "$handoff_log")|$(cat "$attach_probe_out")"
   _assert_file_missing "ds init $label: stale connect handoff is dropped" "$file"
@@ -6793,6 +6805,7 @@ _assert_handoff_gate() {
     printf '%s\n' dev >"$file"
     _age_file "$file" 180
     _attach_probe_run "" "${handoff_env[@]}" "${interactive[@]}" "$idle_program" "$label" "$init_file"
+    _assert_attach_probe_quiet "ds init $label: a three-minute-old handoff login prints no snippet errors"
     _assert_eq "ds init $label: a three-minute-old handoff is taken" $'COUNT=1\nARG=dev' \
       "$(cat "$handoff_log")"
 
@@ -6800,6 +6813,7 @@ _assert_handoff_gate() {
     printf '%s\n' dev >"$file"
     _age_file "$file" 420
     _attach_probe_run "" "${handoff_env[@]}" "${interactive[@]}" "$idle_program" "$label" "$init_file"
+    _assert_attach_probe_quiet "ds init $label: a seven-minute-old handoff login prints no snippet errors"
     _assert_eq "ds init $label: a seven-minute-old handoff is dropped" "|CONTINUED" \
       "$(cat "$handoff_log")|$(cat "$attach_probe_out")"
     _assert_file_missing "ds init $label: a seven-minute-old handoff is removed" "$file"
@@ -6811,6 +6825,7 @@ _assert_handoff_gate() {
   touch -t 200001010000 "$file"
   _attach_probe_run "" "${handoff_env[@]}" PATH="$handoff_bin:$handoff_nofind_bin" \
     "${interactive[@]}" "$idle_program" "$label" "$init_file"
+  _assert_attach_probe_quiet "ds init $label: a handoff login without find prints no snippet errors"
   _assert_eq "ds init $label: without find an old handoff is still taken" $'COUNT=1\nARG=dev' \
     "$(cat "$handoff_log")"
   rm -f "$file"
@@ -6892,6 +6907,9 @@ _assert_contains "ds init zsh: defines zsh completion" 'compdef _ds ds' "$result
 _assert_contains "ds init zsh: offers both shells" 'shells=(bash zsh)' "$result"
 _assert_contains "ds init zsh: auto-attach requires a real terminal" 'SSH_TTY:-}' "$result"
 _assert_contains "ds init zsh: auto-attach probes queued input" 'zselect -a _ds_ready -t 0 -r 0' "$result"
+# shellcheck disable=SC2016 # Literal snippet text.
+_assert_contains "ds init zsh: handoff age check runs only when a handoff exists" \
+  'if [[ -o interactive && -f "$_ds_f" ]] &&' "$result"
 _assert_contains "ds init zsh: emits shared connect config glob" \
   "local connect_config_glob=$(_shell_literal "$_DS_CONNECT_CONFIG_GLOB")" "$result"
 _assert_contains "ds init zsh: emits shared profile config glob" \
@@ -6937,8 +6955,7 @@ if [[ -n "$REAL_ZSH" ]]; then
   # shellcheck disable=SC2016 # $1 expands inside the zsh program.
   _attach_probe_run "" "$REAL_ZSH" -fic 'source "$1"' zsh "$zsh_init_file"
   _assert_eq "ds init zsh: idle stdin still attaches" "ATTACH ds" "$(cat "$attach_probe_log")"
-  _assert_eq "ds init zsh: idle login prints no snippet errors" "" \
-    "$(grep -E "$attach_probe_error_re" "$attach_probe_err" || true)"
+  _assert_attach_probe_quiet "ds init zsh: idle login prints no snippet errors"
   # shellcheck disable=SC2016 # $1 expands inside the zsh program.
   _attach_probe_run "" /usr/bin/env TMUX=/tmp/ds-test-tmux,1,0 "$REAL_ZSH" -fic \
     'source "$1"; print CONTINUED' zsh "$zsh_init_file"
@@ -6949,8 +6966,7 @@ if [[ -n "$REAL_ZSH" ]]; then
     zsh "$zsh_init_file"
   _assert_eq "ds init zsh: NO_TMUX skips auto-attach" "|CONTINUED" \
     "$(cat "$attach_probe_log")|$(cat "$attach_probe_out")"
-  _assert_eq "ds init zsh: skipped login prints no snippet errors" "" \
-    "$(grep -E "$attach_probe_error_re" "$attach_probe_err" || true)"
+  _assert_attach_probe_quiet "ds init zsh: skipped login prints no snippet errors"
   # Without zsh/zselect the probe cannot run, so the login attaches as before.
   # shellcheck disable=SC2016 # $1 expands inside the zsh program.
   _attach_probe_run 'echo PROBE-KEPT' "$REAL_ZSH" -fic 'zmodload() { return 1; }; source "$1"' \
