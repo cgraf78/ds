@@ -121,6 +121,17 @@ eval "$(ds init bash)"
 
 Skip auto-attach for a single login with `NO_TMUX=1`.
 
+Auto-attach also skips a login whose terminal already has a complete input line
+queued when the shell starts, so a command typed into the session (such as
+Eternal Terminal's `et --command`) runs instead of being fed to tmux. Pressing
+Enter or pasting a line while a slow login is still starting skips auto-attach
+the same way; a partially typed line does not. This check is best-effort: ET
+starts the shell before it sends the command, so a fast shell startup can still
+attach first. For a guarantee, set `NO_TMUX=1` in the session environment, for
+example with `SetEnv NO_TMUX=1` in the client's `ssh_config` (ET applies it
+before starting the shell; plain `ssh` also needs a matching `AcceptEnv NO_TMUX`
+in `sshd_config`).
+
 ## Tmux Resurrect Integration
 
 `ds` can preserve its session identity inside a tmux-resurrect snapshot. This

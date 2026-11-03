@@ -12,6 +12,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REAL_ZSH=$(command -v zsh || true)
+REAL_PYTHON3=$(command -v python3 || true)
 REAL_SSH_KEYGEN=$(command -v ssh-keygen || true)
 REAL_TMUX=$(command -v tmux || true)
 
@@ -6497,7 +6498,7 @@ result=$("$SCRIPT_DIR/../bin/ds" init bash 2>&1)
 _assert_contains "ds init bash: wraps ds invocation" 'DS_SHELL_NAME=bash command ds "$@"' "$result"
 _assert_contains "ds init bash: includes bash shell names" 'compgen -W "bash zsh"' "$result"
 _assert_contains "ds init bash: auto-attach requires a real terminal" 'SSH_TTY:-}' "$result"
-_assert_contains "ds init bash: auto-attach probes queued stdin" '_ds_stdin_queued' "$result"
+_assert_contains "ds init bash: auto-attach probes queued input" 'if ! read -t 0 2>/dev/null; then' "$result"
 _assert_contains "ds init bash: emits shared connect config glob" \
   "local connect_config_glob=$(_shell_literal "$_DS_CONNECT_CONFIG_GLOB")" "$result"
 _assert_contains "ds init bash: emits shared profile config glob" \
@@ -6522,40 +6523,91 @@ rc=$?
 set -e
 _assert_exit "ds init bash: generated snippet parses" 0 "$rc"
 
-# Auto-attach must not hijack a session whose command is already queued on
-# stdin (e.g. ET --command bytes typed into the pty before the shell reads
-# them): attaching would feed them to tmux as keystrokes instead of running
-# them. Empty stdin still attaches, as does a login where the probe itself
-# is unavailable.
+# Auto-attach must not hijack a login whose terminal already has a complete
+# input line queued (e.g. ET --command typed into the pty): attaching would
+# feed that line to tmux as keystrokes instead of running it. The probe must
+# leave the line for the shell, and a login with nothing or only a partial
+# line queued must still attach.
 attach_probe_bin=$(_tmpdir)
-attach_probe_log=$(_tmpdir)/attach.log
-REAL_PERL=$(command -v perl || true)
+attach_probe_dir=$(_tmpdir)
+attach_probe_log="$attach_probe_dir/attach.log"
 cat >"$attach_probe_bin/ds" <<'EOF'
-#!/bin/bash
+#!/bin/sh
 printf 'ATTACH %s\n' "$*" >>"${DS_ATTACH_LOG:?}"
 EOF
-chmod +x "$attach_probe_bin/ds"
-printf '#!/bin/bash\nexit 0\n' >"$attach_probe_bin/tmux"
-chmod +x "$attach_probe_bin/tmux"
-DS_STATE_DIR=$(_tmpdir)/gen-attach "$SCRIPT_DIR/../bin/ds" init bash >"$bash_init_file"
-if [[ -n "$REAL_PERL" ]]; then
+printf '#!/bin/sh\nexit 0\n' >"$attach_probe_bin/tmux"
+chmod +x "$attach_probe_bin/ds" "$attach_probe_bin/tmux"
+# An open, empty FIFO is an idle stdin without a pty. /dev/null would not do:
+# the probe reads EOF as queued input, so it would skip the attach.
+attach_probe_fifo="$attach_probe_dir/idle.fifo"
+mkfifo "$attach_probe_fifo"
+
+# Run "$@" as an opted-in SSH login with stub ds/tmux first on PATH.
+_attach_probe() {
   : >"$attach_probe_log"
-  # shellcheck disable=SC2016 # $1 expands inside the test shell program.
-  attach_probe_out=$(printf 'echo PROBE-KEPT\n' | DS_ATTACH_LOG="$attach_probe_log" DS_SSH_AUTO_ATTACH=ds SSH_CONNECTION=x SSH_TTY=/dev/pts/99 DS_STATE_DIR=$(_tmpdir)/nostate PATH="$attach_probe_bin:/usr/bin:/bin" \
-    /usr/bin/env -u TMUX -u NO_TMUX "$BASH" --noprofile --norc -i -c 'source "$1"; IFS= read -r _t_leftover || true; printf "LEFTOVER=[%s]\n" "$_t_leftover"' bash "$bash_init_file" 2>/dev/null)
-  _assert_contains "ds init bash: queued stdin is preserved for the shell" "LEFTOVER=[echo PROBE-KEPT]" "$attach_probe_out"
-  _assert_eq "ds init bash: queued stdin skips auto-attach" "" "$(cat "$attach_probe_log")"
+  DS_ATTACH_LOG="$attach_probe_log" DS_SSH_AUTO_ATTACH=ds SSH_CONNECTION=x \
+    SSH_TTY=/dev/pts/99 DS_STATE_DIR="$attach_probe_dir/state" \
+    ZDOTDIR="$attach_probe_dir/zdotdir" TERM=dumb \
+    PATH="$attach_probe_bin:/usr/bin:/bin" \
+    /usr/bin/env -u TMUX -u TMUX_PANE -u NO_TMUX "$@"
+}
+
+# Run "$@" with stdin on an idle FIFO whose writer stays open meanwhile.
+_attach_probe_idle() {
+  exec 9<>"$attach_probe_fifo"
+  _attach_probe "$@" <"$attach_probe_fifo" >/dev/null 2>&1 || true
+  exec 9>&-
+}
+
+# Start login shell "$@" on a fresh pty with $1 queued before it starts.
+# pty-login.py writes the input first, so unlike `script` nothing races.
+_attach_probe_pty() {
+  local queued="$1"
+  shift
+  if ! _attach_probe "$REAL_PYTHON3" -I "$SCRIPT_DIR/pty-login.py" --timeout 10 \
+    "$queued" -- "$@" >/dev/null 2>"$attach_probe_dir/pty.err"; then
+    sed 's/^/    pty-login: /' "$attach_probe_dir/pty.err" >&2
+  fi
+}
+
+# Check idle, queued-line, and partial-line ptys for login shell "$2...".
+_assert_attach_probe_pty() {
+  local label="$1" marker="$attach_probe_dir/ran"
+  shift
+  _attach_probe_pty "" "$@"
+  _assert_eq "ds init $label: idle pty attaches" "ATTACH ds" "$(cat "$attach_probe_log")"
+  rm -f "$marker"
+  _attach_probe_pty ": >'$marker'; exit"$'\n' "$@"
+  _assert_eq "ds init $label: queued pty line skips auto-attach" "" "$(cat "$attach_probe_log")"
+  _assert_file_exists "ds init $label: queued pty line runs in the shell" "$marker"
+  _attach_probe_pty "echo partial" "$@"
+  _assert_eq "ds init $label: partial pty line still attaches" "ATTACH ds" \
+    "$(cat "$attach_probe_log")"
+}
+
+DS_STATE_DIR="$attach_probe_dir/gen" "$SCRIPT_DIR/../bin/ds" init bash >"$bash_init_file"
+# shellcheck disable=SC2016 # $1 expands inside the test shell program.
+attach_probe_out=$(printf 'echo PROBE-KEPT\n' | _attach_probe "$BASH" --noprofile --norc -i \
+  -c 'source "$1"; IFS= read -r _t_leftover || true; printf "LEFTOVER=[%s]\n" "$_t_leftover"' \
+  bash "$bash_init_file" 2>/dev/null)
+_assert_contains "ds init bash: queued stdin is preserved for the shell" \
+  "LEFTOVER=[echo PROBE-KEPT]" "$attach_probe_out"
+_assert_eq "ds init bash: queued stdin skips auto-attach" "" "$(cat "$attach_probe_log")"
+# shellcheck disable=SC2016 # $1 expands inside the test shell program.
+_attach_probe_idle "$BASH" --noprofile --norc -i -c 'source "$1"' bash "$bash_init_file"
+_assert_eq "ds init bash: idle stdin still attaches" "ATTACH ds" "$(cat "$attach_probe_log")"
+if [[ -n "$REAL_PYTHON3" ]]; then
+  _assert_attach_probe_pty bash "$BASH" --noprofile --rcfile "$bash_init_file" -i
+  # bash 3.2 (macOS /bin/bash) has no `read -t 0` probe: it always fails
+  # without reading, so the login attaches as it did before the probe.
+  if [[ -x /bin/bash ]] && /bin/bash -c '((BASH_VERSINFO[0] < 4))'; then
+    _attach_probe_pty ": queued; exit"$'\n' /bin/bash --noprofile --rcfile "$bash_init_file" -i
+    _assert_eq "ds init bash 3: queued pty line still attaches" "ATTACH ds" \
+      "$(cat "$attach_probe_log")"
+  fi
+else
+  echo "  SKIP: python3 not installed (bash pty auto-attach)"
 fi
-: >"$attach_probe_log"
-# shellcheck disable=SC2016 # $1 expands inside the test shell program.
-DS_ATTACH_LOG="$attach_probe_log" DS_SSH_AUTO_ATTACH=ds SSH_CONNECTION=x SSH_TTY=/dev/pts/99 DS_STATE_DIR=$(_tmpdir)/nostate PATH="$attach_probe_bin:/usr/bin:/bin" \
-  /usr/bin/env -u TMUX -u NO_TMUX "$BASH" --noprofile --norc -i -c 'source "$1"' bash "$bash_init_file" </dev/null >/dev/null 2>&1 || true
-_assert_contains "ds init bash: empty stdin still attaches" "ATTACH ds" "$(cat "$attach_probe_log")"
-: >"$attach_probe_log"
-# shellcheck disable=SC2016 # $1 expands inside the test shell program.
-DS_ATTACH_LOG="$attach_probe_log" DS_SSH_AUTO_ATTACH=ds SSH_CONNECTION=x SSH_TTY=/dev/pts/99 DS_STATE_DIR=$(_tmpdir)/nostate PATH="$attach_probe_bin" \
-  /usr/bin/env -u TMUX -u NO_TMUX "$BASH" --noprofile --norc -i -c 'source "$1"' bash "$bash_init_file" </dev/null >/dev/null 2>&1 || true
-_assert_contains "ds init bash: missing perl falls back to attaching" "ATTACH ds" "$(cat "$attach_probe_log")"
 
 handoff_bin=$(_tmpdir)
 handoff_home=$(_tmpdir)
@@ -6649,7 +6701,7 @@ _assert_contains "ds init zsh: wraps ds invocation" 'DS_SHELL_NAME=zsh command d
 _assert_contains "ds init zsh: defines zsh completion" 'compdef _ds ds' "$result"
 _assert_contains "ds init zsh: offers both shells" 'shells=(bash zsh)' "$result"
 _assert_contains "ds init zsh: auto-attach requires a real terminal" 'SSH_TTY:-}' "$result"
-_assert_contains "ds init zsh: auto-attach probes queued stdin" '_ds_stdin_queued' "$result"
+_assert_contains "ds init zsh: auto-attach probes queued input" 'zselect -a _ds_ready -t 0 -r 0' "$result"
 _assert_contains "ds init zsh: emits shared connect config glob" \
   "local connect_config_glob=$(_shell_literal "$_DS_CONNECT_CONFIG_GLOB")" "$result"
 _assert_contains "ds init zsh: emits shared profile config glob" \
@@ -6685,20 +6737,32 @@ if [[ -n "$REAL_ZSH" ]]; then
   _assert_eq "ds init zsh: connect handoff preserves argument boundaries" \
     $'COUNT=3\nARG=-k\nARG=dev work\nARG=dev*' "$(cat "$handoff_log")"
 
-  DS_STATE_DIR=$(_tmpdir)/gen-attach "$SCRIPT_DIR/../bin/ds" init zsh >"$zsh_init_file"
-  if [[ -n "$REAL_PERL" ]]; then
-    : >"$attach_probe_log"
-    # shellcheck disable=SC2016 # $1 expands inside the zsh program.
-    attach_probe_out=$(printf 'echo PROBE-KEPT\n' | DS_ATTACH_LOG="$attach_probe_log" DS_SSH_AUTO_ATTACH=ds SSH_CONNECTION=x SSH_TTY=/dev/pts/99 DS_STATE_DIR=$(_tmpdir)/nostate PATH="$attach_probe_bin:/usr/bin:/bin" \
-      /usr/bin/env -u TMUX -u NO_TMUX "$REAL_ZSH" -fic 'source "$1"; IFS= read -r _t_leftover || true; print "LEFTOVER=[$_t_leftover]"' zsh "$zsh_init_file" 2>/dev/null)
-    _assert_contains "ds init zsh: queued stdin is preserved for the shell" "LEFTOVER=[echo PROBE-KEPT]" "$attach_probe_out"
-    _assert_eq "ds init zsh: queued stdin skips auto-attach" "" "$(cat "$attach_probe_log")"
-  fi
-  : >"$attach_probe_log"
+  DS_STATE_DIR="$attach_probe_dir/gen" "$SCRIPT_DIR/../bin/ds" init zsh >"$zsh_init_file"
+  # shellcheck disable=SC2016 # $1 and zsh parameters expand inside the zsh program.
+  attach_probe_out=$(printf 'echo PROBE-KEPT\n' | _attach_probe "$REAL_ZSH" -fic '
+    reply=(caller)
+    source "$1"
+    IFS= read -r _t_leftover || true
+    print -r -- "LEFTOVER=[$_t_leftover] REPLY=[$reply] READY=[${_ds_ready-unset}]"
+  ' zsh "$zsh_init_file" 2>/dev/null)
+  _assert_contains "ds init zsh: queued stdin is preserved for the shell" \
+    "LEFTOVER=[echo PROBE-KEPT]" "$attach_probe_out"
+  _assert_contains "ds init zsh: queued-input probe leaves reply alone" \
+    "REPLY=[caller] READY=[unset]" "$attach_probe_out"
+  _assert_eq "ds init zsh: queued stdin skips auto-attach" "" "$(cat "$attach_probe_log")"
   # shellcheck disable=SC2016 # $1 expands inside the zsh program.
-  DS_ATTACH_LOG="$attach_probe_log" DS_SSH_AUTO_ATTACH=ds SSH_CONNECTION=x SSH_TTY=/dev/pts/99 DS_STATE_DIR=$(_tmpdir)/nostate PATH="$attach_probe_bin:/usr/bin:/bin" \
-    /usr/bin/env -u TMUX -u NO_TMUX "$REAL_ZSH" -fic 'source "$1"' zsh "$zsh_init_file" </dev/null >/dev/null 2>&1 || true
-  _assert_contains "ds init zsh: empty stdin still attaches" "ATTACH ds" "$(cat "$attach_probe_log")"
+  _attach_probe_idle "$REAL_ZSH" -fic 'source "$1"' zsh "$zsh_init_file"
+  _assert_eq "ds init zsh: idle stdin still attaches" "ATTACH ds" "$(cat "$attach_probe_log")"
+  if [[ -n "$REAL_PYTHON3" ]]; then
+    # A login reads the snippet from $ZDOTDIR/.zshrc; -d skips the global rc
+    # files (only /etc/zshenv still runs) so the host's config stays out.
+    mkdir -p "$attach_probe_dir/zdotdir"
+    printf 'source %s\n' "$(_shell_literal "$zsh_init_file")" \
+      >"$attach_probe_dir/zdotdir/.zshrc"
+    _assert_attach_probe_pty zsh "$REAL_ZSH" -d -i
+  else
+    echo "  SKIP: python3 not installed (zsh pty auto-attach)"
+  fi
 
   zsh_completion_home=$(_tmpdir)
   zsh_completion_xdg=$(_tmpdir)
@@ -7976,8 +8040,14 @@ _assert_contains "CI: delegates the typed shell inventory" \
   'shellcheck-inventory-path: .github/shellcheck-files.txt' "$_ci_workflow"
 _assert_contains "CI: runtime skips only delegated ShellCheck" \
   'test-command: DS_SKIP_SHELLCHECK=1 bash tests/ds-ci' "$_ci_workflow"
+_ci_runtime_profiles=$(sed -n 's/^      profiles: //p' "$_ci_workflow_path")
 _assert_not_contains "CI: runtime profile does not install ShellCheck" \
-  'profiles: base,openssh-netcat-lsof,procps,shellcheck' "$_ci_workflow"
+  'shellcheck' "$_ci_runtime_profiles"
+# The init snippet's zsh and real-pty auto-attach tests skip without these.
+_assert_contains "CI: runtime installs python3 for pty tests" \
+  ',python' "$_ci_runtime_profiles"
+_assert_contains "CI: runtime installs zsh for init snippet tests" \
+  ',zsh' "$_ci_runtime_profiles"
 _assert_contains "CI: Termux installs Git and curl for installer coverage" \
   'termux-profiles: base' "$_ci_workflow"
 _assert_not_contains "CI: Termux does not run ShellCheck" \

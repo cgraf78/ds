@@ -20,7 +20,7 @@ jobs:
     uses: cgraf78/actions/.github/workflows/shell-ci.yml@6ecbf5dafaeb9483aeeba3915321544b31572172
     with:
       matrix-set: full
-      profiles: base,openssh-netcat-lsof,procps
+      profiles: base,openssh-netcat-lsof,procps,python,zsh
       shellcheck-inventory-path: .github/shellcheck-files.txt
       termux-profiles: base
       test-command: DS_SKIP_SHELLCHECK=1 bash tests/ds-ci

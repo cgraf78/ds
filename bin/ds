@@ -24,7 +24,10 @@
 #              DS_SSH_AUTO_ATTACH=dev     → auto-attach to "dev" session
 #              NO_TMUX=1                  → skip for one login
 #              (also requires a real terminal: a login with no controlling tty,
-#               e.g. a tunnel/command session, is skipped even when interactive)
+#               e.g. a tunnel/command session, is skipped even when interactive;
+#               so is one with a complete input line already queued, such as an
+#               ET --command or Enter pressed during a slow login — best-effort,
+#               so set NO_TMUX=1 in the session environment for a guarantee)
 
 _xdg_dir() {
   local value="$1" fallback="$2" suffix="$3" variable="$4"
@@ -1274,27 +1277,26 @@ fi
 unset _ds_f _ds_arg _ds_args
 
 # Auto-attach on SSH login (opt-in via DS_SSH_AUTO_ATTACH, skip with NO_TMUX=1).
-# Also requires a real terminal (SSH_TTY) with no command already waiting in
-# it: a typed remote command (e.g. ET --command, whose bytes sit in the pty
-# input queue before the shell reads them) must run instead of being eaten by
-# tmux as keystrokes. SSH_TTY alone cannot tell those apart — ET sets it for
-# command sessions too — so probe queued bytes without consuming them
-# (FIONREAD via perl). A human login has typed nothing yet; a failing probe
-# falls back to attaching.
+# Also requires a real terminal (SSH_TTY) with no complete input line queued
+# on it. ET --command types its command into the pty (and sets SSH_TTY), so
+# attaching would feed that line to tmux as keystrokes. The builtin probe
+# consumes nothing and, in canonical mode, ignores a partial line; Enter or a
+# pasted line during a slow login also skips, and EOF (never seen on a real
+# login pty) reads as queued. Best-effort only: ET starts the shell first and
+# its client sends the command one network round trip later, so the probe
+# wins only when shell startup outlasts that RTT. For a guarantee, put
+# NO_TMUX=1 in the session environment (ET: ssh_config `SetEnv NO_TMUX=1`,
+# applied before the shell starts; plain ssh also needs sshd AcceptEnv).
+# bash 3.2's read -t 0 always fails without reading, so it attaches as before.
 # DS_SSH_AUTO_ATTACH=ds      → attach to default "ds" session
 # DS_SSH_AUTO_ATTACH=dev     → attach to "dev" session
 # NO_TMUX=1                  → skip auto-attach for this login
 if [[ -n "${DS_SSH_AUTO_ATTACH:-}" && -z "$TMUX" && $- == *i* && -n "$SSH_CONNECTION" && -z "$NO_TMUX" && -n "${SSH_TTY:-}" ]] && command -v tmux &>/dev/null; then
-    _ds_stdin_queued=0
-    if command -v perl &>/dev/null && perl -e '$q=pack("L",0);$c=$^O eq "darwin"?0x4004667F:0x541B;exit((ioctl(STDIN,$c,$q)&&unpack("L",$q)>0)?0:1);' &>/dev/null; then
-        _ds_stdin_queued=1
-    fi
-    if (( _ds_stdin_queued == 0 )); then
+    if ! read -t 0 2>/dev/null; then
 INIT_EOF
       echo "        DS_SHELL_NAME=$shell exec ds \"\$DS_SSH_AUTO_ATTACH\""
       cat <<'INIT_EOF'
     fi
-    unset _ds_stdin_queued
 fi
 
 _ds() {
@@ -1403,27 +1405,27 @@ fi
 unset _ds_f _ds_arg _ds_args
 
 # Auto-attach on SSH login (opt-in via DS_SSH_AUTO_ATTACH, skip with NO_TMUX=1).
-# Also requires a real terminal (SSH_TTY) with no command already waiting in
-# it: a typed remote command (e.g. ET --command, whose bytes sit in the pty
-# input queue before the shell reads them) must run instead of being eaten by
-# tmux as keystrokes. SSH_TTY alone cannot tell those apart — ET sets it for
-# command sessions too — so probe queued bytes without consuming them
-# (FIONREAD via perl). A human login has typed nothing yet; a failing probe
-# falls back to attaching.
+# Also requires a real terminal (SSH_TTY) with no complete input line queued
+# on it. ET --command types its command into the pty (and sets SSH_TTY), so
+# attaching would feed that line to tmux as keystrokes. The builtin probe
+# consumes nothing and, in canonical mode, ignores a partial line; Enter or a
+# pasted line during a slow login also skips, and EOF (never seen on a real
+# login pty) reads as queued. Best-effort only: ET starts the shell first and
+# its client sends the command one network round trip later, so the probe
+# wins only when shell startup outlasts that RTT. For a guarantee, put
+# NO_TMUX=1 in the session environment (ET: ssh_config `SetEnv NO_TMUX=1`,
+# applied before the shell starts; plain ssh also needs sshd AcceptEnv).
+# zsh attaches as before when the zsh/zselect module is unavailable.
 # DS_SSH_AUTO_ATTACH=ds      → attach to default "ds" session
 # DS_SSH_AUTO_ATTACH=dev     → attach to "dev" session
 # NO_TMUX=1                  → skip auto-attach for this login
 if [[ -n "${DS_SSH_AUTO_ATTACH:-}" && -z "$TMUX" && -o interactive && -n "$SSH_CONNECTION" && -z "$NO_TMUX" && -n "${SSH_TTY:-}" ]] && command -v tmux >/dev/null 2>&1; then
-    _ds_stdin_queued=0
-    if command -v perl >/dev/null 2>&1 && perl -e '$q=pack("L",0);$c=$^O eq "darwin"?0x4004667F:0x541B;exit((ioctl(STDIN,$c,$q)&&unpack("L",$q)>0)?0:1);' >/dev/null 2>&1; then
-        _ds_stdin_queued=1
-    fi
-    if (( _ds_stdin_queued == 0 )); then
+    if ! { zmodload zsh/zselect 2>/dev/null && zselect -a _ds_ready -t 0 -r 0 2>/dev/null; }; then
 INIT_EOF
       echo "        DS_SHELL_NAME=$shell exec ds \"\$DS_SSH_AUTO_ATTACH\""
       cat <<'INIT_EOF'
     fi
-    unset _ds_stdin_queued
+    unset _ds_ready
 fi
 
 _ds() {
