@@ -6542,25 +6542,35 @@ chmod +x "$attach_probe_bin/ds" "$attach_probe_bin/tmux"
 attach_probe_fifo="$attach_probe_dir/idle.fifo"
 mkfifo "$attach_probe_fifo"
 
-# Run "$@" as an opted-in SSH login with stub ds/tmux first on PATH. The pty
-# shells are truly interactive and save history on exit, so HISTFILE must not
-# be the caller's.
-_attach_probe() {
-  : >"$attach_probe_log"
-  DS_ATTACH_LOG="$attach_probe_log" DS_SSH_AUTO_ATTACH=ds SSH_CONNECTION=x \
-    SSH_TTY=/dev/pts/99 DS_STATE_DIR="$attach_probe_dir/state" \
-    ZDOTDIR="$attach_probe_dir/zdotdir" HISTFILE="$attach_probe_dir/history" TERM=dumb \
-    PATH="$attach_probe_bin:/usr/bin:/bin" \
-    /usr/bin/env -u TMUX -u TMUX_PANE -u NO_TMUX "$@"
-}
+# `env` arguments for an opted-in SSH login with stub ds/tmux first on PATH.
+# The pty shells are truly interactive and save history on exit, so HISTFILE
+# must not be the caller's.
+attach_probe_env=(
+  -u TMUX -u TMUX_PANE -u NO_TMUX
+  DS_ATTACH_LOG="$attach_probe_log" DS_SSH_AUTO_ATTACH=ds SSH_CONNECTION=x
+  SSH_TTY=/dev/pts/99 DS_STATE_DIR="$attach_probe_dir/state"
+  ZDOTDIR="$attach_probe_dir/zdotdir" HISTFILE="$attach_probe_dir/history" TERM=dumb
+  PATH="$attach_probe_bin:/usr/bin:/bin"
+)
 
-# Run "$@" with stdin on an idle FIFO whose writer the test holds open. A
-# probe that blocks (a regression) gets EOF when that writer closes at the
-# deadline, and is killed if it still lingers.
-_attach_probe_idle() {
-  local pid deadline=$((SECONDS + 10))
+# Run "$@" as that login with line $1 queued on stdin, or with stdin on an
+# idle FIFO whose writer the test holds open when $1 is empty; stdout goes to
+# $attach_probe_out. A here-string is filled before the shell starts, so the
+# probe cannot race it. Bounded: a probe that blocks (a regression) gets EOF
+# when the FIFO writer closes at the deadline, and is killed if it lingers.
+# `env` runs directly in the background so $! is the shell itself.
+attach_probe_out="$attach_probe_dir/out"
+_attach_probe_run() {
+  local queued="$1" pid deadline=$((SECONDS + 10))
+  shift
+  : >"$attach_probe_log"
   exec 9<>"$attach_probe_fifo"
-  _attach_probe "$@" <"$attach_probe_fifo" >/dev/null 2>&1 9>&- &
+  if [[ -n "$queued" ]]; then
+    /usr/bin/env "${attach_probe_env[@]}" "$@" <<<"$queued" >"$attach_probe_out" 2>/dev/null 9>&- &
+  else
+    /usr/bin/env "${attach_probe_env[@]}" "$@" <"$attach_probe_fifo" >"$attach_probe_out" \
+      2>/dev/null 9>&- &
+  fi
   pid=$!
   while kill -0 "$pid" 2>/dev/null && ((SECONDS < deadline)); do sleep 0.05; done
   exec 9>&-
@@ -6575,8 +6585,9 @@ _attach_probe_idle() {
 _attach_probe_pty() {
   local queued="$1"
   shift
-  if ! _attach_probe "$REAL_PYTHON3" -I "$SCRIPT_DIR/pty-login.py" --timeout 10 \
-    "$queued" -- "$@" >/dev/null 2>"$attach_probe_dir/pty.err"; then
+  : >"$attach_probe_log"
+  if ! /usr/bin/env "${attach_probe_env[@]}" "$REAL_PYTHON3" -I "$SCRIPT_DIR/pty-login.py" \
+    --timeout 10 "$queued" -- "$@" >/dev/null 2>"$attach_probe_dir/pty.err"; then
     sed 's/^/    pty-login: /' "$attach_probe_dir/pty.err" >&2
   fi
 }
@@ -6598,15 +6609,14 @@ _assert_attach_probe_pty() {
 
 DS_STATE_DIR="$attach_probe_dir/gen" "$SCRIPT_DIR/../bin/ds" init bash >"$bash_init_file"
 # shellcheck disable=SC2016 # $1 expands inside the test shell program.
-# A here-string is filled before the shell starts, so the probe cannot race it.
-attach_probe_out=$(_attach_probe "$BASH" --noprofile --norc -i \
+_attach_probe_run 'echo PROBE-KEPT' "$BASH" --noprofile --norc -i \
   -c 'source "$1"; IFS= read -r _t_leftover || true; printf "LEFTOVER=[%s]\n" "$_t_leftover"' \
-  bash "$bash_init_file" 2>/dev/null <<<'echo PROBE-KEPT')
+  bash "$bash_init_file"
 _assert_contains "ds init bash: queued stdin is preserved for the shell" \
-  "LEFTOVER=[echo PROBE-KEPT]" "$attach_probe_out"
+  "LEFTOVER=[echo PROBE-KEPT]" "$(cat "$attach_probe_out")"
 _assert_eq "ds init bash: queued stdin skips auto-attach" "" "$(cat "$attach_probe_log")"
 # shellcheck disable=SC2016 # $1 expands inside the test shell program.
-_attach_probe_idle "$BASH" --noprofile --norc -i -c 'source "$1"' bash "$bash_init_file"
+_attach_probe_run "" "$BASH" --noprofile --norc -i -c 'source "$1"' bash "$bash_init_file"
 _assert_eq "ds init bash: idle stdin still attaches" "ATTACH ds" "$(cat "$attach_probe_log")"
 if [[ -n "$REAL_PYTHON3" ]]; then
   _assert_attach_probe_pty bash "$BASH" --noprofile --rcfile "$bash_init_file" -i
@@ -6751,24 +6761,24 @@ if [[ -n "$REAL_ZSH" ]]; then
 
   DS_STATE_DIR="$attach_probe_dir/gen" "$SCRIPT_DIR/../bin/ds" init zsh >"$zsh_init_file"
   # shellcheck disable=SC2016 # $1 and zsh parameters expand inside the zsh program.
-  attach_probe_out=$(_attach_probe "$REAL_ZSH" -fic '
+  _attach_probe_run 'echo PROBE-KEPT' "$REAL_ZSH" -fic '
     reply=(caller)
     source "$1"
     IFS= read -r _t_leftover || true
     print -r -- "LEFTOVER=[$_t_leftover] REPLY=[$reply] READY=[${_ds_ready-unset}]"
-  ' zsh "$zsh_init_file" 2>/dev/null <<<'echo PROBE-KEPT')
+  ' zsh "$zsh_init_file"
   _assert_contains "ds init zsh: queued stdin is preserved for the shell" \
-    "LEFTOVER=[echo PROBE-KEPT]" "$attach_probe_out"
+    "LEFTOVER=[echo PROBE-KEPT]" "$(cat "$attach_probe_out")"
   _assert_contains "ds init zsh: queued-input probe leaves reply alone" \
-    "REPLY=[caller] READY=[unset]" "$attach_probe_out"
+    "REPLY=[caller] READY=[unset]" "$(cat "$attach_probe_out")"
   _assert_eq "ds init zsh: queued stdin skips auto-attach" "" "$(cat "$attach_probe_log")"
   # shellcheck disable=SC2016 # $1 expands inside the zsh program.
-  _attach_probe_idle "$REAL_ZSH" -fic 'source "$1"' zsh "$zsh_init_file"
+  _attach_probe_run "" "$REAL_ZSH" -fic 'source "$1"' zsh "$zsh_init_file"
   _assert_eq "ds init zsh: idle stdin still attaches" "ATTACH ds" "$(cat "$attach_probe_log")"
   # Without zsh/zselect the probe cannot run, so the login attaches as before.
   # shellcheck disable=SC2016 # $1 expands inside the zsh program.
-  _attach_probe "$REAL_ZSH" -fic 'zmodload() { return 1; }; source "$1"' zsh "$zsh_init_file" \
-    >/dev/null 2>&1 <<<'echo PROBE-KEPT' || true
+  _attach_probe_run 'echo PROBE-KEPT' "$REAL_ZSH" -fic 'zmodload() { return 1; }; source "$1"' \
+    zsh "$zsh_init_file"
   _assert_eq "ds init zsh: missing zselect falls back to attaching" "ATTACH ds" \
     "$(cat "$attach_probe_log")"
   if [[ -n "$REAL_PYTHON3" ]]; then
