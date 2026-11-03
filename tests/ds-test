@@ -6497,6 +6497,7 @@ result=$("$SCRIPT_DIR/../bin/ds" init bash 2>&1)
 _assert_contains "ds init bash: wraps ds invocation" 'DS_SHELL_NAME=bash command ds "$@"' "$result"
 _assert_contains "ds init bash: includes bash shell names" 'compgen -W "bash zsh"' "$result"
 _assert_contains "ds init bash: auto-attach requires a real terminal" 'SSH_TTY:-}' "$result"
+_assert_contains "ds init bash: auto-attach probes queued stdin" '_ds_stdin_queued' "$result"
 _assert_contains "ds init bash: emits shared connect config glob" \
   "local connect_config_glob=$(_shell_literal "$_DS_CONNECT_CONFIG_GLOB")" "$result"
 _assert_contains "ds init bash: emits shared profile config glob" \
@@ -6520,6 +6521,38 @@ bash -n "$bash_init_file" >/dev/null 2>&1
 rc=$?
 set -e
 _assert_exit "ds init bash: generated snippet parses" 0 "$rc"
+
+# Auto-attach must not hijack a session whose command is already queued on
+# stdin (e.g. ET --command bytes typed into the pty before the shell reads
+# them): attaching would feed them to tmux as keystrokes instead of running
+# them. Empty stdin still attaches, as does a login where the probe itself
+# is unavailable.
+attach_probe_bin=$(_tmpdir)
+attach_probe_log=$(_tmpdir)/attach.log
+cat >"$attach_probe_bin/ds" <<'EOF'
+#!/bin/bash
+printf 'ATTACH %s\n' "$*" >>"${DS_ATTACH_LOG:?}"
+EOF
+chmod +x "$attach_probe_bin/ds"
+printf '#!/bin/bash\nexit 0\n' >"$attach_probe_bin/tmux"
+chmod +x "$attach_probe_bin/tmux"
+DS_STATE_DIR=$(_tmpdir)/gen-attach "$SCRIPT_DIR/../bin/ds" init bash >"$bash_init_file"
+: >"$attach_probe_log"
+# shellcheck disable=SC2016 # $1 expands inside the test shell program.
+attach_probe_out=$(printf 'echo PROBE-KEPT\n' | DS_ATTACH_LOG="$attach_probe_log" DS_SSH_AUTO_ATTACH=ds SSH_CONNECTION=x SSH_TTY=/dev/pts/99 DS_STATE_DIR=$(_tmpdir)/nostate PATH="$attach_probe_bin:/usr/bin:/bin" \
+  /usr/bin/env -u TMUX -u NO_TMUX "$BASH" --noprofile --norc -i -c 'source "$1"; IFS= read -r _t_leftover || true; printf "LEFTOVER=[%s]\n" "$_t_leftover"' bash "$bash_init_file" 2>/dev/null)
+_assert_contains "ds init bash: queued stdin is preserved for the shell" "LEFTOVER=[echo PROBE-KEPT]" "$attach_probe_out"
+_assert_eq "ds init bash: queued stdin skips auto-attach" "" "$(cat "$attach_probe_log")"
+: >"$attach_probe_log"
+# shellcheck disable=SC2016 # $1 expands inside the test shell program.
+DS_ATTACH_LOG="$attach_probe_log" DS_SSH_AUTO_ATTACH=ds SSH_CONNECTION=x SSH_TTY=/dev/pts/99 DS_STATE_DIR=$(_tmpdir)/nostate PATH="$attach_probe_bin:/usr/bin:/bin" \
+  /usr/bin/env -u TMUX -u NO_TMUX "$BASH" --noprofile --norc -i -c 'source "$1"' bash "$bash_init_file" </dev/null >/dev/null 2>&1 || true
+_assert_contains "ds init bash: empty stdin still attaches" "ATTACH ds" "$(cat "$attach_probe_log")"
+: >"$attach_probe_log"
+# shellcheck disable=SC2016 # $1 expands inside the test shell program.
+DS_ATTACH_LOG="$attach_probe_log" DS_SSH_AUTO_ATTACH=ds SSH_CONNECTION=x SSH_TTY=/dev/pts/99 DS_STATE_DIR=$(_tmpdir)/nostate PATH="$attach_probe_bin" \
+  /usr/bin/env -u TMUX -u NO_TMUX "$BASH" --noprofile --norc -i -c 'source "$1"' bash "$bash_init_file" </dev/null >/dev/null 2>&1 || true
+_assert_contains "ds init bash: missing perl falls back to attaching" "ATTACH ds" "$(cat "$attach_probe_log")"
 
 handoff_bin=$(_tmpdir)
 handoff_home=$(_tmpdir)
@@ -6613,6 +6646,7 @@ _assert_contains "ds init zsh: wraps ds invocation" 'DS_SHELL_NAME=zsh command d
 _assert_contains "ds init zsh: defines zsh completion" 'compdef _ds ds' "$result"
 _assert_contains "ds init zsh: offers both shells" 'shells=(bash zsh)' "$result"
 _assert_contains "ds init zsh: auto-attach requires a real terminal" 'SSH_TTY:-}' "$result"
+_assert_contains "ds init zsh: auto-attach probes queued stdin" '_ds_stdin_queued' "$result"
 _assert_contains "ds init zsh: emits shared connect config glob" \
   "local connect_config_glob=$(_shell_literal "$_DS_CONNECT_CONFIG_GLOB")" "$result"
 _assert_contains "ds init zsh: emits shared profile config glob" \
@@ -6647,6 +6681,19 @@ if [[ -n "$REAL_ZSH" ]]; then
     "$REAL_ZSH" -fic 'source "$1"' zsh "$zsh_init_file" >/dev/null 2>&1
   _assert_eq "ds init zsh: connect handoff preserves argument boundaries" \
     $'COUNT=3\nARG=-k\nARG=dev work\nARG=dev*' "$(cat "$handoff_log")"
+
+  DS_STATE_DIR=$(_tmpdir)/gen-attach "$SCRIPT_DIR/../bin/ds" init zsh >"$zsh_init_file"
+  : >"$attach_probe_log"
+  # shellcheck disable=SC2016 # $1 expands inside the zsh program.
+  attach_probe_out=$(printf 'echo PROBE-KEPT\n' | DS_ATTACH_LOG="$attach_probe_log" DS_SSH_AUTO_ATTACH=ds SSH_CONNECTION=x SSH_TTY=/dev/pts/99 DS_STATE_DIR=$(_tmpdir)/nostate PATH="$attach_probe_bin:/usr/bin:/bin" \
+    /usr/bin/env -u TMUX -u NO_TMUX "$REAL_ZSH" -fic 'source "$1"; IFS= read -r _t_leftover || true; print "LEFTOVER=[$_t_leftover]"' zsh "$zsh_init_file" 2>/dev/null)
+  _assert_contains "ds init zsh: queued stdin is preserved for the shell" "LEFTOVER=[echo PROBE-KEPT]" "$attach_probe_out"
+  _assert_eq "ds init zsh: queued stdin skips auto-attach" "" "$(cat "$attach_probe_log")"
+  : >"$attach_probe_log"
+  # shellcheck disable=SC2016 # $1 expands inside the zsh program.
+  DS_ATTACH_LOG="$attach_probe_log" DS_SSH_AUTO_ATTACH=ds SSH_CONNECTION=x SSH_TTY=/dev/pts/99 DS_STATE_DIR=$(_tmpdir)/nostate PATH="$attach_probe_bin:/usr/bin:/bin" \
+    /usr/bin/env -u TMUX -u NO_TMUX "$REAL_ZSH" -fic 'source "$1"' zsh "$zsh_init_file" </dev/null >/dev/null 2>&1 || true
+  _assert_contains "ds init zsh: empty stdin still attaches" "ATTACH ds" "$(cat "$attach_probe_log")"
 
   zsh_completion_home=$(_tmpdir)
   zsh_completion_xdg=$(_tmpdir)

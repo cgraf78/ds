@@ -1274,16 +1274,27 @@ fi
 unset _ds_f _ds_arg _ds_args
 
 # Auto-attach on SSH login (opt-in via DS_SSH_AUTO_ATTACH, skip with NO_TMUX=1).
-# Also requires a real terminal (SSH_TTY): a login with no controlling tty —
-# e.g. an ET/command session holding a port-forward keepalive — is "interactive"
-# but has no pty, and should not be hijacked by ds. A human ssh login gets a pty.
+# Also requires a real terminal (SSH_TTY) with no command already waiting in
+# it: a typed remote command (e.g. ET --command, whose bytes sit in the pty
+# input queue before the shell reads them) must run instead of being eaten by
+# tmux as keystrokes. SSH_TTY alone cannot tell those apart — ET sets it for
+# command sessions too — so probe queued bytes without consuming them
+# (FIONREAD via perl). A human login has typed nothing yet; a failing probe
+# falls back to attaching.
 # DS_SSH_AUTO_ATTACH=ds      → attach to default "ds" session
 # DS_SSH_AUTO_ATTACH=dev     → attach to "dev" session
 # NO_TMUX=1                  → skip auto-attach for this login
 if [[ -n "${DS_SSH_AUTO_ATTACH:-}" && -z "$TMUX" && $- == *i* && -n "$SSH_CONNECTION" && -z "$NO_TMUX" && -n "${SSH_TTY:-}" ]] && command -v tmux &>/dev/null; then
+    _ds_stdin_queued=0
+    if command -v perl &>/dev/null && perl -e '$q=pack("L",0);$c=$^O eq "darwin"?0x4004667F:0x541B;exit((ioctl(STDIN,$c,$q)&&unpack("L",$q)>0)?0:1);' &>/dev/null; then
+        _ds_stdin_queued=1
+    fi
+    if (( _ds_stdin_queued == 0 )); then
 INIT_EOF
-      echo "    DS_SHELL_NAME=$shell exec ds \"\$DS_SSH_AUTO_ATTACH\""
+      echo "        DS_SHELL_NAME=$shell exec ds \"\$DS_SSH_AUTO_ATTACH\""
       cat <<'INIT_EOF'
+    fi
+    unset _ds_stdin_queued
 fi
 
 _ds() {
@@ -1392,16 +1403,27 @@ fi
 unset _ds_f _ds_arg _ds_args
 
 # Auto-attach on SSH login (opt-in via DS_SSH_AUTO_ATTACH, skip with NO_TMUX=1).
-# Also requires a real terminal (SSH_TTY): a login with no controlling tty —
-# e.g. an ET/command session holding a port-forward keepalive — is "interactive"
-# but has no pty, and should not be hijacked by ds. A human ssh login gets a pty.
+# Also requires a real terminal (SSH_TTY) with no command already waiting in
+# it: a typed remote command (e.g. ET --command, whose bytes sit in the pty
+# input queue before the shell reads them) must run instead of being eaten by
+# tmux as keystrokes. SSH_TTY alone cannot tell those apart — ET sets it for
+# command sessions too — so probe queued bytes without consuming them
+# (FIONREAD via perl). A human login has typed nothing yet; a failing probe
+# falls back to attaching.
 # DS_SSH_AUTO_ATTACH=ds      → attach to default "ds" session
 # DS_SSH_AUTO_ATTACH=dev     → attach to "dev" session
 # NO_TMUX=1                  → skip auto-attach for this login
 if [[ -n "${DS_SSH_AUTO_ATTACH:-}" && -z "$TMUX" && -o interactive && -n "$SSH_CONNECTION" && -z "$NO_TMUX" && -n "${SSH_TTY:-}" ]] && command -v tmux >/dev/null 2>&1; then
+    _ds_stdin_queued=0
+    if command -v perl >/dev/null 2>&1 && perl -e '$q=pack("L",0);$c=$^O eq "darwin"?0x4004667F:0x541B;exit((ioctl(STDIN,$c,$q)&&unpack("L",$q)>0)?0:1);' >/dev/null 2>&1; then
+        _ds_stdin_queued=1
+    fi
+    if (( _ds_stdin_queued == 0 )); then
 INIT_EOF
-      echo "    DS_SHELL_NAME=$shell exec ds \"\$DS_SSH_AUTO_ATTACH\""
+      echo "        DS_SHELL_NAME=$shell exec ds \"\$DS_SSH_AUTO_ATTACH\""
       cat <<'INIT_EOF'
+    fi
+    unset _ds_stdin_queued
 fi
 
 _ds() {
