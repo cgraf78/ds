@@ -87,7 +87,7 @@ Remote commands (`@host`) need `ds` installed on the remote host:
   opens `et`. The remote interactive shell must run `eval "$(ds init bash)"`
   (or `zsh`, see [Shell Integration](#shell-integration)) to pick it up. A
   shell inside tmux, a login with `NO_TMUX=1` or a queued command, and a
-  request more than five minutes old do not pick it up (see
+  request more than about five minutes old do not pick it up (see
   [Auto-attach on SSH login](#auto-attach-on-ssh-login)).
 
 `-L` and `-R` cover ad-hoc forwards for one connection. For a declared set of
@@ -149,9 +149,10 @@ handoff request on the host for the ET login to pick up. A login with
 `NO_TMUX=1` or a queued command leaves the request for a later login instead of
 taking it: with `NO_TMUX=1`, a command session that logs in first can never take
 it; without it, the queued-command check is the same best-effort guard as above.
-Shells inside tmux never take the request, and one more than five minutes old is
-discarded, so a request left behind (for example after pressing Enter while the
-ET login was still starting) cannot take over an unrelated shell later.
+Shells inside tmux never take the request, and one more than about five minutes
+old is discarded. A request left behind (for example after pressing Enter while
+the ET login was still starting) can still be taken by another interactive login
+outside tmux within those minutes, but not after.
 
 ## Tmux Resurrect Integration
 

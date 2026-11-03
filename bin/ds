@@ -1304,15 +1304,18 @@ INIT_EOF
 
 # Connect handoff: attach-next lets connect plugins request a session. A shell
 # inside tmux or a login that must not enter tmux (above) leaves the file for
-# the next login. A file older than the -mmin limit is a leftover (connect
-# plugins write it just before connecting) and is dropped instead.
+# the next login. A file older than the -mmin limit (about five minutes; BSD
+# find rounds ages up) is a leftover, since connect plugins write it just before
+# connecting, and is dropped instead; when find is missing or fails, it is
+# kept. `command` keeps user aliases and functions for find and rm out of it.
 INIT_EOF
       _emit_handoff_file_contract
       # shellcheck disable=SC2016 # Emitted shell code expands at login.
-      printf 'if [[ $- == *i* && -f "$_ds_f" && -z "$(find "$_ds_f" -mmin -%s 2>/dev/null)" ]]; then\n' \
-        "$_DS_HANDOFF_TTL_MINUTES"
+      printf '%s\n' \
+        'if [[ $- == *i* && -f "$_ds_f" ]] &&' \
+        "    [[ -n \"\$(command find \"\$_ds_f\" ! -mmin -$_DS_HANDOFF_TTL_MINUTES 2>/dev/null)\" ]]; then"
       cat <<'INIT_EOF'
-    rm -f "$_ds_f"
+    command rm -f "$_ds_f"
 fi
 INIT_EOF
       # shellcheck disable=SC2016 # Emitted shell code expands at login.
@@ -1323,7 +1326,7 @@ INIT_EOF
     while IFS= read -r _ds_arg; do
         _ds_args+=("$_ds_arg")
     done < "$_ds_f"
-    rm -f "$_ds_f"
+    command rm -f "$_ds_f"
 INIT_EOF
       echo "    ((\${#_ds_args[@]} == 0)) || DS_SHELL_NAME=$shell exec ds \"\${_ds_args[@]}\""
       cat <<'INIT_EOF'
@@ -1438,15 +1441,18 @@ INIT_EOF
 
 # Connect handoff: attach-next lets connect plugins request a session. A shell
 # inside tmux or a login that must not enter tmux (above) leaves the file for
-# the next login. A file older than the -mmin limit is a leftover (connect
-# plugins write it just before connecting) and is dropped instead.
+# the next login. A file older than the -mmin limit (about five minutes; BSD
+# find rounds ages up) is a leftover, since connect plugins write it just before
+# connecting, and is dropped instead; when find is missing or fails, it is
+# kept. `command` keeps user aliases and functions for find and rm out of it.
 INIT_EOF
       _emit_handoff_file_contract
       # shellcheck disable=SC2016 # Emitted shell code expands at login.
-      printf 'if [[ -o interactive && -f "$_ds_f" && -z "$(find "$_ds_f" -mmin -%s 2>/dev/null)" ]]; then\n' \
-        "$_DS_HANDOFF_TTL_MINUTES"
+      printf '%s\n' \
+        'if [[ -o interactive && -f "$_ds_f" ]] &&' \
+        "    [[ -n \"\$(command find \"\$_ds_f\" ! -mmin -$_DS_HANDOFF_TTL_MINUTES 2>/dev/null)\" ]]; then"
       cat <<'INIT_EOF'
-    rm -f "$_ds_f"
+    command rm -f "$_ds_f"
 fi
 INIT_EOF
       # shellcheck disable=SC2016 # Emitted shell code expands at login.
@@ -1457,7 +1463,7 @@ INIT_EOF
     while IFS= read -r _ds_arg; do
         _ds_args+=("$_ds_arg")
     done < "$_ds_f"
-    rm -f "$_ds_f"
+    command rm -f "$_ds_f"
 INIT_EOF
       echo "    ((\${#_ds_args[@]} == 0)) || DS_SHELL_NAME=$shell exec ds \"\${_ds_args[@]}\""
       cat <<'INIT_EOF'
