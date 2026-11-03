@@ -6605,6 +6605,23 @@ _assert_attach_probe_pty() {
   _attach_probe_pty "echo partial" "$@"
   _assert_eq "ds init $label: partial pty line still attaches" "ATTACH ds" \
     "$(cat "$attach_probe_log")"
+  # An ET command session that logs in while `ds @host` via ET has its
+  # attach-next pending must run its command and leave the handoff alone.
+  mkdir -p "$attach_probe_dir/gen"
+  printf '%s\n' dev >"$attach_probe_dir/gen/attach-next"
+  rm -f "$marker"
+  _attach_probe_pty ": >'$marker'; exit"$'\n' "$@"
+  _assert_eq "ds init $label: queued pty line skips a pending handoff" "" \
+    "$(cat "$attach_probe_log")"
+  _assert_file_exists "ds init $label: queued pty line runs despite a pending handoff" "$marker"
+  _assert_file_exists "ds init $label: queued pty line leaves the handoff pending" \
+    "$attach_probe_dir/gen/attach-next"
+  printf '%s\n' dev >"$attach_probe_dir/gen/attach-next"
+  _attach_probe_pty "" "$@"
+  _assert_eq "ds init $label: idle pty takes a pending handoff" "ATTACH dev" \
+    "$(cat "$attach_probe_log")"
+  _assert_file_missing "ds init $label: idle pty consumes the handoff" \
+    "$attach_probe_dir/gen/attach-next"
 }
 
 DS_STATE_DIR="$attach_probe_dir/gen" "$SCRIPT_DIR/../bin/ds" init bash >"$bash_init_file"
@@ -6644,13 +6661,47 @@ for arg in "$@"; do
 done
 EOF
 chmod +x "$handoff_bin/ds"
-printf '%s\n' -k 'dev work' 'dev*' >"$handoff_state/attach-next"
+
+# Check the connect handoff for $1 with init file $2, where "$3..." starts that
+# shell running a -c program. An idle login takes the handoff; a login with a
+# command queued or with NO_TMUX=1 must leave attach-next for the next login.
+_assert_handoff_gate() {
+  local label="$1" init_file="$2"
+  shift 2
+  local -a handoff_env=(/usr/bin/env -u DS_SSH_AUTO_ATTACH HOME="$handoff_home"
+    DS_HANDOFF_LOG="$handoff_log" PATH="$handoff_bin:/usr/bin:/bin")
+  # shellcheck disable=SC2016 # $1 expands inside the test shell program.
+  local program='source "$1"; IFS= read -r _t_leftover || true; printf "LEFTOVER=[%s]\n" "$_t_leftover"'
+
+  : >"$handoff_log"
+  printf '%s\n' -k 'dev work' 'dev*' >"$handoff_state/attach-next"
+  _attach_probe_run "" "${handoff_env[@]}" "$@" "$program" "$label" "$init_file"
+  _assert_eq "ds init $label: connect handoff preserves argument boundaries" \
+    $'COUNT=3\nARG=-k\nARG=dev work\nARG=dev*' "$(cat "$handoff_log")"
+  _assert_file_missing "ds init $label: connect handoff consumes attach-next" \
+    "$handoff_state/attach-next"
+
+  : >"$handoff_log"
+  printf '%s\n' dev >"$handoff_state/attach-next"
+  _attach_probe_run 'echo PROBE-KEPT' "${handoff_env[@]}" "$@" "$program" "$label" "$init_file"
+  _assert_eq "ds init $label: queued command skips the connect handoff" "" "$(cat "$handoff_log")"
+  _assert_file_exists "ds init $label: queued command leaves attach-next pending" \
+    "$handoff_state/attach-next"
+  _assert_contains "ds init $label: queued command survives the handoff check" \
+    "LEFTOVER=[echo PROBE-KEPT]" "$(cat "$attach_probe_out")"
+
+  : >"$handoff_log"
+  printf '%s\n' dev >"$handoff_state/attach-next"
+  _attach_probe_run "" "${handoff_env[@]}" NO_TMUX=1 "$@" "$program" "$label" "$init_file"
+  _assert_eq "ds init $label: NO_TMUX skips the connect handoff" "" "$(cat "$handoff_log")"
+  _assert_file_exists "ds init $label: NO_TMUX leaves attach-next pending" \
+    "$handoff_state/attach-next"
+  rm -f "$handoff_state/attach-next"
+}
+
 HOME="$handoff_home" DS_STATE_DIR="$handoff_state" "$SCRIPT_DIR/../bin/ds" init bash \
   >"$bash_init_file"
-HOME="$handoff_home" DS_HANDOFF_LOG="$handoff_log" PATH="$handoff_bin:$PATH" \
-  bash --noprofile --norc -ic 'source "$1"' bash "$bash_init_file" >/dev/null 2>&1
-_assert_eq "ds init bash: connect handoff preserves argument boundaries" \
-  $'COUNT=3\nARG=-k\nARG=dev work\nARG=dev*' "$(cat "$handoff_log")"
+_assert_handoff_gate bash "$bash_init_file" "$BASH" --noprofile --norc -i -c
 
 bash_completion_home=$(_tmpdir)
 bash_completion_xdg=$(_tmpdir)
@@ -6749,15 +6800,9 @@ if [[ -n "$REAL_ZSH" ]]; then
   set -e
   _assert_exit "ds init zsh: generated snippet parses" 0 "$rc"
 
-  : >"$handoff_log"
-  printf '%s\n' -k 'dev work' 'dev*' >"$handoff_state/attach-next"
   HOME="$handoff_home" DS_STATE_DIR="$handoff_state" "$SCRIPT_DIR/../bin/ds" init zsh \
     >"$zsh_init_file"
-  # shellcheck disable=SC2016 # $1 expands inside the zsh program.
-  HOME="$handoff_home" DS_HANDOFF_LOG="$handoff_log" PATH="$handoff_bin:$PATH" \
-    "$REAL_ZSH" -fic 'source "$1"' zsh "$zsh_init_file" >/dev/null 2>&1
-  _assert_eq "ds init zsh: connect handoff preserves argument boundaries" \
-    $'COUNT=3\nARG=-k\nARG=dev work\nARG=dev*' "$(cat "$handoff_log")"
+  _assert_handoff_gate zsh "$zsh_init_file" "$REAL_ZSH" -f -i -c
 
   DS_STATE_DIR="$attach_probe_dir/gen" "$SCRIPT_DIR/../bin/ds" init zsh >"$zsh_init_file"
   # shellcheck disable=SC2016 # $1 and zsh parameters expand inside the zsh program.

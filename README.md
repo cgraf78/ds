@@ -140,6 +140,14 @@ Host devbox-cmd
 ET applies `SetEnv` before starting the shell; plain `ssh` also needs a matching
 `AcceptEnv NO_TMUX` in the server's `sshd_config`.
 
+The same rule applies to `ds <session> @host` over ET, which leaves a one-shot
+handoff file on the host for the next interactive login to pick up: a login with
+`NO_TMUX=1` or a queued command leaves that handoff for the next login instead
+of taking it. With `NO_TMUX=1` set, a command session that logs in first can
+never take it; without it, the queued-command check is the same best-effort
+guard as above. Pressing Enter while that ET login is still starting also leaves
+the handoff pending, so the next interactive login picks it up.
+
 ## Tmux Resurrect Integration
 
 `ds` can preserve its session identity inside a tmux-resurrect snapshot. This
