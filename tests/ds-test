@@ -6529,6 +6529,7 @@ _assert_exit "ds init bash: generated snippet parses" 0 "$rc"
 # is unavailable.
 attach_probe_bin=$(_tmpdir)
 attach_probe_log=$(_tmpdir)/attach.log
+REAL_PERL=$(command -v perl || true)
 cat >"$attach_probe_bin/ds" <<'EOF'
 #!/bin/bash
 printf 'ATTACH %s\n' "$*" >>"${DS_ATTACH_LOG:?}"
@@ -6537,12 +6538,14 @@ chmod +x "$attach_probe_bin/ds"
 printf '#!/bin/bash\nexit 0\n' >"$attach_probe_bin/tmux"
 chmod +x "$attach_probe_bin/tmux"
 DS_STATE_DIR=$(_tmpdir)/gen-attach "$SCRIPT_DIR/../bin/ds" init bash >"$bash_init_file"
-: >"$attach_probe_log"
-# shellcheck disable=SC2016 # $1 expands inside the test shell program.
-attach_probe_out=$(printf 'echo PROBE-KEPT\n' | DS_ATTACH_LOG="$attach_probe_log" DS_SSH_AUTO_ATTACH=ds SSH_CONNECTION=x SSH_TTY=/dev/pts/99 DS_STATE_DIR=$(_tmpdir)/nostate PATH="$attach_probe_bin:/usr/bin:/bin" \
-  /usr/bin/env -u TMUX -u NO_TMUX "$BASH" --noprofile --norc -i -c 'source "$1"; IFS= read -r _t_leftover || true; printf "LEFTOVER=[%s]\n" "$_t_leftover"' bash "$bash_init_file" 2>/dev/null)
-_assert_contains "ds init bash: queued stdin is preserved for the shell" "LEFTOVER=[echo PROBE-KEPT]" "$attach_probe_out"
-_assert_eq "ds init bash: queued stdin skips auto-attach" "" "$(cat "$attach_probe_log")"
+if [[ -n "$REAL_PERL" ]]; then
+  : >"$attach_probe_log"
+  # shellcheck disable=SC2016 # $1 expands inside the test shell program.
+  attach_probe_out=$(printf 'echo PROBE-KEPT\n' | DS_ATTACH_LOG="$attach_probe_log" DS_SSH_AUTO_ATTACH=ds SSH_CONNECTION=x SSH_TTY=/dev/pts/99 DS_STATE_DIR=$(_tmpdir)/nostate PATH="$attach_probe_bin:/usr/bin:/bin" \
+    /usr/bin/env -u TMUX -u NO_TMUX "$BASH" --noprofile --norc -i -c 'source "$1"; IFS= read -r _t_leftover || true; printf "LEFTOVER=[%s]\n" "$_t_leftover"' bash "$bash_init_file" 2>/dev/null)
+  _assert_contains "ds init bash: queued stdin is preserved for the shell" "LEFTOVER=[echo PROBE-KEPT]" "$attach_probe_out"
+  _assert_eq "ds init bash: queued stdin skips auto-attach" "" "$(cat "$attach_probe_log")"
+fi
 : >"$attach_probe_log"
 # shellcheck disable=SC2016 # $1 expands inside the test shell program.
 DS_ATTACH_LOG="$attach_probe_log" DS_SSH_AUTO_ATTACH=ds SSH_CONNECTION=x SSH_TTY=/dev/pts/99 DS_STATE_DIR=$(_tmpdir)/nostate PATH="$attach_probe_bin:/usr/bin:/bin" \
@@ -6683,12 +6686,14 @@ if [[ -n "$REAL_ZSH" ]]; then
     $'COUNT=3\nARG=-k\nARG=dev work\nARG=dev*' "$(cat "$handoff_log")"
 
   DS_STATE_DIR=$(_tmpdir)/gen-attach "$SCRIPT_DIR/../bin/ds" init zsh >"$zsh_init_file"
-  : >"$attach_probe_log"
-  # shellcheck disable=SC2016 # $1 expands inside the zsh program.
-  attach_probe_out=$(printf 'echo PROBE-KEPT\n' | DS_ATTACH_LOG="$attach_probe_log" DS_SSH_AUTO_ATTACH=ds SSH_CONNECTION=x SSH_TTY=/dev/pts/99 DS_STATE_DIR=$(_tmpdir)/nostate PATH="$attach_probe_bin:/usr/bin:/bin" \
-    /usr/bin/env -u TMUX -u NO_TMUX "$REAL_ZSH" -fic 'source "$1"; IFS= read -r _t_leftover || true; print "LEFTOVER=[$_t_leftover]"' zsh "$zsh_init_file" 2>/dev/null)
-  _assert_contains "ds init zsh: queued stdin is preserved for the shell" "LEFTOVER=[echo PROBE-KEPT]" "$attach_probe_out"
-  _assert_eq "ds init zsh: queued stdin skips auto-attach" "" "$(cat "$attach_probe_log")"
+  if [[ -n "$REAL_PERL" ]]; then
+    : >"$attach_probe_log"
+    # shellcheck disable=SC2016 # $1 expands inside the zsh program.
+    attach_probe_out=$(printf 'echo PROBE-KEPT\n' | DS_ATTACH_LOG="$attach_probe_log" DS_SSH_AUTO_ATTACH=ds SSH_CONNECTION=x SSH_TTY=/dev/pts/99 DS_STATE_DIR=$(_tmpdir)/nostate PATH="$attach_probe_bin:/usr/bin:/bin" \
+      /usr/bin/env -u TMUX -u NO_TMUX "$REAL_ZSH" -fic 'source "$1"; IFS= read -r _t_leftover || true; print "LEFTOVER=[$_t_leftover]"' zsh "$zsh_init_file" 2>/dev/null)
+    _assert_contains "ds init zsh: queued stdin is preserved for the shell" "LEFTOVER=[echo PROBE-KEPT]" "$attach_probe_out"
+    _assert_eq "ds init zsh: queued stdin skips auto-attach" "" "$(cat "$attach_probe_log")"
+  fi
   : >"$attach_probe_log"
   # shellcheck disable=SC2016 # $1 expands inside the zsh program.
   DS_ATTACH_LOG="$attach_probe_log" DS_SSH_AUTO_ATTACH=ds SSH_CONNECTION=x SSH_TTY=/dev/pts/99 DS_STATE_DIR=$(_tmpdir)/nostate PATH="$attach_probe_bin:/usr/bin:/bin" \
