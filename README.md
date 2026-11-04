@@ -85,7 +85,10 @@ Remote commands (`@host`) need `ds` installed on the remote host:
   `ds: not found on remote PATH`.
 - With `et`, `ds` records the request on the remote host over `ssh`, then
   opens `et`. The remote interactive shell must run `eval "$(ds init bash)"`
-  (or `zsh`, see [Shell Integration](#shell-integration)) to pick it up.
+  (or `zsh`, see [Shell Integration](#shell-integration)) to pick it up. A
+  shell inside tmux, a login with `NO_TMUX=1` or a queued command, and a
+  request more than about five minutes old do not pick it up (see
+  [Auto-attach on SSH login](#auto-attach-on-ssh-login)).
 
 `-L` and `-R` cover ad-hoc forwards for one connection. For a declared set of
 forwards that stays up on its own, see
@@ -120,6 +123,36 @@ eval "$(ds init bash)"
 ```
 
 Skip auto-attach for a single login with `NO_TMUX=1`.
+
+Auto-attach also skips a login whose terminal already has a complete input line
+queued when the shell starts, so a command typed into the session (such as
+Eternal Terminal's `et --command`) runs instead of being fed to tmux. Pressing
+Enter or pasting a line while a slow login is still starting skips auto-attach
+the same way; a partially typed line does not. This check is best-effort: ET
+starts the shell before it sends the command, so a fast shell startup can still
+attach first, and the command is then typed into the tmux session instead. For
+a guarantee, set `NO_TMUX=1` in the command session's
+environment, for example with a dedicated `Host` alias in the client's
+`ssh_config` that those sessions use, so interactive logins keep auto-attach:
+
+```sshconfig
+Host devbox-cmd
+    HostName devbox.example.com
+    SetEnv NO_TMUX=1
+```
+
+ET applies `SetEnv` before starting the shell; plain `ssh` also needs a matching
+`AcceptEnv NO_TMUX` in the server's `sshd_config`.
+
+The same rule applies to `ds <session> @host` over ET, which leaves a one-shot
+handoff request on the host for the ET login to pick up. A login with
+`NO_TMUX=1` or a queued command leaves the request for a later login instead of
+taking it: with `NO_TMUX=1`, a command session that logs in first can never take
+it; without it, the queued-command check is the same best-effort guard as above.
+Shells inside tmux never take the request, and one more than about five minutes
+old is discarded. A request left behind (for example after pressing Enter while
+the ET login was still starting) can still be taken by another interactive login
+outside tmux within those minutes, but not after.
 
 ## Tmux Resurrect Integration
 

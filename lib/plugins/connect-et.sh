@@ -6,6 +6,8 @@ _connect_et() {
   local -a args=("$@")
   # Seed attach-next so the shell snippet (ds init bash) execs into the
   # requested ds action when the ET connection opens an interactive shell.
+  # Logins with NO_TMUX=1 or a queued command, and shells inside tmux, leave
+  # it for a later login; the snippet drops it after a few minutes.
   # One argument per line keeps shell metacharacters inert and preserves spaces.
   # Newlines are rejected because the line-oriented file cannot encode them.
   for arg in "${args[@]}"; do
