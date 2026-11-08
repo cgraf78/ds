@@ -291,6 +291,11 @@ configuration directory (or bundled in `lib/plugins/`), defining
 | `autossh` | Auto-reconnecting SSH |
 | `et` | Eternal Terminal (persistent connection) |
 
+When `termnav` is on `PATH`, attaching through the built-in `ssh` method uses
+`termnav ssh` to preserve navigation back through the connection. Without
+Termnav it uses ordinary SSH. Remote management commands and `--no-attach`
+keep ordinary SSH; the `autossh` and `et` plugins keep their own transports.
+
 ## Sharing
 
 Share backends live in `lib/plugins/share-<backend>.sh` or as
