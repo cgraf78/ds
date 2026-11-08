@@ -1665,7 +1665,17 @@ _remote() {
       echo "ds: host '$HOST' is local-only (no remote connections)" >&2
       exit 1
       ;;
-    ssh) exec ssh -t "${ssh_fwd[@]+"${ssh_fwd[@]}"}" -- "$HOST" "$remote_cmd" ;;
+    ssh)
+      local -a ssh_cmd=(ssh)
+      # Scripts do not inherit the interactive shell's `ssh` wrapper. Opt in
+      # here for attached sessions so nested tmux can navigate back through
+      # Termnav's parent relay, without requiring Termnav for ordinary SSH.
+      if [[ "$ACTION" == session && "$DS_NO_ATTACH" != 1 ]] &&
+        command -v termnav >/dev/null 2>&1; then
+        ssh_cmd=(termnav ssh)
+      fi
+      exec "${ssh_cmd[@]}" -t "${ssh_fwd[@]+"${ssh_fwd[@]}"}" -- "$HOST" "$remote_cmd"
+      ;;
     *)
       local plugin
       plugin=$(_find_plugin "connect-${CONNECT}.sh") || {

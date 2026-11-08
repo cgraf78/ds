@@ -7082,10 +7082,6 @@ _assert_contains "ds init fish: unsupported shell" "supported: bash, zsh" "$resu
 result=$("$SCRIPT_DIR/../bin/ds" init bash @myhost 2>&1 || true)
 _assert_contains "ds init @host: rejects remote host" "does not support remote" "$result"
 
-# Non-profile session name with @host → should reach remote dispatch, not "unknown profile"
-result=$("$SCRIPT_DIR/../bin/ds" myarbitrarysession @server1 2>&1 || true)
-_assert_not_contains "ds nonexistent-profile @host: no profile error" "unknown profile" "$result"
-
 # Restore DS_SOURCED for remaining in-process tests
 export DS_SOURCED=1
 
@@ -7175,6 +7171,20 @@ cp "$SCRIPT_DIR/../lib/plugins/connect-autossh.sh" "$CONF_DIR/" 2>/dev/null ||
   printf '_connect_autossh() { exec autossh -M0 "$1" -t "$2"; }\n' >"$CONF_DIR/connect-autossh.sh"
 cp "$SCRIPT_DIR/../lib/plugins/connect-et.sh" "$CONF_DIR/"
 
+# Mock the optional navigation provider as well as the network transports, so
+# the caller's installed Termnav cannot start relays during isolated tests.
+TERMNAV_LOG="$MOCK_BIN/termnav.log"
+export TERMNAV_LOG
+cat >"$MOCK_BIN/termnav" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >"$TERMNAV_LOG"
+[[ "${MOCK_TERMNAV_FAIL:-0}" == 0 ]] || exit 43
+[[ "${1:-}" == ssh ]] || exit 44
+shift
+exec ssh "$@"
+MOCK
+chmod +x "$MOCK_BIN/termnav"
+
 # Mock ssh/autossh to capture args instead of connecting
 cat >"$MOCK_BIN/ssh" <<'MOCK'
 #!/usr/bin/env bash
@@ -7188,6 +7198,7 @@ for _a in "$@"; do
 done
 echo "SSH_HOST=$_host" > "${REMOTE_LOG:-/dev/null}"
 echo "SSH_ARGS=$*" >> "${REMOTE_LOG:-/dev/null}"
+printf 'SSH_ARG=%s\n' "$@" >> "${REMOTE_LOG:-/dev/null}"
 if [[ "${MOCK_SSH_FAIL:-0}" == "1" ]]; then
     exit 42
 fi
@@ -7243,6 +7254,7 @@ _timeout() {
 
 _run_remote() {
   : >"$REMOTE_LOG"
+  : >"$TERMNAV_LOG"
   local env_args="$1"
   _timeout 3 bash -c "
         export DS_SOURCED=1
@@ -7250,6 +7262,15 @@ _run_remote() {
         $env_args _remote
     " 2>&1 || true
 }
+
+# Exercise the actual CLI only after installing transport doubles: an
+# arbitrary session name must dispatch remotely without reaching live SSH.
+: >"$REMOTE_LOG"
+: >"$TERMNAV_LOG"
+result=$(DS_SOURCED='' "$SCRIPT_DIR/../bin/ds" myarbitrarysession @server1 2>&1 || true)
+_assert_not_contains "ds nonexistent-profile @host: no profile error" "unknown profile" "$result"
+_assert_contains "ds arbitrary session @host: reaches SSH" 'SSH_HOST=server1' "$(cat "$REMOTE_LOG")"
+_assert_contains "ds arbitrary session @host: uses navigation provider" $'ssh\n-t\n--\nserver1\n' "$(cat "$TERMNAV_LOG")"
 
 # Test SSH remote dispatch (dev profile session)
 result=$(_run_remote "HOST=server1 ACTION=session SESSION=dev \
@@ -7749,6 +7770,73 @@ result=$(_run_remote "HOST=fileserver ACTION=session SESSION=ds \
 remote_log=$(cat "$REMOTE_LOG" 2>/dev/null || true)
 _assert_contains "autossh reverse: passes -R" "-R" "$remote_log"
 _assert_contains "autossh reverse: 3-part spec direct" "3333:localhost:2222" "$remote_log"
+
+# Interactive SSH sessions need the same parent relay as an interactive
+# shell's `ssh` function; non-attaching commands retain their plain transport.
+result=$(_run_remote "HOST=server1 ACTION=session SESSION='dev work*' \
+    CONNECT_OVERRIDE= DS_SHELL_NAME=zsh; FORWARDS=(3011:3012); R_FORWARDS=(4011:4012);")
+termnav_log=$(cat "$TERMNAV_LOG")
+remote_log=$(cat "$REMOTE_LOG")
+_assert_contains "ssh navigation: selects provider SSH entrypoint" $'ssh\n-t\n-L\n3011:localhost:3012\n-R\n4011:localhost:4012\n--\nserver1\n' "$termnav_log"
+_assert_contains "ssh navigation: preserves SSH argument boundaries" \
+  $'SSH_ARG=-L\nSSH_ARG=3011:localhost:3012\nSSH_ARG=-R\nSSH_ARG=4011:localhost:4012\nSSH_ARG=--\nSSH_ARG=server1\nSSH_ARG=if command -v zsh' "$remote_log"
+_assert_contains "ssh navigation: preserves remote auto-attach opt-out" \
+  'NO_TMUX=1 DS_SHELL_NAME=zsh' "$remote_log"
+_assert_contains "ssh navigation: preserves spaced session payload" \
+  'dev\\\ work\\\*' "$remote_log"
+
+for management_action in list kill killall; do
+  result=$(_run_remote "HOST=server1 ACTION=$management_action SESSION=dev CONNECT_OVERRIDE=")
+  _assert_eq "ssh navigation: $management_action bypasses provider" "" "$(cat "$TERMNAV_LOG")"
+  _assert_contains "ssh navigation: $management_action retains SSH" \
+    'SSH_HOST=server1' "$(cat "$REMOTE_LOG")"
+done
+result=$(_run_remote "HOST=server1 ACTION=session SESSION=dev CONNECT_OVERRIDE= DS_NO_ATTACH=1")
+_assert_eq "ssh navigation: no-attach bypasses provider" "" "$(cat "$TERMNAV_LOG")"
+_assert_contains "ssh navigation: no-attach retains remote flag" \
+  '--no-attach' "$(cat "$REMOTE_LOG")"
+
+# Installing Termnav must not change another connect method's ownership.
+for connect_method in autossh et; do
+  result=$(_run_remote "HOST=server1 ACTION=session SESSION=dev CONNECT_OVERRIDE=$connect_method")
+  _assert_eq "ssh navigation: $connect_method bypasses provider" "" "$(cat "$TERMNAV_LOG")"
+done
+
+# The optional provider must not become an installation requirement. Pin PATH
+# so this case cannot accidentally find the caller's real Termnav executable.
+remote_test_bash=$(command -v bash)
+ln -s "$remote_test_bash" "$MOCK_BIN/bash"
+mv "$MOCK_BIN/termnav" "$MOCK_BIN/termnav-disabled"
+result=$(PATH="$MOCK_BIN:/usr/bin:/bin" _run_remote \
+  "HOST=server1 ACTION=session SESSION=dev CONNECT_OVERRIDE=")
+_assert_contains "ssh navigation: absent provider falls back to SSH" \
+  'SSH_HOST=server1' "$(cat "$REMOTE_LOG")"
+_assert_eq "ssh navigation: fallback does not invoke provider" "" "$(cat "$TERMNAV_LOG")"
+mv "$MOCK_BIN/termnav-disabled" "$MOCK_BIN/termnav"
+
+# Once a provider starts, never retry authentication through a second SSH
+# connection. Propagate its failure and preserve stdin for the launched peer.
+: >"$REMOTE_LOG"
+set +e
+MOCK_TERMNAV_FAIL=1 \
+  bash -c 'export DS_SOURCED=1; . "$1"; HOST=server1 ACTION=session SESSION=dev CONNECT_OVERRIDE= _remote' _ "$SCRIPT_DIR/../bin/ds"
+rc=$?
+set -e
+_assert_exit "ssh navigation: provider failure propagates" 43 "$rc"
+_assert_eq "ssh navigation: failed provider never retries SSH" "" "$(cat "$REMOTE_LOG")"
+
+: >"$REMOTE_LOG"
+set +e
+printf '%s\n' queued-command | MOCK_SSH_FAIL=1 \
+  bash -c 'export DS_SOURCED=1; . "$1"; HOST=server1 ACTION=session SESSION=dev CONNECT_OVERRIDE= _remote' _ "$SCRIPT_DIR/../bin/ds"
+rc=$?
+set -e
+_assert_exit "ssh navigation: SSH failure propagates through provider" 42 "$rc"
+
+printf '%s\n' queued-command | MOCK_SSH_READ_STDIN=1 \
+  bash -c 'export DS_SOURCED=1; . "$1"; HOST=server1 ACTION=session SESSION=dev CONNECT_OVERRIDE= _remote' _ "$SCRIPT_DIR/../bin/ds"
+_assert_contains "ssh navigation: stdin reaches SSH unchanged" \
+  'SSH_STDIN[0]=queued-command' "$(cat "$REMOTE_LOG")"
 
 # ---------------------------------------------------------------------------
 # Tests: Connect config comments and blank lines
