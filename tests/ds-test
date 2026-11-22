@@ -8347,10 +8347,15 @@ _assert_contains "CI: Dependabot auto-merge enrolls only Dependabot PRs" \
 _assert_contains "CI: delegates the typed shell inventory" \
   'shellcheck-inventory-path: .github/shellcheck-files.txt' "$_ci_workflow"
 _assert_contains "CI: runtime skips only delegated ShellCheck" \
-  'test-command: DS_SKIP_SHELLCHECK=1 bash tests/ds-ci' "$_ci_workflow"
+  'DS_SKIP_SHELLCHECK=1 bash tests/ds-ci' "$_ci_workflow"
+# shellcheck disable=SC2016 # Match the literal workflow command.
+_assert_contains "CI: live tmux cannot silently skip or use the runner's tmux" \
+  'test "$(command -v tmux)" = "$CI_TMUX_PINNED_BIN"' "$_ci_workflow"
 _ci_runtime_profiles=$(sed -n 's/^      profiles: //p' "$_ci_workflow_path")
 _assert_not_contains "CI: runtime profile does not install ShellCheck" \
   'shellcheck' "$_ci_runtime_profiles"
+_assert_contains "CI: runtime installs the shared pinned tmux for live tests" \
+  ',tmux-pinned,' ",$_ci_runtime_profiles,"
 # The init snippet's zsh and real-pty auto-attach tests skip without these.
 _assert_contains "CI: runtime installs python3 for pty tests" \
   ',python,' ",$_ci_runtime_profiles,"

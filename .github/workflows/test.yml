@@ -17,13 +17,16 @@ permissions:
 
 jobs:
   shell:
-    uses: cgraf78/actions/.github/workflows/shell-ci.yml@cd44eb081dd9c3093e8d8026488423243b191240
+    uses: cgraf78/actions/.github/workflows/shell-ci.yml@9010f3bb0aeb33740332bc230160a42d02dbc810
     with:
       matrix-set: full
-      profiles: base,openssh-netcat-lsof,procps,python,zsh
+      profiles: base,openssh-netcat-lsof,procps,python,tmux-pinned,zsh
       shellcheck-inventory-path: .github/shellcheck-files.txt
       termux-profiles: base
-      test-command: DS_SKIP_SHELLCHECK=1 bash tests/ds-ci
+      test-command: |-
+        set -euo pipefail
+        test "$(command -v tmux)" = "$CI_TMUX_PINNED_BIN"
+        DS_SKIP_SHELLCHECK=1 bash tests/ds-ci
       termux-command: |-
         set -euo pipefail
         echo "Running installer integration"
@@ -50,4 +53,4 @@ jobs:
       # files, so `.github/cgraf78-actions.lock` cannot be interpolated. This gate
       # verifies every unavoidable cgraf78/actions literal still matches that
       # single reviewed dependency decision.
-      - uses: cgraf78/actions/.github/actions/verify-consumer-sync@cd44eb081dd9c3093e8d8026488423243b191240
+      - uses: cgraf78/actions/.github/actions/verify-consumer-sync@9010f3bb0aeb33740332bc230160a42d02dbc810

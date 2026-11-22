@@ -52,7 +52,9 @@ State lives under `${XDG_STATE_HOME:-$HOME/.local/state}/ds/` (mode
   of `.github/shellcheck-files.txt` unconditionally (fails without
   `shellcheck`), then `tests/install-test` and `tests/ds-test`.
 - CI: `DS_SKIP_SHELLCHECK=1 bash tests/ds-ci` on the full matrix, on
-  every PR and push to `main`.
+  every PR and push to `main`. The shared `tmux-pinned` profile supplies
+  the executable required by the Linux and macOS runs.
+  Follow the [managed tmux update procedure](https://github.com/cgraf78/actions/blob/main/docs/workflow-api.md#updating-the-managed-tmux-build).
 - Termux: `bash tests/install-test` plus `timeout 30 bash bin/ds --help`.
 - `tests/ds-test` sources the checked-in `examples/`, so keep them valid.
 
@@ -62,7 +64,7 @@ State lives under `${XDG_STATE_HOME:-$HOME/.local/state}/ds/` (mode
   `XDG_CONFIG_HOME` and `XDG_STATE_HOME`, sources `bin/ds` with
   `DS_SOURCED=1`, and mocks `tmux` and `upterm`. Never depend on a live
   tmux or SSH setup.
-- One block starts a real tmux when tmux is on `PATH` (CI has none): a
+- One block starts a real tmux when tmux is on `PATH`: a
   shim pins it to a unique `-L ds-test-robust-$$ -f /dev/null` server
   with `TMUX` cleared and kills that server afterwards. New real-tmux
   tests must do the same (or use `-S <tmpdir>/sock`), never the default.
