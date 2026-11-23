@@ -5919,8 +5919,11 @@ _reset_tmux_log
 _do_session
 _concurrent_log=$(_tmux_log)
 _lock_base=$(_resurrect_startup_lock_base)
-_assert_eq "resurrect wait: lock uses the reboot-scoped runtime directory" \
-  "$_runtime_dir/ds/resurrect-startup.$(hostname)" "$_lock_base"
+if [[ "$_lock_base" == "$_runtime_dir/ds/resurrect-startup."?* ]]; then
+  _pass "resurrect wait: the reboot-scoped lock has a hostname suffix"
+else
+  _fail "resurrect wait: the reboot-scoped lock has a hostname suffix"
+fi
 IFS=$'\t' read -r -a _lock_paths < <(_resurrect_startup_lock_paths)
 _lock_current=${_lock_paths[0]}
 _lock_found=0
@@ -6003,6 +6006,34 @@ _resurrect_legacy_path=$(XDG_DATA_HOME="$_resurrect_xdg" _resurrect_dir)
 _assert_eq "resurrect path: preserves an existing legacy directory" \
   "$HOME/.tmux/resurrect" "$_resurrect_legacy_path"
 rmdir "$HOME/.tmux/resurrect" "$HOME/.tmux"
+
+_resurrect_host_tools=$(_tmpdir)
+_resurrect_no_host_tools=$(_tmpdir)
+cat >"$_resurrect_host_tools/uname" <<'SH'
+#!/bin/sh
+[ "$1" = -n ] || exit 2
+printf '%s\n' fixture.node.test
+SH
+cat >"$_resurrect_host_tools/tmux" <<'SH'
+#!/bin/sh
+printf '%s\n' "\$HOME/.fixture/\$HOSTNAME"
+SH
+chmod +x "$_resurrect_host_tools/"{tmux,uname}
+ln -s "$_resurrect_host_tools/tmux" "$_resurrect_no_host_tools/tmux"
+_resurrect_host_lock=$(PATH="$_resurrect_host_tools" XDG_RUNTIME_DIR="$_runtime_dir" \
+  _resurrect_startup_lock_base 2>&1)
+_assert_eq "resurrect wait: the lock uses the full kernel hostname without hostname(1)" \
+  "$_runtime_dir/ds/resurrect-startup.fixture.node.test" "$_resurrect_host_lock"
+_resurrect_host_dir=$(PATH="$_resurrect_host_tools" _resurrect_dir 2>&1)
+_assert_eq "resurrect path: a configured hostname expands through the kernel fallback" \
+  "$HOME/.fixture/fixture.node.test" "$_resurrect_host_dir"
+_resurrect_host_status=0
+PATH="$_resurrect_no_host_tools" XDG_RUNTIME_DIR="$_runtime_dir" \
+  _resurrect_startup_lock_base >/dev/null 2>&1 || _resurrect_host_status=$?
+_assert_exit "resurrect wait: no host identity means no startup lock" 1 "$_resurrect_host_status"
+_resurrect_host_status=0
+PATH="$_resurrect_no_host_tools" _resurrect_dir >/dev/null 2>&1 || _resurrect_host_status=$?
+_assert_exit "resurrect path: no host identity means no hostname expansion" 1 "$_resurrect_host_status"
 
 unset MOCK_SESSIONS MOCK_DS_MANAGED MOCK_DS_SHELL_NAME MOCK_CONTINUUM_RESTORE
 unset MOCK_RESURRECT_DIR MOCK_RESURRECT_MARKER_FILE MOCK_RESURRECT_BEGIN_FILE

@@ -735,6 +735,17 @@ _reconcile_ds_session() {
     "$_DS_STATUS_LABELS_VERSION:$session_id"
 }
 
+# Match the full node name used by existing snapshot paths and locks, even on
+# minimal systems that provide uname but omit the standalone hostname utility.
+_resurrect_hostname() {
+  local host
+  if ! host=$(hostname 2>/dev/null) || [[ -z "$host" ]]; then
+    host=$(uname -n 2>/dev/null) || return 1
+  fi
+  [[ -n "$host" ]] || return 1
+  printf '%s\n' "$host"
+}
+
 _resurrect_dir() {
   local host path
   path=$(tmux show-options -gqv @resurrect-dir 2>/dev/null) || path=""
@@ -745,15 +756,17 @@ _resurrect_dir() {
       path="${XDG_DATA_HOME:-$HOME/.local/share}/tmux/resurrect"
     fi
   fi
-  host=$(hostname)
   path="${path//\$HOME/$HOME}"
-  path="${path//\$HOSTNAME/$host}"
+  if [[ "$path" == *"\$HOSTNAME"* ]]; then
+    host=$(_resurrect_hostname) || return 1
+    path="${path//\$HOSTNAME/$host}"
+  fi
   path="${path/#\~/$HOME}"
   printf '%s\n' "$path"
 }
 
 _resurrect_restore_expected() {
-  local enabled max_delay now provider_enabled server_start
+  local enabled max_delay now provider_enabled resurrect_dir server_start
   enabled=$(tmux show-options -gqv @continuum-restore 2>/dev/null) || enabled=""
   # tmux-tools owns the default-server coordinator and publishes only this
   # tmux option. Reading that narrow signal keeps DS a pure consumer: DS does
@@ -761,8 +774,9 @@ _resurrect_restore_expected() {
   provider_enabled=$(tmux show-options -gqv \
     @tmux-tools-resurrect-auto-restore 2>/dev/null) || provider_enabled=""
   [[ ("$enabled" == "on" || "$provider_enabled" == "on") &&
-    ! -f "$HOME/tmux_no_auto_restore" &&
-    -f "$(_resurrect_dir)/last" ]] || return 1
+    ! -f "$HOME/tmux_no_auto_restore" ]] || return 1
+  resurrect_dir=$(_resurrect_dir) || return 1
+  [[ -f "$resurrect_dir/last" ]] || return 1
 
   server_start=$(tmux display-message -p '#{start_time}' 2>/dev/null) || return 1
   max_delay=$(tmux show-options -gqv @continuum-restore-max-delay \
@@ -840,7 +854,13 @@ _do_resurrect_save() {
 
 _do_resurrect_restore() {
   local file="${1:-}" kind session shell extra session_id server_start
-  [[ -n "$file" ]] || file="$(_resurrect_dir)/last"
+  if [[ -z "$file" ]]; then
+    file=$(_resurrect_dir) || {
+      printf 'ds: cannot resolve the resurrect snapshot directory\n' >&2
+      return 1
+    }
+    file="$file/last"
+  fi
   [[ -f "$file" ]] || {
     printf 'ds: resurrect snapshot not found: %s\n' "$file" >&2
     return 1
@@ -1153,7 +1173,7 @@ _do_session_prepare() {
 
 _resurrect_startup_lock_base() {
   local host root tmp
-  host=$(hostname)
+  host=$(_resurrect_hostname) || return 1
   host="${host//[^A-Za-z0-9._-]/_}"
   case "${XDG_RUNTIME_DIR:-}" in
     /*)
