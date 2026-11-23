@@ -814,6 +814,46 @@ _assert_file_missing "test cleanup: normal exit removes the exact suite root" \
 _assert_file_missing "test cleanup: normal exit removes suite fixtures" \
   "$suite_cleanup_fixture"
 
+suite_colon_base="$suite_cleanup_base/tmp:parent"
+mkdir "$suite_colon_base"
+suite_colon_status=0
+suite_colon_output=$(TMPDIR="$suite_colon_base" bash -c '
+  set -euo pipefail
+  . "$1"
+  mock_bin=$(_tmpdir)
+  printf "#!/bin/sh\necho owned\n" >"$mock_bin/ds-test-path-probe"
+  chmod +x "$mock_bin/ds-test-path-probe"
+  PATH="$mock_bin:$PATH" ds-test-path-probe
+' bash "$SCRIPT_DIR/test-helpers.sh" 2>&1) || suite_colon_status=$?
+_assert_exit "test fixtures: colon in TMPDIR still permits mock PATH lookup" \
+  0 "$suite_colon_status"
+_assert_eq "test fixtures: colon in TMPDIR selects the invocation-owned tool" \
+  "owned" "$suite_colon_output"
+
+suite_git_checkout="$suite_cleanup_base/git-fixture"
+suite_git_global="$suite_cleanup_base/gitconfig"
+printf '[ds-test]\n\tglobal = inherited\n' >"$suite_git_global"
+suite_git_status=0
+suite_git_output=$(
+  GIT_DIR="$suite_cleanup_base/unwanted.git" GIT_WORK_TREE="$suite_cleanup_base" \
+    GIT_CONFIG_GLOBAL="$suite_git_global" GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0=ds-test.injected GIT_CONFIG_VALUE_0=inherited bash -c '
+    set -euo pipefail
+    . "$1"
+    git init --quiet --initial-branch=main --template="" "$2"
+    git -C "$2" rev-parse --show-toplevel
+    for name in ds-test.injected ds-test.global; do
+      status=0
+      git -C "$2" config --get "$name" || status=$?
+      [[ "$status" == 1 ]] || exit 1
+    done
+  ' bash "$SCRIPT_DIR/test-helpers.sh" "$suite_git_checkout" 2>&1
+) || suite_git_status=$?
+_assert_exit "test fixtures: inherited Git selectors and config do not reach a fixture" \
+  0 "$suite_git_status"
+_assert_eq "test fixtures: Git uses the requested checkout" \
+  "$(cd -P -- "$suite_cleanup_base" && pwd -P)/git-fixture" "$suite_git_output"
+
 suite_planted_victim="$suite_cleanup_base/planted-victim"
 suite_planted_root="$suite_cleanup_base/ds-test-suite.planted"
 suite_planted_result="$suite_cleanup_base/planted-result"
@@ -7318,22 +7358,22 @@ _assert_contains "ssh remote: defaults to bash login shell" "DS_SHELL_NAME=bash 
 # The generated payload must honor a non-default install directory and fail
 # clearly when the remote login PATH does not contain ds.
 custom_remote_bin=$(_tmpdir)
+missing_remote_bin=$(_tmpdir)
 custom_remote_log=$(_tmpdir)/remote-ds.log
 cat >"$custom_remote_bin/ds" <<'EOF'
-#!/usr/bin/env bash
+#!/bin/sh
 printf '%s\n' "$*" >"$CUSTOM_REMOTE_LOG"
 EOF
 chmod +x "$custom_remote_bin/ds"
 remote_ds_payload=$(_remote_ds_command 'dev work' --no-attach)
-CUSTOM_REMOTE_LOG="$custom_remote_log" PATH="$custom_remote_bin:/usr/bin:/bin" \
-  bash -c "$remote_ds_payload"
+CUSTOM_REMOTE_LOG="$custom_remote_log" PATH="$custom_remote_bin" \
+  "$BASH" -c "$remote_ds_payload"
 _assert_eq "ssh remote payload: uses custom PATH install" \
   "dev work --no-attach" "$(cat "$custom_remote_log")"
 
-set +e
-remote_missing_output=$(PATH="/usr/bin:/bin" bash -c "$remote_ds_payload" 2>&1)
-remote_missing_rc=$?
-set -e
+remote_missing_rc=0
+remote_missing_output=$(PATH="$missing_remote_bin" "$BASH" -c "$remote_ds_payload" 2>&1) ||
+  remote_missing_rc=$?
 _assert_exit "ssh remote payload: missing ds exits 127" 127 "$remote_missing_rc"
 _assert_contains "ssh remote payload: missing ds is actionable" \
   "ds: not found on remote PATH" "$remote_missing_output"
@@ -7833,17 +7873,17 @@ for connect_method in autossh et; do
   _assert_eq "ssh navigation: $connect_method bypasses provider" "" "$(cat "$TERMNAV_LOG")"
 done
 
-# The optional provider must not become an installation requirement. Pin PATH
-# so this case cannot accidentally find the caller's real Termnav executable.
-remote_test_bash=$(command -v bash)
-ln -s "$remote_test_bash" "$MOCK_BIN/bash"
-mv "$MOCK_BIN/termnav" "$MOCK_BIN/termnav-disabled"
-result=$(PATH="$MOCK_BIN:/usr/bin:/bin" _run_remote \
-  "HOST=server1 ACTION=session SESSION=dev CONNECT_OVERRIDE=")
+# Put only Bash and the mock SSH command on PATH when dispatching. A system
+# Termnav must not satisfy the optional provider lookup in this negative case.
+remote_fallback_bin=$(_tmpdir)
+ln -s "$BASH" "$remote_fallback_bin/bash"
+ln -s "$MOCK_BIN/ssh" "$remote_fallback_bin/ssh"
+printf -v remote_fallback_path '%q' "$remote_fallback_bin"
+result=$(_run_remote \
+  "PATH=$remote_fallback_path HOST=server1 ACTION=session SESSION=dev CONNECT_OVERRIDE=")
 _assert_contains "ssh navigation: absent provider falls back to SSH" \
   'SSH_HOST=server1' "$(cat "$REMOTE_LOG")"
 _assert_eq "ssh navigation: fallback does not invoke provider" "" "$(cat "$TERMNAV_LOG")"
-mv "$MOCK_BIN/termnav-disabled" "$MOCK_BIN/termnav"
 
 # Once a provider starts, never retry authentication through a second SSH
 # connection. Propagate its failure and preserve stdin for the launched peer.

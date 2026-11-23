@@ -12,6 +12,15 @@
 #   ...
 #   _test_summary  # prints results, exits 0 or 1
 
+# Hook callers can export repository selectors and command-scope config that
+# override git -C and a fixture's local settings. Keep both Git fixtures on
+# their own repositories with system and global configuration disabled.
+while IFS= read -r _ds_test_env_name; do
+  case "$_ds_test_env_name" in GIT_*) unset "$_ds_test_env_name" ;; esac
+done < <(compgen -e)
+unset _ds_test_env_name
+export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+
 PASS=0
 FAIL=0
 CLEANUP_DIRS=()
@@ -22,6 +31,15 @@ TEST_TREE_PIDS=()
 TEST_PS_DIR=""
 TEST_PS_FILE=""
 TEST_SUITE_TMP_BASE="${TMPDIR:-/tmp}"
+# Fixture programs are prepended to PATH. A colon would split their directory
+# into unrelated search entries and could make a test execute the host tool.
+if [[ "$TEST_SUITE_TMP_BASE" == *:* ]]; then
+  TEST_SUITE_TMP_BASE=/tmp
+  # Termux's system temporary directory lives under its prefix.
+  if [[ ! -w /tmp && ${PREFIX:-} == /* && ${PREFIX:-} != *:* && -w "$PREFIX/tmp" ]]; then
+    TEST_SUITE_TMP_BASE="$PREFIX/tmp"
+  fi
+fi
 TEST_SUITE_TMP_BASE="${TEST_SUITE_TMP_BASE%/}"
 TEST_SUITE_TMP_ROOT=""
 TEST_PID_LEDGER=""
