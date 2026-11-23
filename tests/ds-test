@@ -6619,12 +6619,16 @@ mkfifo "$attach_probe_fifo"
 
 # `env` arguments for an opted-in SSH login with stub ds/tmux first on PATH.
 # The pty shells are truly interactive and save history on exit, so HISTFILE
-# must not be the caller's.
+# belongs to the fixture. Bash also reads INPUTRC with --noprofile and an
+# explicit --rcfile, so give Readline its default bindings for queued input.
+attach_probe_inputrc="$attach_probe_dir/inputrc"
+: >"$attach_probe_inputrc"
 attach_probe_env=(
   -u TMUX -u TMUX_PANE -u NO_TMUX
   DS_ATTACH_LOG="$attach_probe_log" DS_SSH_AUTO_ATTACH=ds SSH_CONNECTION=x
   SSH_TTY=/dev/pts/99 DS_STATE_DIR="$attach_probe_dir/state"
   ZDOTDIR="$attach_probe_dir/zdotdir" HISTFILE="$attach_probe_dir/history" TERM=dumb
+  INPUTRC="$attach_probe_inputrc"
   PATH="$attach_probe_bin:/usr/bin:/bin"
 )
 
@@ -6746,6 +6750,21 @@ _assert_eq "ds init bash: NO_TMUX skips auto-attach" "|CONTINUED" \
 _assert_attach_probe_quiet "ds init bash: skipped login prints no snippet errors"
 if [[ -n "$REAL_PYTHON3" ]]; then
   _assert_attach_probe_pty bash "$BASH" --noprofile --rcfile "$bash_init_file" -i
+
+  caller_inputrc="$attach_probe_dir/caller-inputrc"
+  readline_marker="$attach_probe_dir/readline-command"
+  printf '%s\n' '"\C-j": abort' '"\C-m": abort' >"$caller_inputrc"
+  bindings=$(INPUTRC="$caller_inputrc" TERM=dumb \
+    "$BASH" --noprofile --norc -ic 'bind -q abort' 2>/dev/null)
+  _assert_contains "ds init bash: caller Readline control binds LF to abort" '"\C-j"' "$bindings"
+  _assert_contains "ds init bash: caller Readline control binds CR to abort" '"\C-m"' "$bindings"
+  printf -v readline_command ': >%q; exit\n' "$readline_marker"
+  INPUTRC="$caller_inputrc" _attach_probe_pty \
+    "ds init bash: queued pty login with caller Readline bindings" "$readline_command" \
+    "$BASH" --noprofile --rcfile "$bash_init_file" -i
+  _assert_file_exists "ds init bash: queued line runs with caller Readline settings present" \
+    "$readline_marker"
+
   # bash 3.2 (macOS /bin/bash) has no `read -t 0` probe: it always fails
   # without reading, so the login attaches as it did before the probe.
   if [[ -x /bin/bash ]] && /bin/bash -c '((BASH_VERSINFO[0] < 4))'; then
