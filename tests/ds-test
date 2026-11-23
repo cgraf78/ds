@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname "$0")" && pwd)"
 REAL_ZSH=$(command -v zsh || true)
 REAL_PYTHON3=$(command -v python3 || true)
 REAL_SSH_KEYGEN=$(command -v ssh-keygen || true)
