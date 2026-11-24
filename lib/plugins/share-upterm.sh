@@ -181,7 +181,7 @@ _upterm_acquire_operation_lock() {
   for attempt in 1 2; do
     old_umask=$(umask)
     umask 077
-    if mkdir "$lock_dir" 2>/dev/null; then
+    if _mkdir_lock "$lock_dir" 2>/dev/null; then
       lock_file="$lock_dir/owner.$_upo_token"
       if ! printf 'version=1\npid=%s\nidentity=%s\ntoken=%s\n' \
         "$operation_pid" "$operation_identity" "$_upo_token" >"$lock_file" ||

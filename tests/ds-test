@@ -1576,12 +1576,13 @@ printf '%s %s\n' "$tool" "$*" >>"$DS_TEST_INACTIVE_PROBE_CALLS"
 case "$tool" in
   ps) exec "$DS_TEST_REAL_PS" "$@" ;;
   od) exec "$DS_TEST_REAL_OD" "$@" ;;
-  mkdir) exec "$DS_TEST_REAL_MKDIR" "$@" ;;
+  mkdir | gnumkdir) exec "$DS_TEST_REAL_MKDIR" "$@" ;;
 esac
 exit 127
 MOCK
 chmod +x "$inactive_probe_bin/probe"
-for inactive_probe_tool in ps od mkdir; do
+# Record the ownership protocol regardless of which mkdir name ds resolves.
+for inactive_probe_tool in ps od mkdir gnumkdir; do
   ln -s probe "$inactive_probe_bin/$inactive_probe_tool"
 done
 DS_STATE_DIR="$inactive_probe_state"
@@ -6045,7 +6046,56 @@ if [[ -d "$_lock_current" ]]; then
 else
   _fail "resurrect wait: active generation is not removed"
 fi
+
+# Model the affected uutils race after the competing holder's mkdir won:
+# the plain command incorrectly returns success for the now-existing lock.
+_lock_mkdir_bin=$(_tmpdir)
+_lock_mkdir_native=$(type -P gnumkdir || type -P mkdir)
+ln -s "$_lock_mkdir_native" "$_lock_mkdir_bin/gnumkdir"
+cat >"$_lock_mkdir_bin/mkdir" <<'MOCK'
+#!/usr/bin/env bash
+[[ ${!#} != "$DS_TEST_BUSY_LOCK" ]] || exit 0
+exec "$DS_TEST_NATIVE_MKDIR" "$@"
+MOCK
+chmod +x "$_lock_mkdir_bin/mkdir"
+
+_racy_lock_status=0
+PATH="$_lock_mkdir_bin:$PATH" DS_TEST_BUSY_LOCK="$_lock_current" \
+  DS_TEST_NATIVE_MKDIR="$_lock_mkdir_native" \
+  _acquire_resurrect_startup_lock_with_attempts 1 >/dev/null 2>&1 || _racy_lock_status=$?
+_assert_exit "resurrect wait: duplicate mkdir success cannot acquire a live coordinator" \
+  1 "$_racy_lock_status"
+_racy_extra_locks=0
+for _lock_path in "${_lock_paths[@]:1}"; do
+  if [[ -d "$_lock_path" ]]; then
+    _racy_extra_locks=$((_racy_extra_locks + 1))
+    rmdir "$_lock_path"
+  fi
+done
+_assert_eq "resurrect wait: a rejected coordinator creates no later buckets" \
+  0 "$_racy_extra_locks"
 rmdir "$_lock_current"
+
+_racy_upterm_state=$(_tmpdir)
+_racy_upterm_lock=$(DS_STATE_DIR="$_racy_upterm_state" _upterm_operation_lock_dir)
+_racy_upterm_owner=""
+DS_STATE_DIR="$_racy_upterm_state" _upterm_acquire_operation_lock _racy_upterm_owner
+_racy_lock_status=0
+(
+  _racy_upterm_contender=""
+  PATH="$_lock_mkdir_bin:$PATH" DS_TEST_BUSY_LOCK="$_racy_upterm_lock" \
+    DS_TEST_NATIVE_MKDIR="$_lock_mkdir_native" DS_STATE_DIR="$_racy_upterm_state" \
+    _upterm_acquire_operation_lock _racy_upterm_contender
+) || _racy_lock_status=$?
+_assert_exit "Upterm lifecycle: duplicate mkdir success cannot acquire a live operation" \
+  2 "$_racy_lock_status"
+_racy_upterm_records=("$_racy_upterm_lock"/owner.*)
+_assert_eq "Upterm lifecycle: a rejected operation leaves the original owner alone" \
+  "$_racy_upterm_lock/owner.$_racy_upterm_owner" "${_racy_upterm_records[*]}"
+if [[ $_racy_lock_status == 2 ]]; then
+  DS_STATE_DIR="$_racy_upterm_state" _upterm_release_operation_lock "$_racy_upterm_owner"
+fi
+
 _lock_now=$(_epoch_seconds)
 _old_generation=$((_lock_now / 10 - 5))
 _old_locks=()
