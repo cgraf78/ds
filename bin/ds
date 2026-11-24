@@ -478,6 +478,14 @@ _ensure_state_dir() {
   chmod 700 "$DS_STATE_DIR" 2>/dev/null || true
 }
 
+# Affected Ubuntu uutils builds can report success to both concurrent mkdir
+# callers. Ubuntu's GNU alternate preserves exclusive creation of the lock.
+_mkdir_lock() {
+  local mkdir_command
+  mkdir_command=$(type -P gnumkdir) || mkdir_command="mkdir"
+  command "$mkdir_command" "$@"
+}
+
 _state_file_prefix() {
   printf '%s/%s' "$DS_STATE_DIR" "ds"
 }
@@ -1218,7 +1226,7 @@ _acquire_resurrect_startup_lock_with_attempts() {
     IFS=$'\t' read -r -a locks < <(_resurrect_startup_lock_paths) || return 1
     token=""
     for path in "${locks[@]}"; do
-      if mkdir -m 0700 "$path" 2>/dev/null; then
+      if _mkdir_lock -m 0700 "$path" 2>/dev/null; then
         if [[ -n "$token" ]]; then
           token+=$'\t'
         fi
