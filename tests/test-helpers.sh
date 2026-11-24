@@ -28,6 +28,7 @@ CLEANUP_FILES=()
 CLEANUP_PIDS=()
 CLEANUP_PID_IDENTITIES=()
 TEST_TREE_PIDS=()
+TEST_TREE_IDENTITIES=()
 TEST_PS_DIR=""
 TEST_PS_FILE=""
 TEST_SUITE_TMP_BASE="${TMPDIR:-/tmp}"
@@ -297,73 +298,96 @@ _ingest_test_pid_ledger() {
   done
 }
 
+_test_recorded_identity() {
+  local target=$1 destination=${2:-} index
+  for ((index = 0; index < ${#CLEANUP_PIDS[@]}; index++)); do
+    if [[ "${CLEANUP_PIDS[index]}" == "$target" ]]; then
+      if [[ -n "$destination" ]]; then
+        printf -v "$destination" '%s' "${CLEANUP_PID_IDENTITIES[index]}"
+      fi
+      return 0
+    fi
+  done
+  return 1
+}
+
 _snapshot_test_forest() {
-  local index parent child child_index seen progress parent_in_tree parent_ordered
-  local -a process_pids=() process_parents=() ordered_pids=()
+  local index pid parent child weekday month day clock year extra progress
+  local -a process_pids=() tree_pids=() ordered_pids=() ordered_identities=()
+  local -A parents=() identities=() recorded=() selected=() ordered=()
+  TEST_TREE_PIDS=()
+  TEST_TREE_IDENTITIES=()
+  (($# > 0)) || return 0
+  # If the snapshot fails, callers may still act on their exact tracked roots.
   TEST_TREE_PIDS=("$@")
-  _test_ps_output_file || return 1
-  if ! LC_ALL=C ps -axo pid=,ppid= >"$TEST_PS_FILE"; then
+  if ! _test_ps_output_file || ! LC_ALL=C ps -axo pid=,ppid=,lstart= >"$TEST_PS_FILE"; then
+    printf 'test cleanup: could not read a complete process snapshot\n' >&2
     return 1
   fi
-  while read -r child parent; do
-    [[ "$child" =~ ^[0-9]+$ && "$parent" =~ ^[0-9]+$ ]] || continue
+  while read -r child parent weekday month day clock year extra; do
+    [[ "$child" =~ ^[0-9]+$ && "$parent" =~ ^[0-9]+$ && -n "$year" &&
+      -z "$extra" ]] || continue
     process_pids+=("$child")
-    process_parents+=("$parent")
+    parents[$child]=$parent
+    identities[$child]="$weekday $month $day $clock $year"
   done <"$TEST_PS_FILE"
-  for ((index = 0; index < ${#TEST_TREE_PIDS[@]}; index++)); do
-    parent=${TEST_TREE_PIDS[index]}
-    for ((child_index = 0; child_index < ${#process_pids[@]}; child_index++)); do
-      if [[ "${process_parents[child_index]}" == "$parent" ]]; then
-        child=${process_pids[child_index]}
-        seen=0
-        for parent in "${TEST_TREE_PIDS[@]}"; do
-          [[ "$parent" != "$child" ]] || seen=1
-        done
-        ((seen)) || TEST_TREE_PIDS+=("$child")
-      fi
+  for ((index = 0; index < ${#CLEANUP_PIDS[@]}; index++)); do
+    recorded[${CLEANUP_PIDS[index]}]=${CLEANUP_PID_IDENTITIES[index]}
+  done
+  # Anchor an owned tree to start times from the same snapshot as its edges.
+  # A reused PID cannot authorize traversing the process that replaced it.
+  for pid in "$@"; do
+    if [[ -n "${recorded[$pid]-}" && "${recorded[$pid]}" == "${identities[$pid]-}" ]]; then
+      tree_pids+=("$pid")
+      selected[$pid]=1
+    fi
+  done
+  for ((index = 0; index < ${#tree_pids[@]}; index++)); do
+    parent=${tree_pids[index]}
+    for child in "${process_pids[@]}"; do
+      [[ "${parents[$child]}" == "$parent" && -z "${selected[$child]-}" ]] || continue
+      [[ "${recorded[$child]-${identities[$child]}}" == "${identities[$child]}" ]] || continue
+      tree_pids+=("$child")
+      selected[$child]=1
     done
   done
   # Registration order is arbitrary; derive a parent-before-child signal order
   # from the same process snapshot used to discover descendants.
-  while ((${#ordered_pids[@]} < ${#TEST_TREE_PIDS[@]})); do
+  while ((${#ordered_pids[@]} < ${#tree_pids[@]})); do
     progress=0
-    for child in "${TEST_TREE_PIDS[@]}"; do
-      seen=0
-      for parent in "${ordered_pids[@]+"${ordered_pids[@]}"}"; do
-        [[ "$parent" != "$child" ]] || seen=1
-      done
-      ((seen == 0)) || continue
-      parent=""
-      for ((index = 0; index < ${#process_pids[@]}; index++)); do
-        if [[ "${process_pids[index]}" == "$child" ]]; then
-          parent=${process_parents[index]}
-          break
-        fi
-      done
-      parent_in_tree=0
-      parent_ordered=0
-      for ((index = 0; index < ${#TEST_TREE_PIDS[@]}; index++)); do
-        [[ "${TEST_TREE_PIDS[index]}" != "$parent" ]] || parent_in_tree=1
-      done
-      for ((index = 0; index < ${#ordered_pids[@]}; index++)); do
-        [[ "${ordered_pids[index]}" != "$parent" ]] || parent_ordered=1
-      done
-      if ((parent_in_tree == 0 || parent_ordered)); then
+    for child in "${tree_pids[@]}"; do
+      [[ -z "${ordered[$child]-}" ]] || continue
+      parent=${parents[$child]}
+      if [[ -z "${selected[$parent]-}" || -n "${ordered[$parent]-}" ]]; then
         ordered_pids+=("$child")
+        ordered_identities+=("${identities[$child]}")
+        ordered[$child]=1
         progress=1
       fi
     done
-    ((progress)) || return 1
+    if ((! progress)); then
+      printf 'test cleanup: could not order the process snapshot\n' >&2
+      return 1
+    fi
   done
-  TEST_TREE_PIDS=("${ordered_pids[@]}")
+  TEST_TREE_PIDS=("${ordered_pids[@]+"${ordered_pids[@]}"}")
+  TEST_TREE_IDENTITIES=("${ordered_identities[@]+"${ordered_identities[@]}"}")
+}
+
+_record_test_tree() {
+  local index child
+  for ((index = 0; index < ${#TEST_TREE_PIDS[@]}; index++)); do
+    child=${TEST_TREE_PIDS[index]}
+    _test_recorded_identity "$child" && continue
+    CLEANUP_PIDS+=("$child")
+    CLEANUP_PID_IDENTITIES+=("${TEST_TREE_IDENTITIES[index]}")
+  done
 }
 
 _track_test_tree() {
-  local child
-  _snapshot_test_forest "$1"
-  for child in "${TEST_TREE_PIDS[@]}"; do
-    _track_test_pid "$child" || true
-  done
+  _test_recorded_identity "$1" || _track_test_pid "$1" || return
+  _snapshot_test_forest "$1" || return
+  _record_test_tree
 }
 
 _test_pid_still_owned() {
@@ -383,14 +407,9 @@ _test_pid_still_live() {
 }
 
 _test_tracked_pid_still_live() {
-  local pid="$1" index
-  for ((index = 0; index < ${#CLEANUP_PIDS[@]}; index++)); do
-    if [[ "${CLEANUP_PIDS[index]}" == "$pid" ]]; then
-      _test_pid_still_live "$pid" "${CLEANUP_PID_IDENTITIES[index]}"
-      return
-    fi
-  done
-  return 1
+  local pid="$1" identity
+  _test_recorded_identity "$pid" identity || return
+  _test_pid_still_live "$pid" "$identity"
 }
 
 _wait_for_test_pid_exit() {
@@ -403,12 +422,14 @@ _wait_for_test_pid_exit() {
 }
 
 _cleanup_test_pids() {
-  local index attempt pid child any_live job_pid
+  local index attempt pid any_live job_pid snapshot_status=0
   _ingest_test_pid_ledger || return 1
-  _snapshot_test_forest "${CLEANUP_PIDS[@]+"${CLEANUP_PIDS[@]}"}"
-  for child in "${TEST_TREE_PIDS[@]+"${TEST_TREE_PIDS[@]}"}"; do
-    _track_test_pid "$child" || true
-  done
+  if _snapshot_test_forest "${CLEANUP_PIDS[@]+"${CLEANUP_PIDS[@]}"}"; then
+    _record_test_tree
+  else
+    # Keep recorded identities when no trustworthy tree was available.
+    snapshot_status=$?
+  fi
   # Stop parents first so a loop cannot replace an enumerated child.
   for pid in "${TEST_TREE_PIDS[@]+"${TEST_TREE_PIDS[@]}"}"; do
     _test_tracked_pid_still_live "$pid" || continue
@@ -438,27 +459,22 @@ _cleanup_test_pids() {
   done <"$TEST_PS_FILE"
   CLEANUP_PIDS=()
   CLEANUP_PID_IDENTITIES=()
+  return "$snapshot_status"
 }
 
 _terminate_test_tree() {
-  local root="$1" signal_name="${2:-TERM}" index pid identity cleanup_index
-  _snapshot_test_forest "$root"
-  for pid in "${TEST_TREE_PIDS[@]}"; do
-    _track_test_pid "$pid" || true
-  done
-  for ((index = 0; index < ${#TEST_TREE_PIDS[@]}; index++)); do
-    pid=${TEST_TREE_PIDS[index]}
-    identity=""
-    for ((cleanup_index = 0; cleanup_index < ${#CLEANUP_PIDS[@]}; cleanup_index++)); do
-      if [[ "${CLEANUP_PIDS[cleanup_index]}" == "$pid" ]]; then
-        identity=${CLEANUP_PID_IDENTITIES[cleanup_index]}
-        break
-      fi
-    done
-    [[ -n "$identity" ]] || continue
-    _test_pid_still_live "$pid" "$identity" || continue
+  local root="$1" signal_name="${2:-TERM}" pid snapshot_status=0
+  _test_recorded_identity "$root" || _track_test_pid "$root" || return
+  if _snapshot_test_forest "$root"; then
+    _record_test_tree
+  else
+    snapshot_status=$?
+  fi
+  for pid in "${TEST_TREE_PIDS[@]+"${TEST_TREE_PIDS[@]}"}"; do
+    _test_tracked_pid_still_live "$pid" || continue
     kill -s "$signal_name" "$pid" 2>/dev/null || true
   done
+  return "$snapshot_status"
 }
 
 _cleanup() {
@@ -484,10 +500,10 @@ _cleanup() {
   ((rc != 0 || cleanup_rc == 0)) || rc=1
   return "$rc"
 }
-trap _cleanup EXIT
-trap '_cleanup; exit 129' HUP
-trap '_cleanup; exit 130' INT
-trap '_cleanup; exit 143' TERM
+trap '_cleanup || exit "$?"' EXIT
+trap '_cleanup || :; exit 129' HUP
+trap '_cleanup || :; exit 130' INT
+trap '_cleanup || :; exit 143' TERM
 
 # ---------------------------------------------------------------------------
 # Common test setup

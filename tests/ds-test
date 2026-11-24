@@ -563,6 +563,98 @@ set -e
 _assert_exit "test cleanup: PID reuse replaces stale tracked lifetimes" \
   0 "$cleanup_reuse_rc"
 
+cleanup_snapshot_output=$(bash -c '
+  source "$1"
+  CLEANUP_PIDS=(101)
+  CLEANUP_PID_IDENTITIES=("Mon Jan 1 00:00:00 2026")
+  # The table deliberately lists a grandchild before its parent and has
+  # multiple children on both branches, plus a process outside the tree.
+  ps() {
+    [[ "$*" == "-axo pid=,ppid=,lstart=" ]] || return 1
+    local row
+    for row in "104 102" "101 1" "102 101" "103 101" "107 101" "105 103" "106 102" "201 200"; do
+      printf "%s Mon Jan 1 00:00:00 2026\n" "$row"
+    done
+  }
+  _snapshot_test_forest 101 || exit "$?"
+  printf "%s\n" "${TEST_TREE_PIDS[*]}"
+  CLEANUP_PIDS=()
+  CLEANUP_PID_IDENTITIES=()
+' bash "$SCRIPT_DIR/test-helpers.sh")
+_assert_eq "test cleanup: snapshot includes sibling branches and their children" \
+  '101 102 103 107 104 106 105' "$cleanup_snapshot_output"
+
+cleanup_snapshot_failure_dir=$(_tmpdir)
+cleanup_snapshot_failure_log=$cleanup_snapshot_failure_dir/signals
+cleanup_snapshot_failure_output=$(bash -c '
+  source "$1"
+  signal_log=$2
+  CLEANUP_PIDS=(101 102)
+  CLEANUP_PID_IDENTITIES=("Mon Jan 1 00:00:00 2026" "stale identity")
+  ps() {
+    case "$1:$2" in
+      -axo:pid=,ppid=,lstart=) printf "%s\n" "103 101 Mon Jan 1 00:00:00 2026"; return 29 ;;
+      -o:lstart=) printf "%s\n" "Mon Jan 1 00:00:00 2026" ;;
+      -o:stat=)
+        if grep -Fqx -- "-TERM $4" "$signal_log" 2>/dev/null; then
+          printf "Z\n"
+        else
+          printf "S\n"
+        fi
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  kill() { printf "%s\n" "$*" >>"$signal_log"; }
+  result=0
+  _cleanup_test_pids || result=$?
+  printf "cleanup status: %s\n" "$result"
+' bash "$SCRIPT_DIR/test-helpers.sh" "$cleanup_snapshot_failure_log" 2>&1)
+_assert_contains "test cleanup: incomplete snapshot fails cleanup" \
+  'cleanup status: 1' "$cleanup_snapshot_failure_output"
+_assert_file_content "test cleanup: snapshot failure signals only the still-owned root" \
+  '-TERM 101' "$cleanup_snapshot_failure_log"
+
+cleanup_reused_root_dir=$(_tmpdir)
+cleanup_reused_root_log=$cleanup_reused_root_dir/signals
+# shellcheck disable=SC2016 # The child Bash expands its own fixture variables.
+cleanup_reused_root_output=$("$BASH" -u -c '
+  source "$1"
+  signal_log=$2
+  CLEANUP_PIDS=(101 102)
+  CLEANUP_PID_IDENTITIES=("Mon Jan 1 00:00:00 2026" "old identity")
+  ps() {
+    case "$1:$2" in
+      -axo:*)
+        printf "%s\n" "101 1 Mon Jan 1 00:00:00 2026" "102 1 Tue Jan 2 00:00:00 2026" \
+          "103 101 Wed Jan 3 00:00:00 2026" "104 102 Thu Jan 4 00:00:00 2026"
+        ;;
+      -o:lstart=)
+        case "$4" in
+          101) printf "%s\n" "Mon Jan 1 00:00:00 2026" ;;
+          102) printf "%s\n" "Tue Jan 2 00:00:00 2026" ;;
+          103) printf "%s\n" "Wed Jan 3 00:00:00 2026" ;;
+          104) printf "%s\n" "Thu Jan 4 00:00:00 2026" ;;
+        esac
+        ;;
+      -o:stat=)
+        if grep -Fqx -- "-TERM $4" "$signal_log" 2>/dev/null; then
+          printf "Z\n"
+        else
+          printf "S\n"
+        fi
+        ;;
+      *) return 1 ;;
+    esac
+  }
+  kill() { printf "%s\n" "$*" >>"$signal_log"; }
+  _terminate_test_tree 102 KILL || exit "$?"
+  _cleanup_test_pids
+' bash "$SCRIPT_DIR/test-helpers.sh" "$cleanup_reused_root_log" 2>&1)
+_assert_eq "test cleanup: reused-root cleanup completes" '' "$cleanup_reused_root_output"
+_assert_file_content "test cleanup: a reused PID and its descendants are not signaled" \
+  $'-TERM 101\n-TERM 103' "$cleanup_reused_root_log"
+
 # Prove invocation cleanup can terminate a tracked nested background tree
 # without signaling the process group shared with the test runner.
 cleanup_tree_dir=$(_tmpdir)
