@@ -1576,12 +1576,13 @@ printf '%s %s\n' "$tool" "$*" >>"$DS_TEST_INACTIVE_PROBE_CALLS"
 case "$tool" in
   ps) exec "$DS_TEST_REAL_PS" "$@" ;;
   od) exec "$DS_TEST_REAL_OD" "$@" ;;
-  mkdir) exec "$DS_TEST_REAL_MKDIR" "$@" ;;
+  mkdir | gnumkdir) exec "$DS_TEST_REAL_MKDIR" "$@" ;;
 esac
 exit 127
 MOCK
 chmod +x "$inactive_probe_bin/probe"
-for inactive_probe_tool in ps od mkdir; do
+# Record the ownership protocol regardless of which mkdir name ds resolves.
+for inactive_probe_tool in ps od mkdir gnumkdir; do
   ln -s probe "$inactive_probe_bin/$inactive_probe_tool"
 done
 DS_STATE_DIR="$inactive_probe_state"
