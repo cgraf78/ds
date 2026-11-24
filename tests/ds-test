@@ -1757,6 +1757,65 @@ _assert_eq "missing config: server empty" "" "$DS_UPTERM_HOST"
 _assert_eq "missing config: push empty" "" "$DS_UPTERM_PUSH"
 _assert_eq "missing config: share-ttl empty" "" "$DS_UPTERM_SHARE_TTL"
 
+_test_upterm_cancel_launch() {
+  local stage="$1" scratch token control launcher launcher_identity="" status=0 child
+  scratch=$(_tmpdir)
+  token=$(_upterm_snapshot_token)
+  control="$scratch/ds.upterm.control.$token"
+  mkdir "$control"
+  : >"$scratch/launch"
+  # shellcheck disable=SC2016 # The fixture's fresh Bash owns the trap and positional parameters.
+  BASH_ENV='' ENV='' bash -c '
+    source "$1"
+    stage=$2 token=$3 control=$4 gate=$5 owner=$BASHPID
+    if [[ "$stage" == monitor ]]; then
+      assignment="_UPTERM_MONITOR_CHILD=\$!"
+    else
+      assignment="_UPTERM_SUPERVISOR_MONITOR=\$!"
+    fi
+    interrupt_before_pid_assignment() {
+      local child
+      [[ "$BASHPID" == "$owner" && "$BASH_COMMAND" == "$assignment" ]] || return 0
+      trap - DEBUG
+      child=$!
+      LC_ALL=C ps -o lstart= -p "$child" >"$DS_TEST_PID_LEDGER/$child" || exit 3
+      printf "%s\n" "$child" >"$control/cancellation-child"
+      builtin kill -TERM "$owner"
+    }
+    set -T
+    trap interrupt_before_pid_assignment DEBUG
+    if [[ "$stage" == monitor ]]; then
+      _upterm_monitor_main "$token" "$control" /dev/null sleep 30
+    else
+      _upterm_supervisor_main "$token" "$control" "$gate" "$owner" unused sleep 30
+    fi
+  ' bash "$CONF_DIR/share-upterm.sh" "$stage" "$token" "$control" "$scratch/launch" \
+    >"$scratch/output" 2>&1 &
+  launcher=$!
+  if _test_pid_identity "$launcher" launcher_identity &&
+    ! _wait_for_test_pid_exit "$launcher" "$launcher_identity"; then
+    _fail "Upterm $stage: startup cancellation did not return"
+    _terminate_test_tree "$launcher" KILL
+  fi
+  wait "$launcher" || status=$?
+  _assert_exit "Upterm $stage: cancellation during launch preserves TERM status" 143 "$status"
+  if [[ -s "$control/cancellation-child" ]]; then
+    child=$(<"$control/cancellation-child")
+    _ingest_test_pid_ledger
+    if _test_tracked_pid_still_live "$child"; then
+      _fail "Upterm $stage: cancellation left its launched child running"
+      kill -KILL "$child" 2>/dev/null || true
+    else
+      _pass "Upterm $stage: cancellation stops its launched child"
+    fi
+  else
+    _fail "Upterm $stage: fixture did not reach the launch boundary: $(<"$scratch/output")"
+  fi
+}
+
+_test_upterm_cancel_launch monitor
+_test_upterm_cancel_launch supervisor
+
 # Host-key preflight must verify existing trust, never replace it with
 # unauthenticated ssh-keyscan output.
 echo ""
