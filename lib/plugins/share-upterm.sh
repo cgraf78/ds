@@ -1969,9 +1969,20 @@ _upterm_supervisor_write_status() {
   _upterm_write_token_state "$1" result "$2" "$3"
 }
 
+_upterm_cancel_on_signal() {
+  # Bash can dispatch a trap after the fork and before the assignment of $!.
+  # Finish publishing the child PID before the first signal takes ownership.
+  ((pending_status != 0)) || pending_status=$1
+  ((launching_child == 0)) || return 0
+  trap '' HUP INT TERM
+  "$2"
+  exit "$pending_status"
+}
+
 _upterm_monitor_main() {
   local token="$1" control_dir="$2" channel="$3" child_status=1
   local monitor_command="" monitor_pid="" read_status result="exited"
+  local launching_child=0 pending_status=0
   shift 3
   set +e
   umask 077
@@ -1981,15 +1992,20 @@ _upterm_monitor_main() {
   exec 4<"$channel" || return 1
   _UPTERM_JOBS_FILE="$control_dir/monitor.jobs"
   _UPTERM_MONITOR_CHILD=""
-  trap '_upterm_monitor_stop_child; exit 129' HUP
-  trap '_upterm_monitor_stop_child; exit 130' INT
-  trap '_upterm_monitor_stop_child; exit 143' TERM
+  trap '_upterm_cancel_on_signal 129 _upterm_monitor_stop_child' HUP
+  trap '_upterm_cancel_on_signal 130 _upterm_monitor_stop_child' INT
+  trap '_upterm_cancel_on_signal 143 _upterm_monitor_stop_child' TERM
   trap '_upterm_monitor_stop_child' EXIT
   _upterm_current_pid monitor_pid || return 1
   _upterm_write_pid_file "$control_dir/monitor" "$monitor_pid" "$token" || return 1
 
+  launching_child=1
   "$@" &
   _UPTERM_MONITOR_CHILD=$!
+  launching_child=0
+  if ((pending_status != 0)); then
+    _upterm_cancel_on_signal "$pending_status" _upterm_monitor_stop_child
+  fi
   exec 3<&-
   _upterm_supervisor_write_status "$control_dir/ready" "$token" ready || return 1
   while _upterm_direct_child_running "$_UPTERM_MONITOR_CHILD"; do
@@ -2022,10 +2038,15 @@ _upterm_monitor_main() {
 }
 
 _upterm_supervisor_stop_monitor() {
-  local write_status=0
+  local write_status=1
   [[ "${_UPTERM_SUPERVISOR_MONITOR:-}" =~ ^[0-9]+$ ]] || return 0
-  printf 'stop\n' >&4 2>/dev/null || write_status=$?
-  exec 4>&-
+  if ((${_UPTERM_SUPERVISOR_CHANNEL_OPEN:-0})); then
+    if printf 'stop\n' 2>/dev/null >&4; then write_status=0; fi
+    _UPTERM_SUPERVISOR_CHANNEL_OPEN=0
+    exec 4>&-
+  fi
+  # Before the FIFO handoff, the monitor may be blocked opening its reader.
+  # Signal the recorded direct child when no control message can reach it.
   if ((write_status != 0)) &&
     _upterm_direct_child_running "$_UPTERM_SUPERVISOR_MONITOR"; then
     kill -TERM "$_UPTERM_SUPERVISOR_MONITOR" 2>/dev/null || true
@@ -2037,6 +2058,7 @@ _upterm_supervisor_stop_monitor() {
 _upterm_supervisor_main() {
   local token="$1" control_dir="$2" gate="$3" parent_pid="$4"
   local parent_identity="$5" monitor_status=1 channel
+  local launching_child=0 pending_status=0
   shift 5
   set +e
   umask 077
@@ -2044,10 +2066,12 @@ _upterm_supervisor_main() {
     "$control_dir" == *.upterm.control."$token" &&
     -d "$control_dir" && ! -L "$control_dir" ]] || return 1
   _UPTERM_SUPERVISOR_MONITOR=""
+  # The EXIT trap can outlive this function's local scope.
+  _UPTERM_SUPERVISOR_CHANNEL_OPEN=0
   _UPTERM_JOBS_FILE="$control_dir/supervisor.jobs"
-  trap '_upterm_supervisor_stop_monitor; exit 129' HUP
-  trap '_upterm_supervisor_stop_monitor; exit 130' INT
-  trap '_upterm_supervisor_stop_monitor; exit 143' TERM
+  trap '_upterm_cancel_on_signal 129 _upterm_supervisor_stop_monitor' HUP
+  trap '_upterm_cancel_on_signal 130 _upterm_supervisor_stop_monitor' INT
+  trap '_upterm_cancel_on_signal 143 _upterm_supervisor_stop_monitor' TERM
   trap '_upterm_supervisor_stop_monitor' EXIT
   _upterm_supervisor_write_status \
     "$control_dir/waiting" "$token" waiting || return 1
@@ -2067,9 +2091,15 @@ _upterm_supervisor_main() {
     ! mkfifo "$channel" || ! chmod 600 "$channel"; then
     return 1
   fi
+  launching_child=1
   _upterm_monitor_main "$token" "$control_dir" "$channel" "$@" &
   _UPTERM_SUPERVISOR_MONITOR=$!
+  launching_child=0
+  if ((pending_status != 0)); then
+    _upterm_cancel_on_signal "$pending_status" _upterm_supervisor_stop_monitor
+  fi
   exec 4>"$channel" || return 1
+  _UPTERM_SUPERVISOR_CHANNEL_OPEN=1
   rm -f "$channel" || return 1
   exec 3<&-
   while _upterm_direct_child_running "$_UPTERM_SUPERVISOR_MONITOR"; do
@@ -2079,6 +2109,7 @@ _upterm_supervisor_main() {
     fi
     sleep 0.05
   done
+  _UPTERM_SUPERVISOR_CHANNEL_OPEN=0
   exec 4>&-
   wait "$_UPTERM_SUPERVISOR_MONITOR"
   monitor_status=$?
